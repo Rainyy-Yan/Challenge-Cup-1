@@ -110,7 +110,8 @@ class TestReviewEngine(unittest.TestCase):
 
     def test_engine_fails_closed_for_raw_empty_and_cross_run_context(self) -> None:
         from tools.qykw.review import ReviewEngine
-        for values in (({"priorities": []}, "raw"), ({"priorities": []}, {"candidates": []}, {"candidates": []}, {"conclusion": "x", "findings": [], "validation_notes": [], "limitations": [], "extra": 1})):
+        valid = review_candidate_value(candidate(), plan().chunks[0].chunk_id)
+        for values in (({"priorities": []}, "raw"), ({"priorities": []}, {"candidates": [valid]}, {"candidates": []}, {"conclusion": "x", "findings": [], "validation_notes": [], "limitations": [], "extra": 1})):
             with self.subTest(values=values):
                 result = ReviewEngine(RecordingProvider(list(values)), max_findings=20).review(run(), snapshot(), plan())
                 self.assertEqual(result.findings, ())
@@ -130,9 +131,9 @@ class TestReviewEngine(unittest.TestCase):
         from tools.qykw.review import ReviewEngine
         provider = RecordingProvider([
             {"priorities": []}, {"candidates": []}, {"candidates": []},
-            {"conclusion": "未发现", "findings": [], "validation_notes": [], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertEqual(len(provider.calls), 3)
         self.assertTrue(result.validation_notes)
         self.assertTrue(result.limitations)
 
@@ -144,7 +145,56 @@ class TestReviewEngine(unittest.TestCase):
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
         self.assertEqual(result.conclusion, "审查未完成")
         self.assertEqual(result.findings, ())
-        self.assertEqual(len(provider.calls), 1)
+
+    def test_wrong_lines_and_sides_never_call_validation(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        wrong = [review_candidate_value(candidate(line=1000 + index), plan().chunks[0].chunk_id) for index in range(99)]
+        wrong.append(review_candidate_value(candidate(side=DiffSide.LEFT), plan().chunks[0].chunk_id))
+        provider = RecordingProvider([{"priorities": []}, {"candidates": wrong}, {"candidates": []}])
+        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(result.findings, ())
+        self.assertIn("没有可验证", result.validation_notes[0])
+
+    def test_invalid_candidates_before_and_after_valid_only_send_valid_candidate(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        wrong_before = [review_candidate_value(candidate(line=1000 + index), plan().chunks[0].chunk_id) for index in range(49)]
+        valid = review_candidate_value(candidate(), plan().chunks[0].chunk_id)
+        wrong_after = [review_candidate_value(candidate(line=2000 + index), plan().chunks[0].chunk_id) for index in range(50)]
+        provider = RecordingProvider([
+            {"priorities": []}, {"candidates": wrong_before + [valid] + wrong_after}, {"candidates": []},
+            {"conclusion": "validated", "findings": [candidate_value(candidate())], "validation_notes": [], "limitations": []},
+        ])
+        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        validation_input = provider.calls[-1].payload["untrusted"]["candidates"]
+        self.assertEqual([item["line"] for item in validation_input], [3])
+        self.assertEqual([(item.path, item.line) for item in result.findings], [("src/a.py", 3)])
+
+    def test_duplicate_flood_is_deduped_before_validation(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        duplicate = review_candidate_value(candidate(), plan().chunks[0].chunk_id)
+        provider = RecordingProvider([
+            {"priorities": []}, {"candidates": [duplicate] * 100}, {"candidates": []},
+            {"conclusion": "validated", "findings": [candidate_value(candidate())], "validation_notes": [], "limitations": []},
+        ])
+        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertEqual(len(provider.calls[-1].payload["untrusted"]["candidates"]), 1)
+        self.assertEqual(len(result.findings), 1)
+
+    def test_validation_batch_ceiling_uses_stable_severity_and_risk_order(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        left = candidate(line=2, side=DiffSide.LEFT, failure_path="old behavior breaks retry")
+        p1 = candidate(path="src/b.py", line=9, severity=Severity.P1,
+            failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test")
+        provider = RecordingProvider([
+            {"priorities": []}, {"candidates": [review_candidate_value(candidate(), plan().chunks[0].chunk_id), review_candidate_value(left, plan().chunks[0].chunk_id)]},
+            {"candidates": [review_candidate_value(p1, plan().chunks[1].chunk_id)]},
+            {"conclusion": "validated", "findings": [candidate_value(p1)], "validation_notes": [], "limitations": []},
+        ])
+        result = ReviewEngine(provider, max_findings=1).review(run(), snapshot(), plan())
+        validation_input = provider.calls[-1].payload["untrusted"]["candidates"]
+        self.assertEqual([(item["path"], item["line"]) for item in validation_input], [("src/b.py", 9), ("src/a.py", 2)])
+        self.assertEqual([(item.path, item.line) for item in result.findings], [("src/b.py", 9)])
 
     def test_only_bound_deep_candidates_reach_validation_and_publication(self) -> None:
         from tools.qykw.review import ReviewEngine

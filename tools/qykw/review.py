@@ -17,6 +17,9 @@ _CANDIDATE_FIELDS = frozenset({"path", "line", "side", "severity", "failure_path
 _MAX_CANDIDATES = 100
 _MAX_TEXT = 2_000
 _MAX_FINDINGS = 100
+# Counterexample work is capped at two locally valid candidates per final slot.
+# This admits alternatives for validation without permitting unbounded provider work.
+_VALIDATION_BATCH_MULTIPLIER = 2
 _SEVERITY_ORDER = {Severity.P0: 0, Severity.P1: 1, Severity.P2: 2}
 
 
@@ -44,6 +47,15 @@ class ReviewEngine:
             candidates: list[_SourcedCandidate] = []
             for chunk in plan.chunks:
                 candidates.extend(self._review_candidates(build_review_request(run, chunk, plan=plan), chunk))
+            candidates = _prepare_validation_batch(candidates, plan, max_findings=self.max_findings)
+            if not candidates:
+                return ReviewResult(
+                    "审查完成",
+                    (),
+                    plan.coverage,
+                    ("没有可验证的本地候选。",),
+                    ("未执行 PR 代码。",),
+                )
             validation = self._validation(build_validation_request(
                 run,
                 tuple(item.candidate for item in candidates),
@@ -214,6 +226,40 @@ def _validation_intersection(candidates: Iterable[_SourcedCandidate], retained: 
 
 def _candidate_key(item: FindingCandidate) -> tuple[object, ...]:
     return (item.path, item.line, item.side, item.severity, item.failure_path, item.impact, item.evidence, item.suggestion, item.verification)
+
+
+def _prepare_validation_batch(
+    candidates: Iterable[_SourcedCandidate], plan: ContextPlan, *, max_findings: int
+) -> list[_SourcedCandidate]:
+    """Locally filter, semantic-dedupe, order, and cap counterexample work."""
+    unique: dict[tuple[str, int, DiffSide, str, str], _SourcedCandidate] = {}
+    for sourced in candidates:
+        candidate = sourced.candidate
+        if not _supported(candidate, plan.commentable_lines):
+            continue
+        key = (
+            candidate.path,
+            candidate.line,
+            candidate.side,
+            _normalized(candidate.failure_path),
+            _normalized(candidate.evidence),
+        )
+        unique.setdefault(key, sourced)
+    path_order = {path: index for index, path in enumerate(plan.manifest.risk_order)}
+    ordered = sorted(
+        unique.values(),
+        key=lambda item: (
+            _SEVERITY_ORDER[item.candidate.severity],
+            path_order.get(item.candidate.path, len(path_order)),
+            item.candidate.path,
+            item.candidate.line,
+            item.candidate.side.value,
+            _normalized(item.candidate.failure_path),
+            _normalized(item.candidate.evidence),
+        ),
+    )
+    limit = min(_MAX_CANDIDATES, max_findings * _VALIDATION_BATCH_MULTIPLIER)
+    return ordered[:limit]
 
 
 def _supported(candidate: FindingCandidate, lines: frozenset[ChangedLine]) -> bool:
