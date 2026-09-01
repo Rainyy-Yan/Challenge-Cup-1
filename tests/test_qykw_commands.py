@@ -82,6 +82,43 @@ class TestCommandParsing(unittest.TestCase):
             CommandRequest(CommandName.ANALYZE, "修复 QY-01", CommandMode.READ_ONLY),
         )
 
+    def test_shorter_fence_does_not_close_a_longer_fenced_block(self) -> None:
+        for body in (
+            "````text\n```\n@qykw 修复 QY-1",
+            "~~~~text\n~~~\n@qykw 修复 QY-1",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(parse_command(body))
+
+    def test_equal_or_longer_fence_closes_a_fenced_block(self) -> None:
+        expected = CommandRequest(CommandName.FIX, "QY-1", CommandMode.CHANGE)
+        for body in (
+            "````text\n````\n@qykw 修复 QY-1",
+            "~~~~text\n~~~~~\n@qykw 修复 QY-1",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(parse_command(body), expected)
+
+    def test_lazy_blockquote_continuation_remains_quoted_until_a_blank_line(self) -> None:
+        self.assertIsNone(parse_command("> quoted context\n@qykw 修复 QY-2"))
+        self.assertEqual(
+            parse_command("> quoted context\n\n@qykw 修复 QY-2"),
+            CommandRequest(CommandName.FIX, "QY-2", CommandMode.CHANGE),
+        )
+
+    def test_format_controls_on_either_mention_boundary_do_not_trigger(self) -> None:
+        for body in (
+            "mail\u200e@qykw 修复 QY-3",
+            "@qykw\u200f 修复 QY-3",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(parse_command(body))
+
+        self.assertEqual(
+            parse_command("@qykw 修复 QY-3"),
+            CommandRequest(CommandName.FIX, "QY-3", CommandMode.CHANGE),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

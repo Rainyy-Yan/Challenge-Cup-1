@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 import re
+import unicodedata
 
 from tools.qykw.domain import CommandMode, CommandName, CommandRequest, CommandRoute
 
@@ -12,6 +13,7 @@ from tools.qykw.domain import CommandMode, CommandName, CommandRequest, CommandR
 _COMMANDS = {command.value: command for command in CommandName}
 _CHANGE_COMMANDS = frozenset({CommandName.FIX, CommandName.IMPLEMENT})
 _FENCE_START = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE = re.compile(r"^ {0,3}(`+|~+)[ \t]*$")
 _INLINE_CODE = re.compile(r"`+[^`]*`+")
 _ZERO_WIDTH = "\u200b-\u200d\u2060\ufeff"
 _ACCOUNT_LEFT = rf"A-Za-z0-9_.+\-{_ZERO_WIDTH}"
@@ -51,7 +53,7 @@ def parse_command(body: str, bot_login: str = "qykw") -> CommandRequest | None:
     if not paragraph:
         return None
 
-    mention = _mention_pattern(bot_login).search(paragraph)
+    mention = _first_safe_mention(paragraph, bot_login)
     if mention is None:
         return None
     content = paragraph[mention.end() :].strip()
@@ -71,22 +73,29 @@ def parse_command(body: str, bot_login: str = "qykw") -> CommandRequest | None:
 def _first_effective_paragraph(body: str) -> str:
     visible = _remove_html_comments(body)
     lines: list[str] = []
-    in_fence: str | None = None
+    in_fence: tuple[str, int] | None = None
+    in_blockquote = False
 
     for raw_line in visible.splitlines():
+        if in_fence is not None:
+            if _closes_fence(raw_line, in_fence):
+                in_fence = None
+            continue
+        if not raw_line.strip():
+            in_blockquote = False
+            if lines:
+                return "\n".join(lines)
+            continue
+        if _is_blockquote(raw_line):
+            in_blockquote = True
+            continue
+        if in_blockquote:
+            continue
+
         fence = _FENCE_START.match(raw_line)
         if fence is not None:
             marker = fence.group(1)
-            if in_fence is None:
-                in_fence = marker[0]
-            elif marker[0] == in_fence:
-                in_fence = None
-            continue
-        if in_fence is not None or _is_blockquote(raw_line):
-            continue
-        if not raw_line.strip():
-            if lines:
-                return "\n".join(lines)
+            in_fence = (marker[0], len(marker))
             continue
 
         text = _INLINE_CODE.sub("", raw_line).strip()
@@ -102,6 +111,27 @@ def _remove_html_comments(body: str) -> str:
 
 def _is_blockquote(line: str) -> bool:
     return bool(re.match(r"^\s{0,3}>", line))
+
+
+def _closes_fence(line: str, opener: tuple[str, int]) -> bool:
+    closing = _FENCE_CLOSE.match(line)
+    if closing is None:
+        return False
+    marker = closing.group(1)
+    return marker[0] == opener[0] and len(marker) >= opener[1]
+
+
+def _first_safe_mention(paragraph: str, bot_login: str) -> re.Match[str] | None:
+    for mention in _mention_pattern(bot_login).finditer(paragraph):
+        if not _has_adjacent_format_control(paragraph, mention):
+            return mention
+    return None
+
+
+def _has_adjacent_format_control(text: str, mention: re.Match[str]) -> bool:
+    before = text[mention.start() - 1 : mention.start()]
+    after = text[mention.end() : mention.end() + 1]
+    return any(unicodedata.category(character) == "Cf" for character in before + after)
 
 
 def _mention_pattern(bot_login: str) -> re.Pattern[str]:
