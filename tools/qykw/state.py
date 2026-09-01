@@ -7,11 +7,13 @@ separate append-only marker so a delayed status save cannot undo a stop.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import logging
 import re
+import threading
 from typing import Protocol
 
 from tools.qykw.domain import (
@@ -31,6 +33,8 @@ _CANCEL_PATTERN = re.compile(r"<!--\s*qykw-cancel:v1\s+(\{[^<>]{1,4000}\})\s*-->
 _TIME_PATTERN = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$")
 _STAGE_ORDER = {stage: index for index, stage in enumerate(RunStage)}
 _TERMINAL = frozenset({RunStatus.COMPLETED, RunStatus.PARTIAL, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.STALE})
+_CREATE_LOCKS_GUARD = threading.Lock()
+_CREATE_LOCKS: dict[tuple[str, int], tuple[threading.Lock, int]] = {}
 
 
 class RunStateStore(Protocol):
@@ -51,7 +55,8 @@ def _utc_now() -> str:
 
 
 def _compact_json(value: Mapping[str, object]) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return encoded.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
 def render_state_marker(record: RunRecord) -> str:
@@ -98,12 +103,18 @@ class GitHubCommentStateStore:
     def create(self, record: RunRecord) -> bool:
         _validate_record(record)
         self._assert_repository(record.context.repository)
-        if self.find_by_idempotency_key(record.context.pr_number, record.context.idempotency_key) is not None:
-            return False
-        body = _state_body(record)
-        self.gateway.create_issue_comment(record.context.pr_number, body)
-        self._safe_log("state_created", record.context.pr_number)
-        return True
+        key = (self._repository or record.context.repository, record.context.pr_number)
+        with _create_critical_section(key):
+            # GitHub workflow FIFO remains the cross-process serialization
+            # boundary.  This bounded registry closes only same-process races.
+            if self.find_by_idempotency_key(record.context.pr_number, record.context.idempotency_key) is not None:
+                return False
+            self.gateway.create_issue_comment(record.context.pr_number, _state_body(record))
+            claimed = self.find_by_idempotency_key(record.context.pr_number, record.context.idempotency_key)
+            if claimed is None:
+                raise RuntimeError("state_claim_unconfirmed")
+            self._safe_log("state_created", record.context.pr_number)
+            return claimed.context == record.context and claimed.prompt_version == record.prompt_version
 
     def save(self, record: RunRecord) -> None:
         _validate_record(record)
@@ -187,6 +198,25 @@ class GitHubCommentStateStore:
 
 def _state_body(record: RunRecord) -> str:
     return "qykw 运行状态已更新。\n\n" + render_state_marker(record)
+
+
+@contextmanager
+def _create_critical_section(key: tuple[str, int]):
+    """Serialize one process without retaining idle lock entries indefinitely."""
+    with _CREATE_LOCKS_GUARD:
+        lock, users = _CREATE_LOCKS.get(key, (threading.Lock(), 0))
+        _CREATE_LOCKS[key] = (lock, users + 1)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _CREATE_LOCKS_GUARD:
+            current, users = _CREATE_LOCKS[key]
+            if users == 1:
+                del _CREATE_LOCKS[key]
+            else:
+                _CREATE_LOCKS[key] = (current, users - 1)
 
 
 def _cancel_body(record: CancelRecord) -> str:

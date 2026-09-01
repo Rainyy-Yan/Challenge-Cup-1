@@ -14,6 +14,7 @@ from tools.qykw.domain import (
     RunContext, RunRecord, RunStatus, Severity, TriggerRef,
 )
 from tools.qykw.github import GitHubGateway
+from tools.qykw.state import render_state_marker
 
 if TYPE_CHECKING:
     from tools.qykw.state import RunStateStore
@@ -23,10 +24,12 @@ _MAX_FINDINGS = 20
 _MAX_PUBLIC_TEXT = 900
 _FINGERPRINT_PATTERN = re.compile(r"<!--\s*qykw-fingerprint:v1\s+(\{[^<>]{1,2048}\})\s*-->")
 _HTML = re.compile(r"<[^>]{0,512}>")
-_IMAGE = re.compile(r"!?\[[^\]]{0,512}\]\([^)]{0,2048}\)")
+_AUTOLINK = re.compile(r"<\s*(?:https?|mailto):[^>]{0,2048}>", re.IGNORECASE)
+_IMAGE = re.compile(r"!\[([^\]]{0,512})\]\([^)]{0,2048}\)")
 _LINK = re.compile(r"\[([^\]]{0,512})\]\([^)]{0,2048}\)")
-_URL = re.compile(r"(?:https?|ftp)://[^\s<>]{1,2048}", re.IGNORECASE)
+_URL = re.compile(r"(?:https?|mailto):[^\s<>]{1,2048}|\bwww\.[^\s<>]{1,2048}|https?%3a[^\s<>]{1,2048}", re.IGNORECASE)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_MARKDOWN = re.compile(r"([\\`*_{}\[\]<>#+|])")
 _SEVERITY_ORDER = {Severity.P0: 0, Severity.P1: 1, Severity.P2: 2}
 
 
@@ -34,7 +37,9 @@ def render_fingerprint_marker(run: RunContext, finding: Finding) -> str:
     payload = {"version": 1, "kind": "fingerprint", "head_sha": run.source_head_sha,
         "path": finding.path, "line": finding.line, "side": finding.side.value,
         "fingerprint": finding.fingerprint}
-    return "<!-- qykw-fingerprint:v1 " + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + " -->"
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = encoded.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return "<!-- qykw-fingerprint:v1 " + encoded + " -->"
 
 
 class ReviewPublisher:
@@ -60,7 +65,7 @@ class ReviewPublisher:
 
     def publish_status(self, record: RunRecord) -> None:
         comment_id = record.summary_comment_id or self._state_comment_id(record.context)
-        body = f"qykw 运行状态：{record.status.value}；阶段：{record.stage.value}。"
+        body = f"qykw 运行状态：{record.status.value}；阶段：{record.stage.value}。\n\n{render_state_marker(record)}"
         if comment_id is None:
             self.gateway.create_issue_comment(record.context.pr_number, body)
         else:
@@ -68,9 +73,13 @@ class ReviewPublisher:
         self._safe_log("status_published", record.context.pr_number)
 
     def publish_review(self, run: RunContext, result: ReviewResult) -> PublishResult:
+        current = self._current_record(run)
         summary = _summary_body(result)
+        if current is None:
+            self._safe_log("summary_state_unavailable", run.pr_number)
+            return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("state_unavailable",))
         try:
-            summary_id = self._publish_summary(run, summary)
+            summary_id = self._publish_summary(current, summary)
         except Exception:
             self._safe_log("summary_publish_failed", run.pr_number)
             return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("summary_publish_failed",))
@@ -87,36 +96,27 @@ class ReviewPublisher:
         except Exception:
             return self._publish_individually(run, summary_id, summary, pending)
 
-    def _publish_summary(self, run: RunContext, body: str) -> int:
-        comment_id = self._state_comment_id(run)
-        public_body = self._summary_with_state_marker(run, body)
+    def _publish_summary(self, record: RunRecord, body: str) -> int:
+        comment_id = record.summary_comment_id
         if comment_id is None:
-            return self.gateway.create_issue_comment(run.pr_number, public_body)
+            raise ValueError("state_comment_unavailable")
+        public_body = body + "\n\n" + render_state_marker(record)
         self.gateway.update_issue_comment(comment_id, public_body)
         return comment_id
 
-    def _summary_with_state_marker(self, run: RunContext, body: str) -> str:
+    def _current_record(self, run: RunContext) -> RunRecord | None:
         if self._state is None:
-            return body
+            return None
         stored = self._state.get(run.pr_number, run.run_id)
-        if stored is None:
-            return body
-        from tools.qykw.state import render_state_marker
-        return body + "\n\n" + render_state_marker(stored)
+        if stored is None or stored.context != run or stored.summary_comment_id is None:
+            return None
+        return stored
 
     def _state_comment_id(self, run: RunContext) -> int | None:
         if self._state is not None:
             stored = self._state.get(run.pr_number, run.run_id)
-            if stored is not None and stored.summary_comment_id is not None:
+            if stored is not None and stored.context == run and stored.summary_comment_id is not None:
                 return stored.summary_comment_id
-        comments = getattr(self.gateway, "list_issue_comments", None)
-        if callable(comments):
-            # Never guess from a generic bot reply or a cancel marker: only an
-            # existing state marker identifies a safe summary-update target.
-            own = [item for item in comments(run.pr_number)
-                   if item.author_login == _BOT_LOGIN and "<!-- qykw-state:" in item.body]
-            if own:
-                return max(own, key=lambda item: (item.updated_at, item.comment_id)).comment_id
         return None
 
     def _publish_individually(self, run: RunContext, summary_id: int, summary: str,
@@ -154,13 +154,42 @@ def _summary_body(result: ReviewResult) -> str:
         lines.extend(("", "### 已验证问题"))
         for item in _limited_sorted(result.findings, _MAX_FINDINGS):
             lines.append(f"- {item.severity.value} `{_safe_path(item.path)}`:{item.line}：{_safe_text(item.failure_path)}")
+    coverage = result.coverage
+    lines.extend(("", "### 覆盖情况"))
+    if _valid_coverage(coverage):
+        lines.extend((f"- 文件：{coverage.reviewed_files}/{coverage.total_files}",
+            f"- 变更块：{coverage.reviewed_hunks}/{coverage.total_hunks}",
+            f"- 覆盖说明：{'已完全覆盖' if coverage.explains_every_file else '未完全覆盖'}"))
+        _append_reasons(lines, "覆盖遗漏", coverage.omissions)
+    else:
+        lines.append("- 覆盖信息不可用")
     if result.validation_notes:
         lines.extend(("", "### 验证说明"))
         lines.extend(f"- {_safe_text(note)}" for note in result.validation_notes[:20])
     if result.limitations:
         lines.extend(("", "### 限制"))
-        lines.extend(f"- {_safe_text(note)}" for note in result.limitations[:20])
+        _append_reasons(lines, "限制", result.limitations)
     return "\n".join(lines)
+
+
+def _valid_coverage(coverage: object) -> bool:
+    return (hasattr(coverage, "total_files") and all(isinstance(value, int) and not isinstance(value, bool)
+        and 0 <= value <= 1_000_000 for value in (coverage.total_files, coverage.reviewed_files,
+        coverage.total_hunks, coverage.reviewed_hunks)) and coverage.reviewed_files <= coverage.total_files
+        and coverage.reviewed_hunks <= coverage.total_hunks and isinstance(coverage.explains_every_file, bool)
+        and isinstance(coverage.omissions, tuple))
+
+
+def _append_reasons(lines: list[str], label: str, values: object) -> None:
+    if not isinstance(values, tuple):
+        return
+    bounded = values[:20]
+    if not bounded:
+        return
+    count = min(len(values), 100)
+    suffix = "+" if len(values) > 100 else ""
+    lines.append(f"- {label}：{count}{suffix} 项")
+    lines.extend(f"  - {_safe_text(value)}" for value in bounded)
 
 
 def _inline(run: RunContext, finding: Finding) -> InlineComment:
@@ -222,13 +251,15 @@ def _valid_finding(item: Finding) -> bool:
 def _safe_text(value: object) -> str:
     if not isinstance(value, str):
         return "信息不可用"
-    text = html.unescape(value)
-    text = _IMAGE.sub("", text)
+    text = html.unescape(html.unescape(value))
+    text = _AUTOLINK.sub("", text)
+    text = _IMAGE.sub(r"\1", text)
     text = _LINK.sub(r"\1", text)
     text = _HTML.sub("", text)
     text = _URL.sub("", text)
     text = _CONTROL.sub(" ", text)
     text = " ".join(text.split()).replace("@", "＠")
+    text = _MARKDOWN.sub(r"\\\1", text)
     return text[:_MAX_PUBLIC_TEXT] or "信息不可用"
 
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
 import unittest
 
 from tools.qykw.domain import (
@@ -28,12 +31,15 @@ class FakeGateway:
         self.comments: list[IssueComment] = []
         self.writes: list[str] = []
         self.next_id = 1
+        self.create_delay = 0.0
 
     def list_issue_comments(self, pr_number: int) -> tuple[IssueComment, ...]:
         self.last_pr = pr_number
         return tuple(self.comments)
 
     def create_issue_comment(self, pr_number: int, body: str) -> int:
+        if self.create_delay:
+            time.sleep(self.create_delay)
         comment_id = self.next_id
         self.next_id += 1
         self.comments.append(IssueComment(comment_id, "qykw", body, "2026-09-02T00:00:00Z"))
@@ -124,6 +130,29 @@ class TestGitHubCommentStateStore(unittest.TestCase):
         ]
         self.assertTrue(self.store.is_cancel_requested(53, "run-1"))
         self.assertFalse(self.store.is_cancel_requested(53, "other"))
+
+    def test_same_process_concurrent_create_claims_one_comment(self) -> None:
+        self.gateway.create_delay = 0.05
+        first = GitHubCommentStateStore(self.gateway, repository="owner/repo")
+        second = GitHubCommentStateStore(self.gateway, repository="owner/repo")
+        barrier = threading.Barrier(2)
+
+        def create(store: GitHubCommentStateStore) -> bool:
+            barrier.wait()
+            return store.create(record())
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(create, (first, second)))
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(len(self.gateway.comments), 1)
+        self.assertEqual(self.gateway.writes, ["create"])
+
+    def test_state_marker_escapes_user_controlled_html_delimiters(self) -> None:
+        unsafe = replace(record(), context=replace(context(), command=CommandRequest(
+            CommandName.REVIEW, "</script><!-- @user", CommandMode.READ_ONLY)))
+        marker = render_state_marker(unsafe)
+        self.assertNotIn("</script>", marker)
+        self.assertIn("\\u003c", marker)
 
 
 if __name__ == "__main__":
