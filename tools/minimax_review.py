@@ -6,8 +6,12 @@ import hashlib
 import json
 import os
 import re
+import socket
+import ssl
 import sys
+import time
 from dataclasses import dataclass
+from http.client import IncompleteRead, RemoteDisconnected
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,7 +24,11 @@ DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 MAX_DIFF_CHARS = 60_000
 MAX_REVIEW_REQUEST_CHARS = 4_000
-MAX_OUTPUT_TOKENS = 16_384
+MAX_OUTPUT_TOKENS = 32_768
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 90
+MINIMAX_REQUEST_TIMEOUT_SECONDS = 240
+MINIMAX_NETWORK_RETRIES = 1
+FAST_FAILURE_RETRY_WINDOW_SECONDS = 15
 
 
 class ReviewError(RuntimeError):
@@ -458,7 +466,8 @@ def _request(
     token: str,
     payload: dict[str, Any] | None = None,
     accept: str = "application/vnd.github+json",
-    timeout: int = 90,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    retries: int = 0,
 ) -> bytes:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
@@ -470,13 +479,55 @@ def _request(
     if "api.github.com" in url:
         headers["X-GitHub-Api-Version"] = "2022-11-28"
     request = Request(url, data=body, headers=headers, method=method)
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return response.read()
-    except HTTPError as exc:
-        raise _safe_http_error(exc) from exc
-    except (URLError, TimeoutError) as exc:
-        raise ReviewError("Remote API request failed due to a network error") from exc
+    for attempt in range(retries + 1):
+        attempt_started_at = time.monotonic()
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except HTTPError as exc:
+            raise _safe_http_error(exc) from exc
+        except (
+            URLError,
+            TimeoutError,
+            socket.gaierror,
+            ssl.SSLError,
+            ConnectionError,
+            IncompleteRead,
+            RemoteDisconnected,
+        ) as exc:
+            error, retryable = _classify_network_error(exc, timeout=timeout)
+            elapsed = time.monotonic() - attempt_started_at
+            if (
+                retryable
+                and attempt < retries
+                and elapsed <= FAST_FAILURE_RETRY_WINDOW_SECONDS
+            ):
+                continue
+            raise error from exc
+    raise AssertionError("request retry loop exited unexpectedly")
+
+
+def _classify_network_error(
+    error: BaseException,
+    *,
+    timeout: int,
+) -> tuple[ReviewError, bool]:
+    reason = error.reason if isinstance(error, URLError) else error
+    if isinstance(reason, TimeoutError):
+        return ReviewError(
+            f"Remote API read timed out after {timeout} seconds"
+        ), False
+    if isinstance(reason, socket.gaierror):
+        return ReviewError("Remote API DNS resolution failed"), True
+    if isinstance(reason, ssl.SSLError):
+        retryable = not isinstance(reason, ssl.SSLCertVerificationError)
+        return ReviewError("Remote API TLS handshake failed"), retryable
+    if isinstance(
+        reason,
+        (ConnectionError, IncompleteRead, RemoteDisconnected),
+    ):
+        return ReviewError("Remote API connection was interrupted"), True
+    return ReviewError("Remote API connection failed"), True
 
 
 def _request_json(
@@ -485,8 +536,17 @@ def _request_json(
     method: str,
     token: str,
     payload: dict[str, Any] | None = None,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    retries: int = 0,
 ) -> Any:
-    raw = _request(url, method=method, token=token, payload=payload)
+    raw = _request(
+        url,
+        method=method,
+        token=token,
+        payload=payload,
+        timeout=timeout,
+        retries=retries,
+    )
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -601,6 +661,8 @@ def review_pull_request(config: ReviewConfig) -> str:
             method="POST",
             token=config.minimax_api_key,
             payload=payload,
+            timeout=MINIMAX_REQUEST_TIMEOUT_SECONDS,
+            retries=MINIMAX_NETWORK_RETRIES,
         )
         if not isinstance(response, dict):
             raise ReviewError("MiniMax returned invalid JSON")
