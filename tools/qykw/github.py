@@ -48,9 +48,7 @@ class GitHubGateway(Protocol):
 
     def get_pull_ref(self, pr_number: int) -> PullRef: ...
 
-    def get_pull_snapshot(
-        self, pr_number: int, *, run: RunContext | None = None
-    ) -> PullSnapshot: ...
+    def get_pull_snapshot(self, pr_number: int, *, run: RunContext) -> PullSnapshot: ...
 
     def get_head_sha(self, pr_number: int) -> str: ...
 
@@ -74,7 +72,9 @@ class GitHubGateway(Protocol):
 
     def list_check_runs(self, head_sha: str) -> tuple[CheckRun, ...]: ...
 
-    def get_file_at_ref(self, path: str, ref: str) -> RepositoryFile | None: ...
+    def get_file_for_run(
+        self, run: RunContext, path: str, side: DiffSide
+    ) -> RepositoryFile | None: ...
 
     def get_default_branch_rules(self) -> tuple[RepositoryFile, ...]: ...
 
@@ -98,6 +98,13 @@ _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9.
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_PAGES = 1000
 _TRUSTED_RULE_PATHS = ("AGENTS.md", ".github/qykw.toml")
+
+
+@dataclass(frozen=True)
+class GitHubPullSnapshot(PullSnapshot):
+    """A fixed snapshot with immutable collection omissions for context coverage."""
+
+    omissions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, repr=False)
@@ -126,22 +133,26 @@ class HttpGitHubGateway:
         payload = self._read_json(self._repo_path(f"pulls/{_pr_number(pr_number)}"))
         return self._parse_pull_ref(payload, pr_number)
 
-    def get_pull_snapshot(
-        self, pr_number: int, *, run: RunContext | None = None
-    ) -> PullSnapshot:
+    def get_pull_snapshot(self, pr_number: int, *, run: RunContext) -> PullSnapshot:
+        if not isinstance(run, RunContext):
+            raise GitHubError("invalid_run_context")
         pull_payload = self._read_json(self._repo_path(f"pulls/{_pr_number(pr_number)}"))
         pull_ref = self._parse_pull_ref(pull_payload, pr_number)
-        if run is not None:
-            self._assert_run_matches(run, pull_ref)
+        self._assert_run_matches(run, pull_ref)
         changed = self._list_changed_file_payloads(pr_number)
-        enriched, omissions = self._enrich_changed_files(changed, pull_ref)
+        base_tree, base_tree_omissions = self._get_tree(
+            pull_ref.target_repository, pull_ref.target_base_sha, "base"
+        )
+        head_tree, head_tree_omissions = self._get_tree(
+            pull_ref.source_repository, pull_ref.source_head_sha, "head"
+        )
+        enriched, omissions = self._enrich_changed_files(
+            changed, pull_ref, base_tree, head_tree
+        )
         checks = self.list_check_runs(pull_ref.source_head_sha)
-        rules = self.get_default_branch_rules()
-        # Kept private because coverage belongs to context.py; omission text is
-        # nevertheless explicit and retained for the current fixed snapshot.
-        object.__setattr__(self, "_last_snapshot_omissions", tuple(omissions))
+        rules, rule_omissions = self._get_default_branch_rules_with_omissions()
         payload = _mapping(pull_payload, "invalid_pull")
-        return PullSnapshot(
+        return GitHubPullSnapshot(
             number=pull_ref.number,
             state=pull_ref.state,
             draft=pull_ref.draft,
@@ -156,6 +167,7 @@ class HttpGitHubGateway:
             trusted_rules=rules,
             related_files=(),
             checks=checks,
+            omissions=tuple(base_tree_omissions + head_tree_omissions + omissions + rule_omissions),
         )
 
     def get_head_sha(self, pr_number: int) -> str:
@@ -253,11 +265,33 @@ class HttpGitHubGateway:
             for item in payloads
         )
 
-    def get_file_at_ref(self, path: str, ref: str) -> RepositoryFile | None:
-        return self._get_file_at_ref(path, ref, repository=self.repository, purpose="related")
+    def get_file_for_run(
+        self, run: RunContext, path: str, side: DiffSide
+    ) -> RepositoryFile | None:
+        if not isinstance(run, RunContext):
+            raise GitHubError("invalid_run_context")
+        path = _safe_path(path)
+        pull_ref = self.get_pull_ref(run.pr_number)
+        self._assert_run_matches(run, pull_ref)
+        if side is DiffSide.LEFT:
+            return self._get_file_at_ref(
+                path, pull_ref.target_base_sha, repository=pull_ref.target_repository, purpose="base"
+            )
+        if side is DiffSide.RIGHT:
+            return self._get_file_at_ref(
+                path, pull_ref.source_head_sha, repository=pull_ref.source_repository, purpose="head"
+            )
+        raise GitHubError("invalid_diff_side")
 
     def get_default_branch_rules(self) -> tuple[RepositoryFile, ...]:
+        rules, _ = self._get_default_branch_rules_with_omissions()
+        return rules
+
+    def _get_default_branch_rules_with_omissions(
+        self,
+    ) -> tuple[tuple[RepositoryFile, ...], list[str]]:
         rules: list[RepositoryFile] = []
+        omissions: list[str] = []
         for path in _TRUSTED_RULE_PATHS:
             file = self._get_file_at_ref(
                 path,
@@ -267,7 +301,9 @@ class HttpGitHubGateway:
             )
             if file is not None:
                 rules.append(file)
-        return tuple(rules)
+            else:
+                omissions.append(f"trusted_rule_missing:{path}")
+        return tuple(rules), omissions
 
     def create_issue_comment(self, pr_number: int, body: str) -> int:
         self.assert_bot_identity()
@@ -294,7 +330,6 @@ class HttpGitHubGateway:
         body: str,
         comments: tuple[InlineComment, ...],
     ) -> int:
-        self.assert_bot_identity()
         _validate_ref(head_sha)
         serialized_comments = []
         for comment in comments:
@@ -306,6 +341,10 @@ class HttpGitHubGateway:
                     "body": _write_body(comment.body),
                 }
             )
+        current = self.get_pull_ref(pr_number)
+        if current.source_head_sha != head_sha:
+            raise GitHubError("stale_pull_ref")
+        self.assert_bot_identity()
         payload = self._write_json(
             "POST",
             self._repo_path(f"pulls/{_pr_number(pr_number)}/reviews"),
@@ -390,13 +429,19 @@ class HttpGitHubGateway:
         )
 
     def _enrich_changed_files(
-        self, payloads: tuple[Mapping[str, object], ...], pull_ref: PullRef
+        self,
+        payloads: tuple[Mapping[str, object], ...],
+        pull_ref: PullRef,
+        base_tree: Mapping[str, tuple[str, str]],
+        head_tree: Mapping[str, tuple[str, str]],
     ) -> tuple[list[ChangedFile], list[str]]:
         files: list[ChangedFile] = []
         omissions: list[str] = []
         for payload in payloads:
             file = self._changed_file(payload)
             base_path = file.previous_path or file.path
+            base_metadata = base_tree.get(base_path)
+            head_metadata = head_tree.get(file.path)
             base_file = None if file.status == "added" else self._get_file_at_ref(
                 base_path, pull_ref.target_base_sha, repository=pull_ref.target_repository, purpose="base"
             )
@@ -407,15 +452,19 @@ class HttpGitHubGateway:
                 omissions.append(f"base_content_missing:{base_path}")
             if file.status != "removed" and head_file is None:
                 omissions.append(f"head_content_missing:{file.path}")
+            if file.status != "added" and base_metadata is None:
+                omissions.append(f"base_mode_missing:{base_path}")
+            if file.status != "removed" and head_metadata is None:
+                omissions.append(f"head_mode_missing:{file.path}")
             files.append(
                 ChangedFile(
                     path=file.path,
                     previous_path=file.previous_path,
                     status=file.status,
-                    base_sha=base_file.sha if base_file else None,
-                    head_sha=head_file.sha if head_file else file.head_sha,
-                    base_mode=_optional_string(payload.get("base_mode"), "invalid_changed_file"),
-                    head_mode=_optional_string(payload.get("mode"), "invalid_changed_file"),
+                    base_sha=base_metadata[0] if base_metadata else (base_file.sha if base_file else None),
+                    head_sha=head_metadata[0] if head_metadata else (head_file.sha if head_file else file.head_sha),
+                    base_mode=base_metadata[1] if base_metadata else None,
+                    head_mode=head_metadata[1] if head_metadata else None,
                     base_content=base_file.content if base_file else None,
                     head_content=head_file.content if head_file else None,
                     patch=file.patch,
@@ -426,6 +475,37 @@ class HttpGitHubGateway:
                 )
             )
         return files, omissions
+
+    def _get_tree(
+        self, repository: str, ref: str, label: str
+    ) -> tuple[Mapping[str, tuple[str, str]], list[str]]:
+        _validate_repository(repository)
+        _validate_ref(ref)
+        payload = _mapping(
+            self._read_json(
+                self._repo_path(
+                    f"git/trees/{quote(ref, safe='')}?recursive=1", repository=repository
+                )
+            ),
+            "invalid_tree",
+        )
+        entries = payload.get("tree")
+        if not isinstance(entries, list):
+            raise GitHubError("invalid_tree")
+        tree: dict[str, tuple[str, str]] = {}
+        for entry in entries:
+            value = _mapping(entry, "invalid_tree")
+            if value.get("type") != "blob":
+                continue
+            path = _safe_path(_string(value.get("path"), "invalid_tree"))
+            if path in tree:
+                raise GitHubError("invalid_tree")
+            tree[path] = (
+                _string(value.get("sha"), "invalid_tree"),
+                _string(value.get("mode"), "invalid_tree"),
+            )
+        omissions = [f"{label}_tree_truncated"] if payload.get("truncated") is True else []
+        return tree, omissions
 
     def _get_file_at_ref(
         self, path: str, ref: str, *, repository: str, purpose: str
@@ -571,7 +651,9 @@ class HttpGitHubGateway:
         if len(parts) < 3 or parts[0] != self.repository.split("/")[0] or parts[1] != self.repository.split("/")[1]:
             # Source repositories are allowed only for contents reads created
             # internally from a PullRef; validate that they remain repo paths.
-            if len(parts) < 4 or parts[2] != "contents":
+            if len(parts) < 4 or parts[2] not in {"contents", "git"}:
+                raise GitHubError("unsafe_url")
+            if parts[2] == "git" and (len(parts) != 5 or parts[3] != "trees"):
                 raise GitHubError("unsafe_url")
             _validate_repository(f"{parts[0]}/{parts[1]}")
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
