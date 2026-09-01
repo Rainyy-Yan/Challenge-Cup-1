@@ -110,7 +110,7 @@ def decide_trigger(
 def make_run_id(pr_number: int, idempotency_key: str) -> str:
     """Create a stable public run identifier from a PR and idempotency key."""
 
-    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:8].upper()
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32].upper()
     return f"QY-PR{pr_number}-{digest}"
 
 
@@ -355,7 +355,13 @@ def _string(value: object, *, default: str | None = None) -> str:
 def _positive_int(value: object) -> int | None:
     if type(value) is int and value > 0:
         return value
-    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+    if (
+        isinstance(value, str)
+        and value
+        and value.isascii()
+        and value.isdecimal()
+        and int(value) > 0
+    ):
         return int(value)
     return None
 

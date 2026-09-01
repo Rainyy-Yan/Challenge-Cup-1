@@ -294,6 +294,24 @@ class TestCommentAndManualTriggers(unittest.TestCase):
         self.assertTrue(decision.run)
         self.assertEqual(decision.reason, "manual")
 
+    def test_manual_event_rejects_non_ascii_decimal_pr_numbers(self) -> None:
+        invalid_numbers = ("²", "１２", "٢٣", "+23", " 23", "23 ", "", "-23", "0")
+
+        for pr_number in invalid_numbers:
+            with self.subTest(pr_number=pr_number):
+                self.assertIsNone(
+                    normalize_event(
+                        "workflow_dispatch",
+                        {
+                            "inputs": {"pr_number": pr_number, "command": "审查"},
+                            "sender": {"login": "maintainer"},
+                        },
+                        repository_id=7,
+                        repository="owner/repository",
+                        workflow_run_id=812,
+                    )
+                )
+
 
 class TestTrustedPullBinding(unittest.TestCase):
     def test_build_run_context_uses_trusted_pull_ref_and_preserves_event(self) -> None:
@@ -343,11 +361,13 @@ class TestTrustedPullBinding(unittest.TestCase):
 
     def test_run_id_is_stable_and_scoped_by_pull_and_idempotency_key(self) -> None:
         first = make_run_id(23, "comment:7:issue:101")
+        sample = [make_run_id(23, f"comment:7:issue:{index}") for index in range(512)]
 
         self.assertEqual(first, make_run_id(23, "comment:7:issue:101"))
         self.assertNotEqual(first, make_run_id(24, "comment:7:issue:101"))
         self.assertNotEqual(first, make_run_id(23, "comment:7:issue:102"))
-        self.assertRegex(first, r"^QY-PR23-[0-9A-F]{8}$")
+        self.assertRegex(first, r"^QY-PR23-[0-9A-F]{32}$")
+        self.assertEqual(len(sample), len(set(sample)))
 
 
 if __name__ == "__main__":
