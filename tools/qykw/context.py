@@ -249,6 +249,8 @@ def build_context_plan(
     # Only the residual budget is prioritized by risk.  Every eligible path is
     # already explicitly triaged at this point.
     complete_records: set[tuple[str, int, int]] = set()
+    partial_records: dict[tuple[str, int], set[int]] = {}
+    unallocated_records: dict[tuple[str, int], set[int]] = {}
     expected_records: dict[tuple[str, int], set[int]] = {}
     for path, records in candidates.items():
         for record in records:
@@ -273,10 +275,14 @@ def build_context_plan(
                 key = (path, record.hunk_index, record.record_index)
                 if completed:
                     complete_records.add(key)
+                elif allocated:
+                    partial_records.setdefault((path, record.hunk_index), set()).add(record.record_index)
                 else:
-                    omissions.append(
-                        f"budget_truncated:{path}:hunk={record.hunk_index}:record={record.record_index}"
-                    )
+                    unallocated_records.setdefault((path, record.hunk_index), set()).add(record.record_index)
+
+    omissions.extend(
+        _truncation_summaries(manifest.risk_order, partial_records, unallocated_records)
+    )
 
     # Rules and related files are trusted/read-only context, never PR manifest
     # entries.  They are appended only after every PR file has been triaged.
@@ -647,6 +653,50 @@ def _risk_key(path: str) -> tuple[int, str]:
 
 def _run_id(snapshot: PullSnapshot) -> str:
     return f"{snapshot.target_repository}:{snapshot.number}:{snapshot.source_head_sha}"
+
+
+def _truncation_summaries(
+    risk_order: tuple[str, ...],
+    partial_records: dict[tuple[str, int], set[int]],
+    unallocated_records: dict[tuple[str, int], set[int]],
+) -> tuple[str, ...]:
+    """Summarize incomplete records once per hunk without line-count growth."""
+    summaries: list[str] = []
+    for path in risk_order:
+        hunk_indexes = sorted({
+            hunk_index
+            for candidate_path, hunk_index in partial_records.keys() | unallocated_records.keys()
+            if candidate_path == path
+        })
+        for hunk_index in hunk_indexes:
+            partial = partial_records.get((path, hunk_index), set())
+            if partial:
+                # Allocation consumes the shared budget monotonically, so this
+                # set can contain only the final partially emitted record.
+                summaries.append(
+                    f"budget_truncated_partial:{path}:hunk={hunk_index}:record={min(partial)}"
+                )
+            for start, end in _contiguous_ranges(unallocated_records.get((path, hunk_index), set())):
+                summaries.append(
+                    f"budget_truncated_unallocated:{path}:hunk={hunk_index}:records={start}-{end}"
+                )
+    return tuple(summaries)
+
+
+def _contiguous_ranges(record_indexes: set[int]) -> tuple[tuple[int, int], ...]:
+    if not record_indexes:
+        return ()
+    ordered = sorted(record_indexes)
+    ranges: list[tuple[int, int]] = []
+    start = end = ordered[0]
+    for value in ordered[1:]:
+        if value == end + 1:
+            end = value
+            continue
+        ranges.append((start, end))
+        start = end = value
+    ranges.append((start, end))
+    return tuple(ranges)
 
 
 def _deduplicate(items: Iterable[str]) -> tuple[str, ...]:

@@ -313,7 +313,40 @@ class TestContextPlanning(unittest.TestCase):
 
         self.assertEqual(plan.coverage.total_hunks, 1)
         self.assertEqual(plan.coverage.reviewed_hunks, 0)
-        self.assertTrue(any(item.startswith("budget_truncated:src/giant.py:hunk=0:record=") for item in plan.coverage.omissions))
+        self.assertTrue(any(item.startswith("budget_truncated_") and ":src/giant.py:hunk=0:" in item for item in plan.coverage.omissions))
+
+    def test_ten_thousand_record_truncation_has_bounded_exact_range_summary(self) -> None:
+        patch = "@@ -0,0 +1,10000 @@\n" + "".join(f"+line_{line:04}\n" for line in range(1, 10_001))
+        plan = build_context_plan(
+            snapshot(changed_file("src/huge.py", base_content="", head_content="x\n" * 10_000, patch=patch)),
+            **budget(repository_limit=500, backend_context_window=1_000, max_chunk_ratio=1.0),
+        )
+        truncations = tuple(item for item in plan.coverage.omissions if item.startswith("budget_truncated_"))
+
+        self.assertEqual(plan.coverage.reviewed_hunks, 0)
+        self.assertLessEqual(len(truncations), 2)
+        self.assertTrue(any(item.startswith("budget_truncated_unallocated:src/huge.py:hunk=0:records=") and item.endswith("-10000") for item in truncations))
+        self.assertLess(len("\n".join(plan.coverage.omissions)), 1_000)
+        self.assertTrue(all(chunk.estimated_tokens <= plan.max_chunk_tokens for chunk in plan.chunks))
+
+    def test_truncation_summaries_stay_distinct_and_deterministic_per_file_and_hunk(self) -> None:
+        first = changed_file(
+            "a.py", patch="@@ -1 +1 @@\n-old\n+new\n@@ -3 +3 @@\n-old\n+new\n",
+            base_content="old\nmid\nold\n", head_content="new\nmid\nnew\n",
+        )
+        second = changed_file(
+            "b.py", patch="@@ -1 +1 @@\n-old\n+new\n", base_content="old\n", head_content="new\n",
+        )
+        tight = budget(repository_limit=600, backend_context_window=1_000, max_chunk_ratio=1.0)
+        first_plan = build_context_plan(snapshot(first, second), **tight)
+        repeated_plan = build_context_plan(snapshot(first, second), **tight)
+        summaries = tuple(item for item in first_plan.coverage.omissions if item.startswith("budget_truncated_"))
+
+        self.assertEqual(summaries, tuple(item for item in repeated_plan.coverage.omissions if item.startswith("budget_truncated_")))
+        self.assertTrue(any(":a.py:hunk=0:" in item for item in summaries))
+        self.assertTrue(any(":a.py:hunk=1:" in item for item in summaries))
+        self.assertTrue(any(":b.py:hunk=0:" in item for item in summaries))
+        self.assertLessEqual(len(summaries), 4)
 
     def test_controller_run_ids_isolate_identical_snapshots_and_reject_unsafe_values(self) -> None:
         same_snapshot = snapshot(changed_file("same.py"))
