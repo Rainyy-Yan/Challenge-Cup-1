@@ -1,0 +1,97 @@
+%% ============================================================================
+%%  ctexshim.sty —— ctex 缺席时的兼容层
+%%
+%%  本文档沿用《蜡质相变俘获利用海洋温差能》书稿的排版体例，
+%%  该体例依赖 ctexcap 提供的中文字族命令、\zihao 字号命令与中文章节名。
+%%
+%%  但交付环境未必装有 texlive-lang-chinese。本宏包在检测到 ctex 缺席时，
+%%  用 fontspec 与 XeTeX 自带的 CJK 断行原语补齐这些接口，
+%%  使**同一份 main.tex 在两种环境下都能编译**，无需改稿。
+%%
+%%  装有 ctex 的机器上，main.tex 会直接加载 ctexcap，本文件不起作用。
+%%  两种路径下的正文、公式、表格、交叉引用、参考文献完全一致，
+%%  差别仅在标点压缩：ctex 会做全角标点挤压，本兼容层不做。
+%% ============================================================================
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{ctexshim}[2026/08/13 ctex compatibility shim]
+
+\RequirePackage{fontspec}
+\RequirePackage{xltxtra}
+
+%% ---- 中文断行 ----
+%% ctex 靠 xeCJK 处理，这里用 XeTeX 原语。这是 xeCJK 出现之前的标准做法。
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip = 0pt plus 1pt minus 0.1pt
+
+%% ---- 字族 ----
+%% 正文用宋体族（衬线），标题用黑体族（无衬线），与书稿体例一致。
+\setmainfont{Noto Serif CJK SC}[
+  BoldFont   = Noto Serif CJK SC Bold,
+  ItalicFont = Noto Serif CJK SC,   % 中文无斜体，回退正体，避免机器倾斜
+]
+\newfontfamily\heitifont{Noto Sans CJK SC}[BoldFont=Noto Sans CJK SC Bold]
+\newfontfamily\songtifont{Noto Serif CJK SC}
+\newfontfamily\fangsongfont{Noto Serif CJK SC}[ItalicFont=Noto Serif CJK SC]
+\newfontfamily\kaishufont{Noto Serif CJK SC}
+
+\providecommand{\heiti}{\heitifont}
+\providecommand{\songti}{\songtifont}
+\providecommand{\fangsong}{\fangsongfont}
+\providecommand{\kaishu}{\kaishufont}
+
+%% ---- 字号 ----
+%% 复刻 ctex 的 \zihao 命令。号数与磅值对照取自国标印刷字号。
+\newcommand{\zihao}[1]{%
+  \ifcase\numexpr\zihao@idx{#1}\relax
+    \fontsize{42}{50}\selectfont\or   % 初号
+    \fontsize{36}{43}\selectfont\or   % 小初
+    \fontsize{26}{32}\selectfont\or   % 一号
+    \fontsize{24}{29}\selectfont\or   % 小一
+    \fontsize{22}{27}\selectfont\or   % 二号
+    \fontsize{18}{22}\selectfont\or   % 小二
+    \fontsize{16}{20}\selectfont\or   % 三号
+    \fontsize{15}{19}\selectfont\or   % 小三
+    \fontsize{14}{18}\selectfont\or   % 四号
+    \fontsize{12}{16}\selectfont\or   % 小四
+    \fontsize{10.5}{14}\selectfont\or % 五号
+    \fontsize{9}{12}\selectfont\or    % 小五
+    \fontsize{7.5}{10}\selectfont\or  % 六号
+    \fontsize{6.5}{9}\selectfont      % 小六
+  \fi}
+\newcommand{\zihao@idx}[1]{%
+  \ifnum\pdfstrcmp{#1}{0}=0 0\else
+  \ifnum\pdfstrcmp{#1}{-0}=0 1\else
+  \ifnum\pdfstrcmp{#1}{1}=0 2\else
+  \ifnum\pdfstrcmp{#1}{-1}=0 3\else
+  \ifnum\pdfstrcmp{#1}{2}=0 4\else
+  \ifnum\pdfstrcmp{#1}{-2}=0 5\else
+  \ifnum\pdfstrcmp{#1}{3}=0 6\else
+  \ifnum\pdfstrcmp{#1}{-3}=0 7\else
+  \ifnum\pdfstrcmp{#1}{4}=0 8\else
+  \ifnum\pdfstrcmp{#1}{-4}=0 9\else
+  \ifnum\pdfstrcmp{#1}{5}=0 10\else
+  \ifnum\pdfstrcmp{#1}{-5}=0 11\else
+  \ifnum\pdfstrcmp{#1}{6}=0 12\else 13%
+  \fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi\fi}
+
+%% ---- 中文名称 ----
+%% 没有 ctex 就没人替你把 Chapter / Table / Contents 换成中文。
+\renewcommand{\contentsname}{目\hspace{1em}录}
+\renewcommand{\listfigurename}{插图目录}
+\renewcommand{\listtablename}{表格目录}
+\renewcommand{\bibname}{参考文献}
+\renewcommand{\indexname}{索\hspace{1em}引}
+\renewcommand{\figurename}{图}
+\renewcommand{\tablename}{表}
+\renewcommand{\appendixname}{附录}
+\renewcommand{\chaptername}{第\thechapter 章}
+
+%% ---- 章标题 ----
+%% ctexcap 的默认章样式为「第 N 章」居中、黑体。这里用 titlesec 复刻。
+\RequirePackage{titlesec}
+\titleformat{\chapter}[display]
+  {\centering\heiti\zihao{3}}
+  {\zihao{4}第\,\thechapter\,章}{10pt}{}
+\titlespacing*{\chapter}{0pt}{-6pt}{24pt}
+
+\endinput

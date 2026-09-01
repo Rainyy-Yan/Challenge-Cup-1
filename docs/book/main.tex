@@ -1,0 +1,233 @@
+\documentclass[utf8]{book}
+% ===== 资源目录设置 (main.tex 在根目录; 章节/bib/sty 在 chapter/; 图片在 Figure/) =====
+% chapter/ 下的 .sty/.bst 加入搜索路径, 可直接 \usepackage{gbt7714} 等
+\makeatletter
+\def\input@path{{chapter/}{./}}
+\makeatother
+
+% ===== 中文支持 =====
+% [说明] 本稿沿用《蜡质相变俘获利用海洋温差能》书稿体例, 该体例依赖 ctexcap
+% 提供的中文字族、\zihao 字号与中文章节名。但交付环境未必装有
+% texlive-lang-chinese, 故此处做条件加载:
+%   装有 ctex 的机器 -> 走 ctexcap, 与原书稿完全一致;
+%   未装 ctex 的机器 -> 走 chapter/ctexshim.sty, 用 fontspec 与 XeTeX 断行原语补齐。
+% 两条路径下正文、公式、表格、交叉引用、参考文献一致, 差别仅在标点压缩。
+% 无论走哪条路径, 本文件本身不需要修改。
+\IfFileExists{ctexcap.sty}{\usepackage{ctexcap}}{\usepackage{ctexshim}}
+
+\usepackage{graphicx}
+\graphicspath{{./}{Figure/}}
+\usepackage[sectionbib]{chapterbib}
+\usepackage{url}
+\usepackage{titletoc}
+\usepackage{titlesec}
+\usepackage{diagbox}
+\usepackage[b5paper,text={125mm,195mm},centering,left=1in,right=1in,top=1in,bottom=1in]{geometry}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{multicol}
+\usepackage{hyperref}
+\usepackage{bigstrut,multirow,rotating}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{makecell}
+\usepackage{longtable}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{flafter}
+\usepackage{paralist}
+\usepackage{xurl}
+\usepackage{fvextra}          % 代码环境; fancyvrb 本身无 breaklines
+% caption: 统一图题与表题字号、字体、间距
+\usepackage{caption}
+\usepackage{subcaption}
+\DeclareCaptionFont{heiti}{\heiti}
+\captionsetup{font={small,heiti},labelfont={small,heiti,bf},labelsep=quad,skip=2pt,belowskip=0pt}
+\let\itemize\compactitem
+\let\enditemize\endcompactitem
+\let\enumerate\compactenum
+\let\endenumerate\endcompactenum
+\let\description\compactdesc
+\let\enddescription\endcompactdesc
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black}
+
+% ===== 书稿排版微调 =====
+\linespread{1.18}\selectfont
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+\setlength{\textfloatsep}{5pt plus 1pt minus 1pt}
+\setlength{\floatsep}{4pt plus 1pt minus 1pt}
+\setlength{\intextsep}{5pt plus 1pt minus 1pt}
+\setcounter{topnumber}{5}
+\setcounter{bottomnumber}{5}
+\setcounter{totalnumber}{8}
+\renewcommand{\topfraction}{0.95}
+\renewcommand{\bottomfraction}{0.85}
+\renewcommand{\textfraction}{0.05}
+\renewcommand{\floatpagefraction}{0.78}
+
+% ===== 节标题字号与间距 =====
+\titleformat{\section}{\heiti\zihao{4}}{\thesection}{1em}{}
+\titlespacing*{\section}{0pt}{1.2ex plus .3ex minus .2ex}{0.8ex plus .2ex}
+\titleformat{\subsection}{\heiti\zihao{-4}}{\thesubsection}{0.8em}{}
+\titlespacing*{\subsection}{0pt}{1.0ex plus .2ex minus .2ex}{0.5ex plus .2ex}
+\titleformat{\subsubsection}{\heiti\normalsize}{\thesubsubsection}{0.6em}{}
+\titlespacing*{\subsubsection}{0pt}{0.8ex plus .2ex minus .2ex}{0.4ex plus .2ex}
+
+% ===== 图件占位命令 =====
+\providecommand{\ExistingFig}[3]{%
+  \IfFileExists{#2}{\includegraphics[width=#1,height=#3,keepaspectratio]{#2}}{%
+    \fbox{\begin{minipage}[c][#3][c]{#1}\centering\small 原图：\texttt{\detokenize{#2}}\end{minipage}}}%
+}
+\providecommand{\PlannedFig}[3]{%
+  \fbox{\begin{minipage}[c][#2][c]{#1}\centering\small #3\end{minipage}}%
+}
+
+% ===== 数学常用缩写 =====
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ee}{\mathrm{e}}
+
+% \NeedCheck 用于标注待确认的内容 (数据、日期、外部依赖等)
+\providecommand{\NeedCheck}[1]{\textcolor{red}{#1}}
+% \PolishIssue 用于标注疑似问题内容 (数据不一致、表述存疑等)
+\providecommand{\PolishIssue}[1]{\textcolor{orange}{#1}}
+
+% ===== 单位与排版宏 =====
+\providecommand{\degC}{\mbox{\,$^{\circ}$C}}
+\providecommand{\unit}[1]{\mbox{\,#1}}
+
+% ===== 行溢出控制 =====
+\emergencystretch=1.5em
+\hbadness=3000
+\tolerance=2000
+
+% ===== 蓝色标注宏 =====
+% \BlueT 用于标题与题注中的蓝色标注。必须用宏而不能直接写 \color{blue}:
+% book 类页眉会对章节标题施加 \MakeUppercase, 它不展开宏、只把"字符"变大写,
+% 若标题里出现字面量 blue 就会被大写为 BLUE, 报 "Undefined color `BLUE'"。
+\providecommand{\BlueT}[1]{\texorpdfstring{{\color{blue}#1}}{#1}}
+
+% ===== 本稿专用宏 =====
+% \cd 用于行内代码、文件名、配置项。
+% [重要] 代码字体固定为 DejaVu Sans Mono, 不用中文字体, 原因是连字符:
+% Noto CJK 系列会把 ASCII 连字符 U+002D 映射为 U+2011, 肉眼一致,
+% 但从 PDF 复制出来的命令是错的, 粘到终端会执行失败。读者要照抄命令,
+% 这一点不能将就。代价是代码中不能出现中文, 故约定注释一律移到正文。
+\newfontfamily\codefont{DejaVu Sans Mono}[Scale=0.86]
+\providecommand{\cd}[1]{{\codefont #1}}
+\providecommand{\file}[1]{{\codefont #1}}
+
+% code 环境: 命令与配置清单。中文注释请写在紧接的正文里, 不要写进代码块。
+\DefineVerbatimEnvironment{code}{Verbatim}{%
+  fontsize=\small, formatcom=\codefont,
+  frame=leftline, framerule=1pt, rulecolor=\color{gray},
+  framesep=6pt, xleftmargin=10pt, samepage=false,
+  breaklines=true, breakanywhere=true}
+
+% 三类提示框: 结论、踩坑、风险。用 mdframed 不便时以 quote + 黑体引导句实现,
+% 保持与书稿体例一致的朴素风格, 不引入额外视觉元素。
+\newenvironment{keynote}[1]
+  {\par\vspace{4pt}\noindent\begin{minipage}{\linewidth}%
+   \rule{\linewidth}{0.4pt}\par\vspace{2pt}%
+   \noindent{\heiti #1}\par\vspace{1pt}\small\setlength{\parindent}{2em}}
+  {\par\vspace{2pt}\rule{\linewidth}{0.4pt}\end{minipage}\par\vspace{4pt}}
+
+\includeonly{
+chapter/chapter01,
+chapter/chapter02,
+chapter/chapter03,
+chapter/chapter04,
+chapter/chapter05,
+chapter/chapter06,
+chapter/chapter07,
+chapter/chapter08,
+chapter/appendix}
+
+\begin{document}
+\raggedbottom
+\setlength{\fboxsep}{4pt}
+\setlength{\tabcolsep}{3pt}
+
+\title{\heiti 领域知识个性化生成与\\多智能体协同决策系统\\[6pt]\zihao{4}技术解读与交接说明}
+
+\author{\fangsong 榜题编号 XH-202630\\[4pt]发榜单位：上海云之脑智能科技有限公司}
+
+\date{\NeedCheck{2026 年 8 月}}
+
+\frontmatter
+
+\maketitle
+
+\chapter{前~~言}
+
+这份文档写给要接手把这套系统做完的同学，不是写给评委看的宣传材料。
+
+系统的骨架已经跑通：五类智能体、显式状态机、审核与辩论双重防线、
+自适应测评、命题闸门、内容流水线，共 237 个单元测试全部通过，
+不依赖任何第三方包。但骨架跑通与作品完成之间还隔着一段路，
+这段路的主要工作量不在写代码，而在\emph{填内容}——
+知识库要从二十六条切片扩到三百条以上，题库要从四十七道扩到九十道以上，
+还要补人工标注。这部分只能由懂领域、手上有真实资料的人来做。
+
+因此本文档的组织方式与一般的技术说明不同。它不只讲系统怎么运转，
+更着重讲三件事：每一处设计\emph{为什么}这么做，开发中\emph{踩过哪些坑}，
+以及哪些数字\emph{不能}拿去作为效果证明。第三件事尤其要紧。
+
+必须在开篇就写明的一条是：\emph{本文档中的全部评测数字，目前都不能作为效果证明}。
+原因在 8.1 节详述——知识库当前二十六条切片中仅五条经过来源核实，核实率百分之十九。
+整套幻觉检测的逻辑是「断言必须被知识库支撑」，那么知识库本身若是错的，
+审核闸只会把错误认证为正确。「幻觉率百分之零」的真实含义是
+「生成内容与知识库一致」，而不是「内容正确」。这两句话差得很远，
+而对外材料极容易把前者说成后者。评测脚本会在核实率不足时主动打印这段警告。
+
+第八章第三节列出了当前已知的全部短板。答辩时主动讲短板，
+比被评委追问出来强得多；含糊过去，一旦被抽样问到就很难看。
+
+书中若干设计取舍源于开发过程中的实际失败，附录汇编了十六条。
+这些记录并非自曝其短，而是这套系统最有说服力的部分——
+它们说明系统确实被跑通过、被压测过，而不只是搭了个架子。
+
+\begin{flushright}
+\NeedCheck{[编写者]}\\
+\NeedCheck{2026 年 8 月}
+\end{flushright}
+
+\renewcommand\contentsname{目~~录}
+
+\tableofcontents
+
+\mainmatter
+
+\normalsize
+\include{chapter/chapter01}
+
+\normalsize
+\include{chapter/chapter02}
+
+\normalsize
+\include{chapter/chapter03}
+
+\normalsize
+\include{chapter/chapter04}
+
+\normalsize
+\include{chapter/chapter05}
+
+\normalsize
+\include{chapter/chapter06}
+
+\normalsize
+\include{chapter/chapter07}
+
+\normalsize
+\include{chapter/chapter08}
+
+\appendix
+
+\normalsize
+\include{chapter/appendix}
+
+\backmatter
+
+\end{document}

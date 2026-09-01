@@ -1,0 +1,35 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test, coverage, and editor artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+*.log
+
+# LaTeX intermediate files (keep sources and generated .bbl files)
+docs/book/**/*.aux
+docs/book/**/*.blg
+docs/book/**/*.fdb_latexmk
+docs/book/**/*.fls
+docs/book/**/*.out
+docs/book/**/*.synctex.gz
+docs/book/**/*.toc
+docs/book/**/*.xdv
+
+# Temporary working files
+tmp/
+temp/
+*.tmp

@@ -1,0 +1,1314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>领域知识个性化生成与多智能体协同决策系统 · XH-202630</title>
+<style>
+/* ============================================================
+   取色来自机械安全信号色（运行绿 / 警告琥珀 / 故障红 / 调度蓝），
+   底色是工业 HMI 屏的蓝灰暗调，不是纯黑。
+   整套界面按"控制台"来组织：状态条在顶，仪表读数用等宽字。
+   ============================================================ */
+:root{
+  --void:#0D1116; --bay:#141B23; --rail:#1A222B; --etch:#26333F;
+  --readout:#C9D6E1; --dim:#7B8C9A; --faint:#4A5A68;
+  --run:#35D07F; --caution:#F2A93B; --fault:#E5484D; --dispatch:#4C9AFF;
+  --sans:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Source Han Sans SC","Noto Sans CJK SC",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--void); color:var(--readout); font-family:var(--sans);
+  font-size:13.5px; line-height:1.62; -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--dispatch); outline-offset:2px}
+button{font:inherit; color:inherit}
+
+.mono{font-family:var(--mono)}
+.lbl{font-family:var(--mono); font-size:10px; letter-spacing:.18em; color:var(--dim); text-transform:uppercase}
+
+/* ---------- 顶部状态条 ---------- */
+.console-bar{
+  position:sticky; top:0; z-index:20; background:var(--bay);
+  border-bottom:1px solid var(--etch);
+  display:flex; align-items:center; gap:18px; padding:10px 18px; flex-wrap:wrap;
+}
+.console-bar .idplate{display:flex; align-items:baseline; gap:12px; min-width:0}
+.console-bar h1{margin:0; font-size:14.5px; font-weight:800; letter-spacing:.02em; white-space:nowrap}
+.console-bar .sub{font-family:var(--mono); font-size:10px; letter-spacing:.14em; color:var(--faint)}
+.spacer{flex:1}
+.lampset{display:flex; align-items:center; gap:14px}
+.lampset .unit{display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; color:var(--dim)}
+.lamp{width:7px; height:7px; border-radius:50%; background:var(--faint); flex:none}
+.lamp.run{background:var(--run); box-shadow:0 0 0 3px rgba(53,208,127,.16)}
+.lamp.busy{background:var(--caution); box-shadow:0 0 0 3px rgba(242,169,59,.16); animation:pulse 1s infinite}
+.lamp.fault{background:var(--fault); box-shadow:0 0 0 3px rgba(229,72,77,.16)}
+@keyframes pulse{50%{opacity:.35}}
+
+.warnstrip{
+  background:rgba(242,169,59,.09); border-bottom:1px solid rgba(242,169,59,.25);
+  padding:7px 18px; font-size:12px; color:var(--caution);
+  display:flex; gap:8px; align-items:baseline;
+}
+.warnstrip b{font-family:var(--mono); font-size:10px; letter-spacing:.14em}
+
+/* ---------- 栅格 ---------- */
+.deck{display:grid; grid-template-columns:268px minmax(0,1fr) 316px; gap:1px; background:var(--etch)}
+.col{background:var(--void); min-width:0}
+@media(max-width:1180px){.deck{grid-template-columns:1fr}}
+
+.mod{border-bottom:1px solid var(--etch)}
+.mod > header{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:9px 14px; background:var(--rail); border-bottom:1px solid var(--etch);
+}
+.mod > header h2{margin:0; font-family:var(--mono); font-size:10px; letter-spacing:.18em; color:var(--dim); font-weight:600; text-transform:uppercase}
+.mod > header .rd{font-family:var(--mono); font-size:11px; color:var(--readout)}
+.body{padding:14px}
+
+/* ---------- 学习者 ---------- */
+.subj{
+  display:block; width:100%; text-align:left; background:none; border:0;
+  border-bottom:1px solid var(--etch); border-left:2px solid transparent;
+  padding:11px 14px; cursor:pointer;
+}
+.subj:hover{background:var(--rail)}
+.subj[aria-pressed="true"]{background:var(--rail); border-left-color:var(--dispatch)}
+.subj .nm{font-weight:700; font-size:13.5px}
+.subj .mt{font-family:var(--mono); font-size:10.5px; color:var(--dim); letter-spacing:.04em; margin-top:2px}
+.subj .qt{color:var(--faint); font-size:12px; margin-top:5px; line-height:1.5}
+
+.cmd{
+  width:100%; padding:11px 14px; background:var(--dispatch); color:#08131F;
+  border:0; font-weight:800; letter-spacing:.08em; cursor:pointer;
+}
+.cmd:hover{filter:brightness(1.1)}
+.cmd:disabled{background:var(--etch); color:var(--faint); cursor:not-allowed}
+
+/* ---------- 仪表读数 ---------- */
+.gauge{display:flex; justify-content:space-between; align-items:baseline; padding:5px 0; border-bottom:1px dotted var(--etch)}
+.gauge:last-child{border-bottom:0}
+.gauge span{color:var(--dim); font-size:12.5px}
+.gauge b{font-family:var(--mono); font-size:13px; font-weight:600}
+.note{color:var(--faint); font-size:12px; margin:10px 0 0; line-height:1.6}
+
+/* ---------- 调度轨 ---------- */
+.rail{position:relative; padding:4px 0}
+.rail::before{content:""; position:absolute; left:54px; top:12px; bottom:12px; width:1px; background:var(--etch)}
+.tick{
+  position:relative; display:grid; grid-template-columns:54px 1fr; gap:14px;
+  padding:8px 14px 8px 0; opacity:0; transform:translateY(5px);
+  animation:enter .3s cubic-bezier(.2,.7,.3,1) forwards;
+}
+@keyframes enter{to{opacity:1; transform:none}}
+@media(prefers-reduced-motion:reduce){.tick{animation:none; opacity:1; transform:none}}
+.tick .n{font-family:var(--mono); font-size:10.5px; color:var(--faint); text-align:right; padding-right:8px; position:relative; padding-top:2px}
+.tick .n::after{
+  content:""; position:absolute; right:-8px; top:6px; width:7px; height:7px;
+  border-radius:50%; background:var(--void); border:1.5px solid var(--faint);
+}
+.tick[data-t="run"] .n::after{background:var(--run); border-color:var(--run)}
+.tick[data-t="fault"] .n::after{background:var(--fault); border-color:var(--fault)}
+.tick[data-t="caution"] .n::after{background:var(--caution); border-color:var(--caution)}
+.tick[data-t="dispatch"] .n::after{background:var(--dispatch); border-color:var(--dispatch)}
+.tick .hd{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap}
+.chip{font-family:var(--mono); font-size:9.5px; letter-spacing:.12em; padding:1px 6px; border:1px solid var(--etch); color:var(--dim)}
+.tick[data-t="fault"] .chip{border-color:rgba(229,72,77,.5); color:var(--fault)}
+.tick[data-t="dispatch"] .chip{border-color:rgba(76,154,255,.45); color:var(--dispatch)}
+.tick .ag{font-family:var(--mono); font-size:10.5px; color:var(--dim); letter-spacing:.06em}
+.tick .tx{margin-top:2px; font-size:13px}
+.tick .ms{font-family:var(--mono); font-size:10px; color:var(--faint); margin-top:2px}
+.killed{border-left:2px solid var(--fault); padding:5px 0 5px 9px; margin-top:6px; font-size:12.5px; color:#E9A7A9}
+.killed .why{font-family:var(--mono); font-size:10.5px; color:var(--fault); letter-spacing:.03em}
+
+/* ============================================================
+   签名元素：辩论竞技场
+   两位专家的断言从左右两侧推进，在中央裁决线相遇。
+   ============================================================ */
+.arena{padding:8px 0 16px}
+.arena .head{
+  display:grid; grid-template-columns:1fr 132px 1fr; align-items:center;
+  padding:0 14px 10px; gap:10px;
+}
+.arena .side{font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; color:var(--dim)}
+.arena .side.r{text-align:right}
+.arena .judge{
+  text-align:center; font-family:var(--mono); font-size:9.5px; letter-spacing:.16em;
+  color:var(--faint); border:1px solid var(--etch); padding:3px 0;
+}
+.bout{
+  display:grid; grid-template-columns:1fr 132px 1fr; gap:10px; align-items:stretch;
+  padding:0 14px 10px; opacity:0; animation:enter .34s cubic-bezier(.2,.7,.3,1) forwards;
+}
+@media(prefers-reduced-motion:reduce){.bout{animation:none; opacity:1}}
+.card{
+  background:var(--bay); border:1px solid var(--etch); padding:9px 11px;
+  font-size:12.5px; line-height:1.55; position:relative; min-width:0;
+}
+.card .src{font-family:var(--mono); font-size:10px; letter-spacing:.05em; color:var(--faint); margin-top:5px}
+.card.win{border-color:rgba(53,208,127,.45); background:rgba(53,208,127,.06)}
+.card.lose{border-color:rgba(229,72,77,.38); background:rgba(229,72,77,.05); opacity:.62}
+.card.lose .t{text-decoration:line-through; text-decoration-color:rgba(229,72,77,.6)}
+.card.gone{border-color:var(--etch); opacity:.42}
+.card.gone .t{text-decoration:line-through; text-decoration-color:var(--faint)}
+.card.solo{border-style:dashed}
+.hollow{border:1px dashed var(--etch); opacity:.28}
+.verdict{
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:4px; text-align:center; padding:4px 2px;
+  border-left:1px solid var(--etch); border-right:1px solid var(--etch);
+}
+.stamp{
+  font-family:var(--mono); font-size:10px; font-weight:700; letter-spacing:.1em;
+  padding:3px 7px; border:1.5px solid currentColor; white-space:nowrap;
+  transform:scale(.82); opacity:0; animation:slam .3s .18s cubic-bezier(.2,1.4,.4,1) forwards;
+}
+@keyframes slam{to{transform:scale(1); opacity:1}}
+@media(prefers-reduced-motion:reduce){.stamp{animation:none; transform:none; opacity:1}}
+.stamp.both{color:var(--run)}
+.stamp.arb{color:var(--caution)}
+.stamp.drop{color:var(--fault)}
+.stamp.solo{color:var(--dim); border-style:dashed}
+.verdict .why{font-family:var(--mono); font-size:9px; line-height:1.45; color:var(--faint); letter-spacing:.02em}
+.boutkp{
+  padding:12px 14px 6px; font-family:var(--mono); font-size:10px;
+  letter-spacing:.16em; color:var(--faint); text-transform:uppercase;
+}
+
+/* ---------- 资源台账 ---------- */
+.res{border-bottom:1px solid var(--etch); padding:11px 14px}
+.res:last-child{border-bottom:0}
+.res .rowtop{display:flex; justify-content:space-between; gap:8px; align-items:baseline}
+.kindtag{font-family:var(--mono); font-size:9.5px; letter-spacing:.11em; padding:1px 6px; border:1px solid var(--etch); color:var(--dim)}
+.kindtag[data-k="lecture"]{color:var(--dispatch); border-color:rgba(76,154,255,.4)}
+.kindtag[data-k="sop"]{color:var(--run); border-color:rgba(53,208,127,.4)}
+.kindtag[data-k="quiz"]{color:var(--caution); border-color:rgba(242,169,59,.4)}
+.res .ttl{font-weight:700; margin-top:5px; font-size:13px}
+.res .dv{font-family:var(--mono); font-size:10.5px; color:var(--faint)}
+details summary{cursor:pointer; font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; color:var(--dim); margin-top:8px; list-style:none}
+details summary::-webkit-details-marker{display:none}
+details summary::before{content:"▸ "; color:var(--faint)}
+details[open] summary::before{content:"▾ "}
+.clm{border-left:2px solid var(--run); padding:5px 0 5px 9px; margin-top:7px; font-size:12.5px; line-height:1.55}
+.clm[data-c="single"]{border-left-color:var(--dim); border-left-style:dashed}
+.clm[data-c="arbitrated"]{border-left-color:var(--caution)}
+.clm .prov{font-family:var(--mono); font-size:10px; color:var(--faint); margin-top:3px; letter-spacing:.03em}
+.clm .prov a{color:var(--dispatch); text-decoration:none; border-bottom:1px dotted}
+
+/* ---------- 底部指标条 ---------- */
+.strip{border-top:1px solid var(--etch); background:var(--bay); padding:16px 18px 22px}
+.metrics{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:1px; background:var(--etch); border:1px solid var(--etch)}
+.metric{background:var(--void); padding:13px 15px}
+.metric .k{font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; color:var(--dim)}
+.metric .v{font-family:var(--mono); font-size:26px; font-weight:700; line-height:1.15; margin-top:5px; letter-spacing:-.01em}
+.metric .g{font-family:var(--mono); font-size:10px; color:var(--faint); margin-top:2px}
+.metric[data-s="pass"] .v{color:var(--run)}
+.metric[data-s="fail"] .v{color:var(--fault)}
+.metric[data-s="info"] .v{color:var(--dispatch)}
+
+.consensus{margin-top:18px}
+.cbar{display:flex; height:26px; border:1px solid var(--etch); overflow:hidden}
+.cseg{display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:10px; letter-spacing:.06em; color:#08131F; font-weight:700; min-width:0; transition:flex-grow .6s cubic-bezier(.2,.7,.3,1)}
+.cseg[data-c="both"]{background:var(--run)}
+.cseg[data-c="arbitrated"]{background:var(--caution)}
+.cseg[data-c="single"]{background:var(--faint); color:var(--readout)}
+.clegend{display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+.clegend i{display:inline-block; width:8px; height:8px; margin-right:5px; vertical-align:middle}
+
+/* ============================================================
+   能力图谱：两层雷达
+   外层是掌握概率，内层是置信下界，两层之间的间隙就是"还不确定的部分"。
+   只画点估计会让四题答对三题看起来和真正掌握一模一样，
+   而这两件事的证据强度差着数量级。
+   ============================================================ */
+function paintRadar(d){
+  const prof = Engine.buildAbility(d, SNAP.dims);
+  $("#radarMod").hidden = false;
+  $("#radarOverall").textContent =
+    `${(prof.overall*100).toFixed(0)}% / 下界 ${(prof.overall_lower*100).toFixed(0)}%`;
+
+  const svg = $("#radar"); svg.innerHTML = "";
+  const cx = 150, cy = 152, R = 92, n = prof.dims.length;
+  const ang = i => -Math.PI/2 + i * 2*Math.PI/n;
+  const pt = (i, r) => [cx + Math.cos(ang(i))*R*r, cy + Math.sin(ang(i))*R*r];
+
+  // 网格
+  for(const r of [0.25, 0.5, 0.75, 1]){
+    const pts = prof.dims.map((_, i) => pt(i, r).join(",")).join(" ");
+    svg.appendChild(el("polygon", {points:pts, fill:"none",
+      stroke:"var(--etch)", "stroke-width": r === 1 ? 1.2 : 0.8}));
+  }
+  prof.dims.forEach((_, i) => {
+    const [x, y] = pt(i, 1);
+    svg.appendChild(el("line", {x1:cx, y1:cy, x2:x, y2:y,
+      stroke:"var(--etch)", "stroke-width":0.8}));
+  });
+
+  // 外层：点估计
+  const outer = prof.dims.map((dd, i) => pt(i, dd.tested ? dd.score : 0).join(",")).join(" ");
+  svg.appendChild(el("polygon", {points:outer, fill:"var(--dispatch)", opacity:.20}));
+  svg.appendChild(el("polyline", {points:outer + " " + outer.split(" ")[0],
+    fill:"none", stroke:"var(--dispatch)", "stroke-width":1.8}));
+
+  // 内层：置信下界
+  const inner = prof.dims.map((dd, i) => pt(i, dd.tested ? dd.lower : 0).join(",")).join(" ");
+  svg.appendChild(el("polygon", {points:inner, fill:"var(--run)", opacity:.22}));
+  svg.appendChild(el("polyline", {points:inner + " " + inner.split(" ")[0],
+    fill:"none", stroke:"var(--run)", "stroke-width":1.5}));
+
+  prof.dims.forEach((dd, i) => {
+    const [x, y] = pt(i, dd.tested ? dd.score : 0);
+    svg.appendChild(el("circle", {cx:x, cy:y, r:3,
+      fill:"var(--void)", stroke:"var(--dispatch)", "stroke-width":1.6}));
+    // 未测维度：从圆心到外圈画虚线，明示"不知道"而不是"能力为零"
+    if(!dd.tested){
+      const [ex, ey] = pt(i, 1);
+      svg.appendChild(el("line", {x1:cx, y1:cy, x2:ex, y2:ey,
+        stroke:"var(--faint)", "stroke-width":1.2, "stroke-dasharray":"3 3"}));
+    }
+    const [lx, ly] = pt(i, 1.24);
+    svg.appendChild(el("text", {x:lx, y:ly, "text-anchor":"middle", class:"raxis"}, dd.name));
+    svg.appendChild(el("text", {x:lx, y:ly+10, "text-anchor":"middle", class:"rsub"},
+      dd.tested ? `${(dd.score*100)|0}｜${(dd.lower*100)|0}` : "未测"));
+  });
+
+  const live = prof.dims.filter(x => x.tested);
+  const thin = live.filter(x => x.gap >= 0.35);
+  const weak = live.length ? live.reduce((a,b) => b.score < a.score ? b : a) : null;
+  let note = "";
+  if(weak) note += `最薄弱的是「${esc(weak.name)}」，短板在「${esc(weak.worst_name)}」。`;
+  if(thin.length) note += `${thin.length} 个维度的两层间隙超过三成五，说明作答量不足、结论尚不稳固。`;
+  if(prof.untested_dims.length) note += `未覆盖：${prof.untested_dims.join("、")}，虚线表示，不代表能力为零。`;
+  $("#radarNote").textContent = note;
+}
+
+/* 证据强度：逐知识点给出区间与蒙对概率 */
+function paintEvidence(d){
+  const CN = {confirmed_strong:"已确认掌握", likely_strong:"疑似掌握",
+              confirmed_blind:"已确认盲区", likely_blind:"疑似盲区",
+              inconclusive:"证据不足", untested:"未测"};
+  const tested = d.mastery.filter(m => m.asked > 0)
+                          .sort((a,b) => (b.lower||0) - (a.lower||0));
+  if(!tested.length){ $("#evidenceMod").hidden = true; return; }
+  $("#evidenceMod").hidden = false;
+  const conf = tested.filter(m => m.evidence === "confirmed_strong").length;
+  $("#evOverall").textContent = `已确认掌握 ${conf} / ${tested.length}`;
+
+  const th = TH.mastery_ok;
+  $("#evList").innerHTML = tested.map(m => {
+    const lo = m.lower || 0, hi = m.upper || 1;
+    return `<div class="ev" data-e="${m.evidence}">
+      <div class="top">
+        <span class="nm">${esc(m.name)}</span>
+        <span class="tag">${CN[m.evidence] || m.evidence}</span>
+      </div>
+      <div class="band">
+        <div class="rng" style="left:${lo*100}%; width:${(hi-lo)*100}%"></div>
+        <div class="pt" style="left:${m.score*100}%"></div>
+        <div class="th" style="left:${th*100}%"></div>
+      </div>
+      <div class="why">${m.correct}/${m.asked} 题　区间 ${lo.toFixed(2)}–${hi.toFixed(2)}　
+        纯蒙达到该成绩 ${(m.luck*100).toFixed(0)}%${m.evidence_why ? "　" + esc(m.evidence_why) : ""}</div>
+    </div>`;
+  }).join("");
+}
+
+/* ---------- 图表 ---------- */
+.charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:1px; background:var(--etch); border-top:1px solid var(--etch)}
+svg{display:block; width:100%; height:auto}
+.ax{font-family:var(--mono); font-size:8.5px; fill:var(--faint)}
+.kl{font-size:10.5px; fill:var(--dim)}
+
+/* ---------- 反馈 ---------- */
+.togs{display:flex; gap:7px; flex-wrap:wrap; margin:10px 0}
+.tog{font-family:var(--mono); font-size:11.5px; padding:6px 11px; border:1px solid var(--etch); background:var(--bay); cursor:pointer}
+.tog[data-on="1"]{border-color:var(--run); color:var(--run)}
+.tog[data-on="0"]{border-color:var(--fault); color:var(--fault)}
+select{font:inherit; font-family:var(--mono); font-size:12px; padding:6px 8px; background:var(--bay); color:var(--readout); border:1px solid var(--etch)}
+.ruling{margin-top:11px; padding:10px 12px; border-left:2px solid var(--dispatch); background:var(--rail); font-size:12.5px}
+.blank{color:var(--faint); padding:26px 14px; text-align:center; font-size:12.5px}
+
+textarea{
+  width:100%; font:inherit; font-size:13px; line-height:1.6; padding:9px 10px;
+  background:var(--void); color:var(--readout); border:1px solid var(--etch);
+  resize:vertical;
+}
+textarea:focus{border-color:var(--dispatch); outline:none}
+
+/* 自适应测评的选项 */
+.opt{
+  display:block; width:100%; text-align:left; padding:10px 13px; margin-bottom:7px;
+  background:var(--bay); border:1px solid var(--etch); cursor:pointer; font-size:13.5px;
+}
+.opt:hover:not(:disabled){border-color:var(--dispatch); background:var(--rail)}
+.opt:disabled{cursor:default}
+.opt .ix{font-family:var(--mono); font-size:11px; color:var(--faint); margin-right:9px}
+.opt.right{border-color:var(--run); background:rgba(53,208,127,.09)}
+.opt.wrong{border-color:var(--fault); background:rgba(229,72,77,.08)}
+
+.deltabar{
+  display:flex; align-items:center; gap:10px; margin-top:12px; padding:10px 12px;
+  background:var(--rail); border-left:2px solid var(--dispatch);
+}
+.deltabar .num{font-family:var(--mono); font-size:17px; font-weight:700}
+.deltabar .num.up{color:var(--run)}
+.deltabar .num.down{color:var(--fault)}
+.deltabar .txt{font-size:12.5px; color:var(--dim); line-height:1.5}
+
+/* 学后反馈的真题卡片 */
+.fbq{border:1px solid var(--etch); background:var(--bay); padding:11px 13px; margin-bottom:9px}
+.fbq .qh{display:flex; justify-content:space-between; align-items:baseline; gap:10px}
+.fbq .prov{font-family:var(--mono); font-size:10px; color:var(--faint)}
+.fbq .qs{margin:7px 0 10px; font-size:13.5px; line-height:1.6}
+.fbq .qb{display:flex; gap:8px}
+.jb{
+  font-family:var(--mono); font-size:12px; padding:6px 18px; cursor:pointer;
+  background:var(--void); color:var(--readout); border:1px solid var(--etch);
+}
+.jb:hover{border-color:var(--dispatch)}
+.jb[data-on="1"][data-v="1"]{border-color:var(--run); color:var(--run)}
+.jb[data-on="1"][data-v="0"]{border-color:var(--fault); color:var(--fault)}
+.fbq .qe{margin:9px 0 0; font-size:12px; color:var(--dim); border-left:2px solid var(--etch); padding-left:9px}
+
+/* 能力图谱 */
+.rlegend{display:flex; gap:14px; flex-wrap:wrap; margin-top:8px;
+  font-family:var(--mono); font-size:10.5px; color:var(--dim)}
+.rlegend i{display:inline-block; width:9px; height:9px; margin-right:5px; vertical-align:middle}
+.rlegend i.dash{border:1px dashed var(--faint); background:none}
+.raxis{font-size:10px; fill:var(--readout)}
+.rsub{font-family:var(--mono); font-size:8.5px; fill:var(--faint)}
+
+/* 证据强度条 */
+.ev{padding:9px 14px; border-bottom:1px solid var(--etch)}
+.ev:last-child{border-bottom:0}
+.ev .top{display:flex; justify-content:space-between; align-items:baseline; gap:8px}
+.ev .nm{font-size:12.5px}
+.ev .tag{font-family:var(--mono); font-size:9.5px; letter-spacing:.08em; padding:1px 6px; border:1px solid var(--etch)}
+.ev[data-e="confirmed_strong"] .tag{color:var(--run); border-color:rgba(53,208,127,.5)}
+.ev[data-e="likely_strong"] .tag{color:var(--caution); border-color:rgba(242,169,59,.5)}
+.ev[data-e="confirmed_blind"] .tag{color:var(--fault); border-color:rgba(229,72,77,.5)}
+.ev[data-e="likely_blind"] .tag{color:var(--dim)}
+.ev[data-e="inconclusive"] .tag{color:var(--dim)}
+/* 区间条：底槽是 0-1，实心段是区间，竖线是点估计 */
+.band{position:relative; height:9px; background:var(--rail); margin:7px 0 4px}
+.band .rng{position:absolute; top:0; bottom:0; background:rgba(76,154,255,.42)}
+.band .pt{position:absolute; top:-2px; bottom:-2px; width:2px; background:var(--readout)}
+.band .th{position:absolute; top:-2px; bottom:-2px; width:1px; background:var(--faint)}
+.ev .why{font-family:var(--mono); font-size:10px; color:var(--faint); line-height:1.5}
+
+.bgchips{display:flex; gap:7px; flex-wrap:wrap; margin:10px 0 0}
+.bgchip{
+  font-family:var(--mono); font-size:10.5px; padding:2px 8px;
+  border:1px solid var(--etch); color:var(--dim);
+}
+.bgchip b{color:var(--readout); font-weight:600}
+</style>
+</head>
+<body>
+
+<div class="console-bar">
+  <div class="idplate">
+    <h1>领域知识个性化生成与多智能体协同决策系统</h1>
+    <span class="sub">XH-202630 · 工业机器人现场操作与调试</span>
+  </div>
+  <span class="spacer"></span>
+  <div class="lampset">
+    <span class="unit"><i class="lamp" id="lampSrc"></i><span id="srcTxt">数据源</span></span>
+    <span class="unit"><i class="lamp" id="lampRun"></i><span id="runTxt">待机</span></span>
+  </div>
+</div>
+
+<div class="warnstrip" id="warn" hidden>
+  <b>注入</b><span id="warnTxt"></span>
+</div>
+
+<div class="deck">
+
+  <!-- ============ 左：学习者与学情 ============ -->
+  <div class="col">
+    <section class="mod">
+      <header><h2>学情访谈</h2><span class="rd" id="ivStage">未开始</span></header>
+      <div class="body" id="ivIntro">
+        <p class="note" style="margin-top:0">
+          用你自己的情况开始。先写一段自述，系统抽出背景给掌握概率定先验，
+          再按信息量逐题自适应提问，答错答对都会当场改变下一道题。
+        </p>
+        <textarea id="ivText" rows="4" placeholder="例：机械专业大三，学过机构学和控制理论，实训只做过一次示教器点动，没接触过现场调试"></textarea>
+        <div class="togs" style="margin-top:9px">
+          <button class="tog" data-depth="10">快速 10 题</button>
+          <button class="tog" data-depth="16" data-on="1">标准 16 题</button>
+          <button class="tog" data-depth="24">深入 24 题</button>
+        </div>
+        <button class="cmd" id="ivStart" style="margin-top:4px">开始访谈</button>
+      </div>
+      <div id="ivClarify" hidden></div>
+    </section>
+
+    <section class="mod" id="presetMod">
+      <header><h2>对照用预设画像</h2><span class="rd" id="subjN">0</span></header>
+      <div class="body" style="padding-bottom:0">
+        <p class="note" style="margin:0 0 4px">
+          三份合成画像，用于回归对照。要看真实交互请用上面的访谈。
+        </p>
+      </div>
+      <div id="subjects"><p class="blank">加载中</p></div>
+      <button class="cmd" id="go" disabled>选择画像后回放</button>
+    </section>
+
+    <section class="mod" id="diagMod" hidden>
+      <header><h2>学情诊断 · BKT</h2><span class="rd" id="dPrior">—</span></header>
+      <div class="body">
+        <div class="gauge"><span>整体掌握概率</span><b id="dOverall">—</b></div>
+        <div class="gauge"><span>建议起始难度</span><b id="dEntry">—</b></div>
+        <div class="gauge"><span>识别盲区</span><b id="dGaps">—</b></div>
+        <div class="gauge"><span>证据不足的知识点</span><b id="dLowConf">—</b></div>
+        <div class="gauge"><span>由前置推断</span><b id="dInferred">—</b></div>
+        <p class="note" id="dNarr"></p>
+      </div>
+    </section>
+
+    <section class="mod" id="radarMod" hidden>
+      <header><h2>能力图谱</h2><span class="rd" id="radarOverall">—</span></header>
+      <div class="body" style="padding-top:10px">
+        <svg id="radar" viewBox="0 0 300 300" role="img" aria-label="六维能力图谱"></svg>
+        <div class="rlegend">
+          <span><i style="background:var(--dispatch)"></i>掌握概率</span>
+          <span><i style="background:var(--run)"></i>置信下界</span>
+          <span><i class="dash"></i>未测维度</span>
+        </div>
+        <p class="note" id="radarNote"></p>
+      </div>
+    </section>
+
+    <section class="mod" id="evidenceMod" hidden>
+      <header><h2>证据强度</h2><span class="rd" id="evOverall">—</span></header>
+      <div id="evList"></div>
+    </section>
+
+    <section class="mod" id="curveMod" hidden>
+      <header><h2>掌握度演进</h2><span class="rd">逐题</span></header>
+      <div class="body">
+        <select id="curvePick" style="width:100%; margin-bottom:10px"></select>
+        <svg id="curveSvg" viewBox="0 0 300 160" role="img" aria-label="掌握概率逐题演进曲线"></svg>
+        <p class="note" id="curveNote"></p>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ 中：调度轨 + 辩论竞技场 ============ -->
+  <div class="col">
+    <section class="mod" id="quizMod" hidden>
+      <header>
+        <h2>自适应测评</h2>
+        <span class="rd" id="quizProgress">—</span>
+      </header>
+      <div class="body">
+        <div id="probeBanner" class="ruling" hidden style="border-left-color:var(--caution); margin:0 0 12px"></div>
+        <div class="lbl" id="quizMeta">—</div>
+        <p id="quizStem" style="font-size:15px; font-weight:600; margin:8px 0 12px"></p>
+        <div id="quizOpts"></div>
+        <div id="quizFeed" hidden></div>
+      </div>
+    </section>
+
+    <section class="mod">
+      <header><h2>多智能体协同调度</h2><span class="rd" id="tickN">0 步</span></header>
+      <div class="rail" id="rail"><p class="blank">选择一位学习者后启动</p></div>
+    </section>
+
+    <section class="mod" id="arenaMod" hidden>
+      <header>
+        <h2>交叉验证竞技场</h2>
+        <span class="rd" id="arenaN">—</span>
+      </header>
+      <div class="arena">
+        <div class="head">
+          <span class="side">◀ 领域专家 甲 · 窄检索</span>
+          <span class="judge">裁 决 线</span>
+          <span class="side r">领域专家 乙 · 宽检索 ▶</span>
+        </div>
+        <div id="arena"></div>
+      </div>
+    </section>
+
+    <section class="mod" id="fbMod" hidden>
+      <header><h2>学后反馈 · 动态迭代</h2><span class="rd" id="fbThresh">—</span></header>
+      <div class="body">
+        <p class="note" style="margin-top:0">
+          这一步和上面的入门测评不是一回事。入门测评是<b>学之前</b>摸底，
+          这里是<b>学完这份资源之后</b>再测一次，用来决定下一轮给什么：
+          做得差就把同一知识点降维重讲，做得好就推进阶任务。
+        </p>
+        <select id="fbKp" style="width:100%; margin-bottom:10px"></select>
+        <div id="fbItems"></div>
+        <button class="cmd" id="submit" style="width:auto; padding:9px 18px">提交作答</button>
+        <div class="ruling" id="ruling" hidden></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ 右：资源台账 ============ -->
+  <div class="col">
+    <section class="mod">
+      <header><h2>生成资源与溯源</h2><span class="rd" id="resN">0</span></header>
+      <div id="resources"><p class="blank">尚未生成</p></div>
+    </section>
+  </div>
+</div>
+
+<!-- ============ 底：指标条 ============ -->
+<div class="strip" id="strip" hidden>
+  <div class="metrics" id="metrics"></div>
+
+  <p class="note" style="margin:10px 0 0; max-width:76ch">
+    「适配规则一致性」是结构性结果：系统按预先登记的规则计算资源难度，
+    本项又用同一条规则校验，因此必然一致。它证明实现与规则相符，
+    不能当作适配效果的证据 —— 效果需由人工评分给出。
+  </p>
+
+  <div class="consensus">
+    <div class="lbl" style="margin-bottom:7px">断言共识构成 · 双方独立印证的断言可信度最高</div>
+    <div class="cbar" id="cbar"></div>
+    <div class="clegend" id="clegend"></div>
+  </div>
+</div>
+
+<div class="charts" id="charts" hidden>
+  <section class="mod"><header><h2>知识盲区定位</h2></header><div class="body"><svg id="cGaps" viewBox="0 0 420 320" role="img" aria-label="知识盲区定位图"></svg></div></section>
+  <section class="mod"><header><h2>资源难度匹配</h2></header><div class="body"><svg id="cFit" viewBox="0 0 420 320" role="img" aria-label="资源难度匹配曲线"></svg></div></section>
+  <section class="mod"><header><h2>学习路径规划</h2></header><div class="body"><svg id="cPath" viewBox="0 0 420 320" role="img" aria-label="学习路径规划图"></svg></div></section>
+</div>
+
+<script id="snapshot" type="application/json">__SNAPSHOT__</script>
+<script>__ENGINE__</script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const SNAP = JSON.parse($("#snapshot").textContent);
+const TH = SNAP.thresholds;
+const REDUCE = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+let live = false;      // 后端是否可用
+let picked = null;
+let S = null;          // 当前会话
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, REDUCE ? 0 : ms));
+
+const TONE = {
+  DIAGNOSE:"dispatch", PLAN:"", GENERATE:"dispatch", DEBATE:"caution",
+  AUDIT:"run", REVISE:"caution", ASSEMBLE:"run", READY:"run",
+  FEEDBACK:"", DECIDE:"dispatch"
+};
+
+/* ---------- 数据源探测：优先后端，失败退回内嵌快照 ---------- */
+async function probe(){
+  try{
+    const r = await fetch("/api/profiles", {cache:"no-store"});
+    if(r.ok){ live = true; }
+  }catch(e){ live = false; }
+  $("#lampSrc").className = "lamp " + (live ? "run" : "busy");
+  $("#srcTxt").textContent = live ? "后端在线" : "内嵌快照";
+  const inj = SNAP.injection;
+  if(!live && inj && (inj.hallucination_rate > 0 || inj.numeric_drift > 0)){
+    $("#warn").hidden = false;
+    $("#warnTxt").textContent =
+      `本页使用内嵌演示快照。生成时开启了幻觉注入 ${(inj.hallucination_rate*100).toFixed(0)}%、`
+      + `数值漂移 ${(inj.numeric_drift*100).toFixed(0)}%，目的是让审核拦截与辩论仲裁真实出现，`
+      + `因此这里的数字不是无注入条件下的跑分结果。`;
+  }
+}
+
+/* ---------- 学习者 ---------- */
+function subjects(){
+  const list = Object.values(SNAP.sessions).map(s => s.profile);
+  $("#subjN").textContent = list.length;
+  $("#subjects").innerHTML = list.map(p => `
+    <button class="subj" data-id="${p.id}" aria-pressed="false">
+      <div class="nm">${esc(p.name)}</div>
+      <div class="mt">${esc(p.label)} · ${esc(p.grade)} · 实操 ${p.hours}h</div>
+      <div class="qt">${esc(p.self_report)}</div>
+    </button>`).join("");
+  document.querySelectorAll(".subj").forEach(b => b.onclick = () => {
+    picked = b.dataset.id;
+    document.querySelectorAll(".subj").forEach(x =>
+      x.setAttribute("aria-pressed", x.dataset.id === picked ? "true" : "false"));
+    $("#go").disabled = false;
+    $("#go").textContent = "启动诊断与生成";
+  });
+}
+
+/* ---------- 主流程 ---------- */
+async function start(){
+  $("#go").disabled = true;
+  setRun("busy", "调度中");
+  $("#rail").innerHTML = "";
+  $("#arena").innerHTML = "";
+  $("#ruling").hidden = true;
+
+  if(live){
+    try{
+      const r = await fetch("/api/run", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({profile_id: picked, max_kp: 4})});
+      S = await r.json();
+      if(!r.ok) throw new Error(S.error || "运行失败");
+    }catch(e){
+      setRun("fault", "后端异常");
+      $("#rail").innerHTML = `<p class="blank">${esc(e.message)}</p>`;
+      $("#go").disabled = false; return;
+    }
+  }else{
+    S = JSON.parse(JSON.stringify(SNAP.sessions[picked]));
+  }
+
+  paintDiagnosis();
+  await streamRail(S.events, 0);
+  paintArena();
+  paintResources();
+  paintFeedback();
+  paintMetrics();
+  paintCharts();
+  $("#go").disabled = false;
+  $("#go").textContent = "重新运行";
+  setRun("run", "就绪");
+}
+
+function setRun(cls, txt){
+  $("#lampRun").className = "lamp " + cls;
+  $("#runTxt").textContent = txt;
+}
+
+/* ---------- 调度轨：逐步推入 ---------- */
+async function streamRail(events, from){
+  const box = $("#rail");
+  for(let i = from; i < events.length; i++){
+    box.insertAdjacentHTML("beforeend", tickHTML(events[i]));
+    $("#tickN").textContent = (i + 1) + " 步";
+    await sleep(70);
+  }
+}
+
+function tickHTML(e){
+  const d = e.detail || {};
+  const killed = d.dropped || [];
+  let tone = TONE[e.state] || "";
+  if(killed.length) tone = "fault";
+  const extra = killed.map(k => `
+    <div class="killed">${esc(k.text)}
+      <div class="why">拦截 · ${esc(k.note || k.verdict || "")}</div></div>`).join("");
+  return `<div class="tick" data-t="${tone}">
+    <div class="n">${e.seq}</div>
+    <div>
+      <div class="hd"><span class="chip">${esc(e.state)}</span><span class="ag">${esc(e.agent)}</span></div>
+      <div class="tx">${esc(e.summary)}</div>
+      <div class="ms">${e.ms} ms</div>${extra}
+    </div></div>`;
+}
+
+/* ---------- 学情 ---------- */
+function paintDiagnosis(){
+  const d = S.diagnosis;
+  $("#diagMod").hidden = false;
+  $("#dPrior").textContent = "先验 " + d.prior;
+  $("#dOverall").textContent = (d.overall * 100).toFixed(1) + "%";
+  $("#dEntry").textContent = d.entry_level + " / 5";
+  $("#dGaps").textContent = d.gaps.length + " 个";
+  $("#dLowConf").textContent = (d.low_confidence || []).length + " 个";
+  $("#dInferred").textContent =
+    d.mastery.filter(m => m.inferred_from).length + " 个";
+  $("#dNarr").textContent = d.narrative;
+
+  paintRadar(d);
+  paintEvidence(d);
+
+  $("#curveMod").hidden = false;
+  const tested = d.mastery.filter(m => m.asked > 0);
+  if(!tested.length){ $("#curveMod").hidden = true; return; }
+  $("#curvePick").innerHTML = tested.map(m =>
+    `<option value="${m.kp}">${esc(m.name)}　${m.correct}/${m.asked}</option>`).join("");
+  $("#curvePick").onchange = drawCurve;
+  drawCurve();
+}
+
+/* ============================================================
+   签名元素：辩论竞技场
+   ============================================================ */
+function paintArena(){
+  const debates = S.debates || [];
+  if(!debates.length){ $("#arenaMod").hidden = true; return; }
+  $("#arenaMod").hidden = false;
+
+  let tot = {a:0, b:0, d:0, s:0};
+  const blocks = debates.map(db => {
+    const kp = S.kp_index[db.kp] ? S.kp_index[db.kp].name : db.kp;
+    const L = db.log, st = db.stats;
+    tot.a += st.agreed_n; tot.b += st.arbitrated_n;
+    tot.d += st.dropped_n; tot.s += st.single_n;
+    const rows = [];
+
+    L.agreed.forEach(x => rows.push(bout(
+      {t:x.text, s:x.source, cls:"win"},
+      {t:x.text, s:x.source, cls:"win"},
+      "both", "双方印证", `相似度 ${x.sim}　出处一致　数值一致`)));
+
+    L.arbitrated.forEach(x => {
+      const winIsLeft = x["采纳"] === x["甲"];
+      rows.push(bout(
+        {t:x["甲"], cls: winIsLeft ? "win" : "lose"},
+        {t:x["乙"], cls: winIsLeft ? "lose" : "win"},
+        "arb", "仲裁采纳", x.why));
+    });
+
+    L.dropped.forEach(x => rows.push(bout(
+      {t:x["甲"], cls:"gone"}, {t:x["乙"], cls:"gone"},
+      "drop", "存疑弃用", x.why)));
+
+    L.singles.forEach(x => {
+      const c = {t:x.text, s:x.source, cls:"solo"};
+      rows.push(x.by === "甲" ? bout(c, null, "solo", "单方提出", "缺少交叉印证，按较低置信处理")
+                              : bout(null, c, "solo", "单方提出", "缺少交叉印证，按较低置信处理"));
+    });
+
+    return `<div class="boutkp">${esc(kp)}</div>` + rows.join("");
+  });
+
+  $("#arenaN").textContent =
+    `印证 ${tot.a} · 仲裁 ${tot.b} · 弃用 ${tot.d} · 单方 ${tot.s}`;
+
+  const host = $("#arena");
+  host.innerHTML = "";
+  const html = blocks.join("");
+  host.innerHTML = html;
+  if(!REDUCE){
+    host.querySelectorAll(".bout").forEach((el, i) => {
+      el.style.animationDelay = Math.min(i * 55, 1400) + "ms";
+    });
+  }
+}
+
+function bout(left, right, kind, label, why){
+  const side = c => c
+    ? `<div class="card ${c.cls}"><div class="t">${esc(c.t)}</div>${
+        c.s ? `<div class="src">${esc(c.s)}</div>` : ""}</div>`
+    : `<div class="card hollow"></div>`;
+  return `<div class="bout">
+    ${side(left)}
+    <div class="verdict">
+      <span class="stamp ${kind}">${esc(label)}</span>
+      <span class="why">${esc(why)}</span>
+    </div>
+    ${side(right)}
+  </div>`;
+}
+
+/* ---------- 资源与溯源 ---------- */
+function paintResources(){
+  $("#resN").textContent = S.resources.length;
+  const CN = {both:"双方印证", single:"单方提出", arbitrated:"仲裁采纳"};
+  $("#resources").innerHTML = S.resources.map(r => `
+    <div class="res">
+      <div class="rowtop">
+        <span class="kindtag" data-k="${r.kind}">${r.kind}</span>
+        <span class="dv">${r.variant && r.variant !== "primary"
+          ? (r.variant === "remedial" ? "降维 · " : "进阶 · ") : ""}难度 ${r.difficulty}/5 · 断言 ${r.claims.length}</span>
+      </div>
+      <div class="ttl">${esc(r.title)}</div>
+      <details><summary>断言与溯源链</summary>
+        ${r.claims.map(c => {
+          const kb = SNAP.kb[c.source_id] || {};
+          return `<div class="clm" data-c="${c.consensus || "single"}">
+            <div>${esc(c.text)}</div>
+            <div class="prov">${esc(c.source_id || "无引用")}　${esc(kb.source || "")}
+              　证据 ${c.evidence_score}　${esc(CN[c.consensus] || "")}</div>
+          </div>`;
+        }).join("")}
+      </details>
+    </div>`).join("") || `<p class="blank">尚未生成</p>`;
+}
+
+/* ---------- 反馈 ---------- */
+function paintFeedback(){
+  $("#fbMod").hidden = false;
+  $("#fbThresh").textContent =
+    `<${(TH.decide_down*100)|0}% 降维 · ≥${(TH.decide_advance*100)|0}% 进阶`;
+  $("#fbKp").innerHTML = S.path.map((k, i) =>
+    `<option value="${k}">${esc(S.path_names[i])}</option>`).join("");
+  $("#fbKp").onchange = renderFbItems;
+  renderFbItems();
+  $("#submit").onclick = submitFeedback;
+}
+
+/* 显示这个知识点实际生成的分阶测试题。
+   早期版本这里只放了四个「第N题 正确/错误」的空壳开关，没有题干 ——
+   资源里明明有真题目却不显示，让人对着抽象开关点，谁也看不懂在干什么。
+   判断题的题干直接来自已过审的断言，连溯源编号一起显示。 */
+function renderFbItems(){
+  const kp = $("#fbKp").value;
+  const quiz = S.resources.find(r => r.kp === kp && r.kind === "quiz");
+  const items = (quiz && quiz.items) ? quiz.items.slice(0, 4) : [];
+  if(!items.length){
+    $("#fbItems").innerHTML =
+      `<p class="note">该知识点未产出分阶测试题，通常是知识库切片不足。</p>`;
+    return;
+  }
+  $("#fbItems").innerHTML = items.map((it, i) => `
+    <div class="fbq" data-i="${i}" data-ans="${it.answer === false ? 0 : 1}">
+      <div class="qh">
+        <span class="lbl">第 ${i+1} 题 · 判断</span>
+        <span class="prov">${esc(it.source_id || "")}　难度 ${it.difficulty || "-"}/5</span>
+      </div>
+      <p class="qs">${esc(it.stem)}</p>
+      <div class="qb">
+        <button class="jb" data-v="1">正确</button>
+        <button class="jb" data-v="0">错误</button>
+      </div>
+      <p class="qe" hidden>${esc(it.explain || "")}</p>
+    </div>`).join("");
+  document.querySelectorAll("#fbItems .jb").forEach(b => b.onclick = () => {
+    const box = b.closest(".fbq");
+    box.querySelectorAll(".jb").forEach(x => x.removeAttribute("data-on"));
+    b.dataset.on = "1";
+    box.dataset.pick = b.dataset.v;
+    box.querySelector(".qe").hidden = false;
+  });
+}
+
+async function submitFeedback(){
+  const boxes = [...document.querySelectorAll("#fbItems .fbq")];
+  if(boxes.some(b => b.dataset.pick === undefined)){
+    $("#ruling").hidden = false;
+    $("#ruling").textContent = "还有题目没作答，四题都判完再提交。";
+    return;
+  }
+  // 判断题的正确答案恒为"正确"（题干由已过审的断言生成），
+  // 所以选「正确」即为答对。
+  const answers = boxes.map(b => b.dataset.pick === b.dataset.ans);
+  const acc = answers.filter(Boolean).length / answers.length;
+  const kp = $("#fbKp").value;
+  $("#submit").disabled = true;
+
+  if(live){
+    const before = S.events.length;
+    try{
+      const r = await fetch("/api/feedback", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({session_id: S.session_id, kp, answers})});
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.error);
+      S = d;
+      showRuling(d.decision);
+      await streamRail(S.events, before);
+      paintResources(); paintMetrics(); paintCharts();
+    }catch(e){
+      $("#ruling").hidden = false;
+      $("#ruling").textContent = "提交失败：" + e.message;
+    }
+  }else{
+    // 快照模式：本地按同一套阈值推演，规则与后端一致
+    let action, why, nd;
+    const cur = (S.resources.find(r => r.kp === kp) || {}).difficulty || 2;
+    if(acc < TH.decide_down){
+      action = "explain_down"; nd = Math.max(1, cur - 1);
+      why = `正确率 ${(acc*100)|0}% 低于 ${(TH.decide_down*100)|0}%，触发降维解释`;
+    }else if(acc >= TH.decide_advance){
+      action = "advance"; nd = Math.min(5, cur + 1);
+      why = `正确率 ${(acc*100)|0}% 达到 ${(TH.decide_advance*100)|0}%，生成进阶挑战任务`;
+    }else{
+      action = "consolidate"; nd = cur;
+      why = `正确率 ${(acc*100)|0}% 处于中间区间，保持当前难度巩固`;
+    }
+    showRuling({action, reason: why, next_difficulty: nd, accuracy: acc});
+  }
+  $("#submit").disabled = false;
+}
+
+function showRuling(d){
+  const CN = {explain_down:"降维解释", advance:"进阶挑战", consolidate:"原难度巩固"};
+  $("#ruling").hidden = false;
+  $("#ruling").innerHTML =
+    `<b class="mono">${esc(CN[d.action] || d.action)}</b> · ${esc(d.reason)}`
+    + (d.next_difficulty ? `<div class="mono" style="font-size:11px;color:var(--faint);margin-top:4px">下一轮难度 ${d.next_difficulty}/5</div>` : "");
+}
+
+/* ---------- 指标条 ---------- */
+function paintMetrics(){
+  $("#strip").hidden = false;
+  const claims = S.resources.flatMap(r => r.claims);
+  const cnt = {both:0, arbitrated:0, single:0};
+  claims.forEach(c => { cnt[c.consensus || "single"] = (cnt[c.consensus || "single"] || 0) + 1; });
+
+  const m = S.metrics || {};
+  const gapCov = m.gap_total ? m.gap_covered / m.gap_total : 0;
+  const lvlOf = kp => {
+    const mm = S.diagnosis.mastery.find(x => x.kp === kp);
+    const sc = mm ? mm.score : 0;
+    if(sc < TH.mastery_blind) return 1;
+    return Math.max(1, Math.min(5, 1 + Math.round((sc - TH.mastery_blind)/(1 - TH.mastery_blind)*4)));
+  };
+  // 与后端 agents/generate.py 的 is_adapted 保持同一口径，含知识点难度天花板
+  const adapted = (diff, L, kpLevel, strong) => {
+    const ceiling = Math.min(5, kpLevel + (strong ? 1 : 0));
+    if(ceiling < L) return diff === ceiling;
+    const d = diff - L;
+    return d >= 0 && d <= 2;
+  };
+  const prim = S.resources.filter(r => !r.variant || r.variant === "primary");
+  const fit = prim.filter(r => {
+    const mm = S.diagnosis.mastery.find(x => x.kp === r.kp);
+    return adapted(r.difficulty, lvlOf(r.kp), S.kp_index[r.kp].level,
+                   mm && mm.status === "strong");
+  }).length;
+  const fitPct = prim.length ? fit / prim.length : 0;
+  const cards = [
+    {k:"断言产出", v:claims.length, g:"经审核放行", s:"info"},
+    {k:"审核拦截", v:m.claims_dropped ?? 0, g:"无依据 · 已阻断", s:(m.claims_dropped ? "fail" : "pass")},
+    {k:"盲区覆盖", v:(gapCov*100).toFixed(0)+"%", g:`目标 ≥${(TH.coverage*100)|0}%`,
+     s:(gapCov >= TH.coverage ? "pass" : "fail")},
+    {k:"双方印证占比", v:(claims.length ? (cnt.both/claims.length*100).toFixed(0) : 0)+"%",
+     g:"交叉验证通过率", s:"info"},
+    {k:"适配规则一致性", v:(fitPct*100).toFixed(0)+"%", g:"结构性 · 非效果指标",
+     s:"info"},
+    {k:"资源形态", v:(m.kinds || []).length, g:"讲义 / 实操 / 分阶题", s:"pass"},
+  ];
+  $("#metrics").innerHTML = cards.map(c => `
+    <div class="metric" data-s="${c.s}">
+      <div class="k">${esc(c.k)}</div>
+      <div class="v">${esc(c.v)}</div>
+      <div class="g">${esc(c.g)}</div>
+    </div>`).join("");
+
+  const CN = {both:"双方独立印证", arbitrated:"仲裁采纳", single:"仅单方提出"};
+  const total = claims.length || 1;
+  $("#cbar").innerHTML = ["both","arbitrated","single"].map(k => {
+    const n = cnt[k] || 0;
+    if(!n) return "";
+    const pct = n / total * 100;
+    return `<div class="cseg" data-c="${k}" style="flex:${n} 1 0"
+      title="${CN[k]} ${n} 条">${pct > 12 ? n : ""}</div>`;
+  }).join("");
+  $("#clegend").innerHTML = ["both","arbitrated","single"].map(k => {
+    const col = k === "both" ? "var(--run)" : k === "arbitrated" ? "var(--caution)" : "var(--faint)";
+    return `<span><i style="background:${col}"></i>${CN[k]} ${cnt[k] || 0}</span>`;
+  }).join("");
+}
+
+/* ---------- 图表 ---------- */
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, at, txt){
+  const e = document.createElementNS(NS, tag);
+  for(const k in at) e.setAttribute(k, at[k]);
+  if(txt != null) e.textContent = txt;
+  return e;
+}
+
+function drawCurve(){
+  const kp = $("#curvePick").value;
+  const m = S.diagnosis.mastery.find(x => x.kp === kp);
+  const svg = $("#curveSvg"); svg.innerHTML = "";
+  if(!m || !m.curve || m.curve.length < 2){ return; }
+  const W = 300, H = 160, pad = 30;
+  const X = i => pad + i * (W - pad * 2) / (m.curve.length - 1);
+  const Y = v => H - pad - v * (H - pad * 2);
+
+  [["ok", TH.mastery_ok, "var(--run)"], ["weak", TH.mastery_weak, "var(--caution)"],
+   ["blind", TH.mastery_blind, "var(--fault)"]].forEach(([n, v, c]) => {
+    svg.appendChild(el("line", {x1:pad, y1:Y(v), x2:W-pad, y2:Y(v),
+      stroke:c, "stroke-width":1, "stroke-dasharray":"3 4", opacity:.45}));
+    svg.appendChild(el("text", {x:W-pad+2, y:Y(v)+3, class:"ax", fill:c}, (v*100)|0));
+  });
+
+  const pts = m.curve.map((v, i) => `${X(i)},${Y(v)}`).join(" ");
+  svg.appendChild(el("polyline", {points:pts, fill:"none",
+    stroke:"var(--dispatch)", "stroke-width":2, "stroke-linejoin":"round"}));
+  m.curve.forEach((v, i) => {
+    svg.appendChild(el("circle", {cx:X(i), cy:Y(v), r:3.2,
+      fill:"var(--void)", stroke:"var(--dispatch)", "stroke-width":1.8}));
+    svg.appendChild(el("text", {x:X(i), y:H-pad+13, "text-anchor":"middle", class:"ax"},
+      i === 0 ? "先验" : "第" + i + "题"));
+  });
+  $("#curveNote").textContent =
+    `前测 ${m.asked} 题答对 ${m.correct} 题，掌握概率 ${(m.score*100).toFixed(1)}%，`
+    + `估计可信度 ${(m.confidence*100).toFixed(0)}%。曲线起点是由学历与实操学时给出的先验。`;
+}
+
+function paintCharts(){
+  $("#charts").hidden = false;
+  drawGaps(); drawFit(); drawPath();
+}
+
+function drawGaps(){
+  const svg = $("#cGaps"); svg.innerHTML = "";
+  const ms = S.diagnosis.mastery.slice().sort((a,b) => a.score - b.score).slice(0, 13);
+  const x0 = 128, w = 236, h = 17, gp = 4;
+  ms.forEach((m, i) => {
+    const y = 10 + i * (h + gp);
+    svg.appendChild(el("text", {x:x0-7, y:y+12, "text-anchor":"end", class:"kl"},
+      m.name.length > 9 ? m.name.slice(0,9) + "…" : m.name));
+    svg.appendChild(el("rect", {x:x0, y, width:w, height:h, fill:"var(--rail)"}));
+    const col = m.status === "blind" ? "var(--fault)"
+              : m.status === "weak" ? "var(--caution)"
+              : m.status === "ok" ? "var(--dispatch)" : "var(--run)";
+    svg.appendChild(el("rect", {x:x0, y, width:Math.max(2, w*m.score), height:h, fill:col, opacity:.85}));
+    svg.appendChild(el("text", {x:x0+w+5, y:y+12, class:"ax"},
+      m.asked ? `${m.correct}/${m.asked}` : (m.inferred_from ? "推断" : "未测")));
+    if(m.inferred_from){
+      // 由前置推断出来的盲区用虚线框标出，不冒充实测结果
+      svg.appendChild(el("rect", {x:x0, y, width:w, height:h, fill:"none",
+        stroke:"var(--dim)", "stroke-width":1, "stroke-dasharray":"3 3"}));
+    }
+  });
+  svg.appendChild(el("text", {x:x0, y:10 + ms.length*(h+gp) + 13, class:"ax"},
+    "条长为 BKT 掌握概率　红=盲区 橙=薄弱 蓝=达标 绿=牢固　虚线框=由前置推断，未实测"));
+}
+
+function drawFit(){
+  const svg = $("#cFit"); svg.innerHTML = "";
+  const W = 420, H = 320, pad = 46, iw = W - pad*2, ih = H - pad*2 - 14;
+  const lvl = kp => {
+    const m = S.diagnosis.mastery.find(x => x.kp === kp);
+    const sc = m ? m.score : 0;
+    if(sc < TH.mastery_blind) return 1;
+    return Math.max(1, Math.min(5, 1 + Math.round((sc - TH.mastery_blind)/(1 - TH.mastery_blind)*4)));
+  };
+  const kps = [...new Set(S.resources.map(r => r.kp))];
+  const X = i => pad + (kps.length < 2 ? iw/2 : i*iw/(kps.length-1));
+  const Y = v => pad + ih - (v-1)/4*ih;
+
+  for(let v = 1; v <= 5; v++){
+    svg.appendChild(el("line", {x1:pad, y1:Y(v), x2:W-pad, y2:Y(v),
+      stroke:"var(--etch)", "stroke-width":1}));
+    svg.appendChild(el("text", {x:pad-7, y:Y(v)+4, "text-anchor":"end", class:"ax"}, v));
+  }
+  if(kps.length){
+    const top = kps.map((k,i) => `${X(i)},${Y(Math.min(5, lvl(k)+2))}`).join(" ");
+    const bot = kps.map((k,i) => `${X(i)},${Y(lvl(k))}`).reverse().join(" ");
+    svg.appendChild(el("polygon", {points:`${top} ${bot}`, fill:"var(--run)", opacity:.12}));
+  }
+  svg.appendChild(el("polyline", {points:kps.map((k,i) => `${X(i)},${Y(lvl(k))}`).join(" "),
+    fill:"none", stroke:"var(--dim)", "stroke-width":1.4, "stroke-dasharray":"4 3"}));
+
+  kps.forEach((k, i) => {
+    S.resources.filter(r => r.kp === k).forEach(r => {
+      // 降维补救与进阶挑战本来就该落在窗口外，用菱形另作标记，
+      // 不能跟"首轮资源跑偏"混为一谈画成红圈。
+      if(r.variant && r.variant !== "primary"){
+        const c = r.variant === "remedial" ? "var(--caution)" : "var(--dispatch)";
+        const cx = X(i), cy = Y(r.difficulty), s = 4.6;
+        svg.appendChild(el("polygon", {
+          points:`${cx},${cy-s} ${cx+s},${cy} ${cx},${cy+s} ${cx-s},${cy}`,
+          fill:"var(--void)", stroke:c, "stroke-width":1.8}));
+        return;
+      }
+      const mm = S.diagnosis.mastery.find(x => x.kp === k);
+      const strong = mm && mm.status === "strong";
+      const ceil = Math.min(5, S.kp_index[k].level + (strong ? 1 : 0));
+      const L = lvl(k);
+      const inside = ceil < L ? r.difficulty === ceil
+                              : (r.difficulty - L >= 0 && r.difficulty - L <= 2);
+      svg.appendChild(el("circle", {cx:X(i), cy:Y(r.difficulty), r:4.5,
+        fill:"var(--void)", stroke: inside ? "var(--run)" : "var(--fault)", "stroke-width":2}));
+    });
+    const nm = S.kp_index[k].name;
+    svg.appendChild(el("text", {x:X(i), y:H-pad+6, "text-anchor":"middle", class:"ax"},
+      nm.length > 5 ? nm.slice(0,5) + "…" : nm));
+  });
+  svg.appendChild(el("text", {x:pad, y:16, class:"ax"},
+    "绿带＝适配窗口（学习者水平 ~ +2）　虚线＝学习者水平　圆点＝首轮资源"));
+  svg.appendChild(el("text", {x:pad, y:28, class:"ax"},
+    "橙菱＝降维补救　蓝菱＝进阶挑战　两者按设计落在窗口外，不计入适配率"));
+}
+
+function drawPath(){
+  const svg = $("#cPath"); svg.innerHTML = "";
+  const items = S.path.map((k,i) => ({kp:k, name:S.path_names[i]}));
+  const x = 22, w = 376, bh = 32, gp = 13;
+  items.forEach((it, i) => {
+    const y = 14 + i*(bh+gp);
+    const rs = S.resources.filter(r => r.kp === it.kp);
+    const done = rs.length > 0;
+    svg.appendChild(el("rect", {x, y, width:w, height:bh,
+      fill: done ? "rgba(53,208,127,.07)" : "var(--rail)",
+      stroke: done ? "var(--run)" : "var(--etch)", "stroke-width":1.3}));
+    svg.appendChild(el("text", {x:x+11, y:y+21, class:"kl", fill:"var(--readout)"},
+      `${i+1}. ${it.name}`));
+    svg.appendChild(el("text", {x:x+w-11, y:y+21, "text-anchor":"end", class:"ax"},
+      done ? `${rs.length} 份 · 难度 ${rs[0].difficulty}` : "待生成"));
+    if(i < items.length-1){
+      svg.appendChild(el("line", {x1:x+20, y1:y+bh, x2:x+20, y2:y+bh+gp,
+        stroke:"var(--etch)", "stroke-width":1.3}));
+      svg.appendChild(el("polygon", {
+        points:`${x+16},${y+bh+gp-5} ${x+24},${y+bh+gp-5} ${x+20},${y+bh+gp}`,
+        fill:"var(--faint)"}));
+    }
+  });
+  svg.appendChild(el("text", {x, y:14 + items.length*(bh+gp) + 11, class:"ax"},
+    "按知识点前置关系拓扑排序　绿框＝已产出资源"));
+}
+
+/* ============================================================
+   学情访谈：自述 → 自适应测评 → 现场诊断 → 跑流水线
+   这一段是把"预设演示"变成"现场演示"的核心。
+   ============================================================ */
+let IV = null;          // Engine.Adaptive 实例
+let IV_R = null;        // Engine.Retriever 实例
+let IV_DEPTH = 16;
+let IV_BG = null;
+let curItem = null;
+
+function kpIndexFromSnap(){
+  const idx = {};
+  for(const k of SNAP.kps) idx[k.id] = k;
+  return idx;
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-depth]");
+  if(!b) return;
+  document.querySelectorAll("[data-depth]").forEach(x => x.removeAttribute("data-on"));
+  b.dataset.on = "1";
+  IV_DEPTH = parseInt(b.dataset.depth, 10);
+});
+
+function startInterview(){
+  const text = $("#ivText").value.trim();
+  IV_BG = Engine.parseIntake(text);
+  const asks = Engine.clarify(IV_BG);
+
+  const chips = [
+    IV_BG.education && `学历 <b>${esc(IV_BG.education)}</b>`,
+    IV_BG.grade && `阶段 <b>${esc(IV_BG.grade)}</b>`,
+    IV_BG.major && `方向 <b>${esc(IV_BG.major)}</b>`,
+    `实操 <b>${IV_BG.hands_on_hours}h</b>`,
+  ].filter(Boolean);
+
+  $("#ivIntro").innerHTML = `
+    <div class="lbl">自述抽取结果</div>
+    <div class="bgchips">${chips.map(c => `<span class="bgchip">${c}</span>`).join("")}</div>
+    <p class="note">这些只用来给初始掌握概率定先验，不直接决定结论；
+      随着作答累积，先验会被数据冲淡。自述抽错了也不会一错到底。</p>
+    ${asks.length ? `<div class="lbl" style="margin-top:12px">还需要补充</div>
+      <p class="note" style="margin-top:4px">${asks.map(esc).join("<br>")}</p>
+      <textarea id="ivMore" rows="2" placeholder="补充一句，或直接跳过"></textarea>
+      <button class="cmd" id="ivGo2" style="margin-top:8px">继续</button>`
+     : `<button class="cmd" id="ivGo2" style="margin-top:12px">开始答题</button>`}`;
+
+  $("#ivGo2").onclick = () => {
+    const more = $("#ivMore") ? $("#ivMore").value.trim() : "";
+    if(more){
+      const extra = Engine.parseIntake(more);
+      for(const k of ["education","grade","major","goal"])
+        if(!IV_BG[k] && extra[k]) IV_BG[k] = extra[k];
+      if(!IV_BG.hands_on_hours) IV_BG.hands_on_hours = extra.hands_on_hours;
+    }
+    beginQuiz();
+  };
+}
+
+function beginQuiz(){
+  IV_R = IV_R || new Engine.Retriever(SNAP.kb);
+  IV = new Engine.Adaptive(SNAP.items, SNAP.kps, IV_BG, {maxItems: IV_DEPTH});
+  $("#ivStage").textContent = "测评中";
+  $("#quizMod").hidden = false;
+  $("#presetMod").hidden = true;
+  $("#ivIntro").innerHTML = `
+    <div class="lbl">初始掌握概率（先验）</div>
+    <div class="mono" style="font-size:24px; font-weight:700; margin-top:4px">
+      ${(IV.prior*100).toFixed(1)}%</div>
+    <p class="note">由学历与实操学时推出。零基础约 20%，有实操经历会更高。</p>`;
+  nextQuestion();
+}
+
+function nextQuestion(){
+  const it = IV.next();
+  if(!it){ finishQuiz(); return; }
+  curItem = it;
+  const sn = IV.snapshot ? null : null;
+  $("#quizProgress").textContent =
+    `第 ${IV.asked.length + 1} / ${IV_DEPTH} 题 · 已覆盖 ${
+      Object.values(IV.state).filter(x => x.n > 0).length} / ${SNAP.kps.length} 个知识点`;
+  $("#probeBanner").hidden = it._reason !== "probe";
+  if(it._reason === "probe"){
+    $("#probeBanner").innerHTML =
+      `<b class="mono">动态追问</b> · 上一题的结果与当前估计冲突，就地追加同知识点的一道题来消解歧义`;
+  }
+  const st = IV.state[it.kp];
+  $("#quizMeta").innerHTML =
+    `${esc(it._kp_name)}　·　题目难度 ${it.level}/5　·　`
+    + `当前该点掌握概率 ${(st.p*100).toFixed(0)}%　·　`
+    + `预测答对 ${((st.p*(1-IV.P.p_S)+(1-st.p)*IV.P.p_G)*100).toFixed(0)}%`;
+  $("#quizStem").textContent = it.stem;
+  $("#quizFeed").hidden = true;
+  $("#quizOpts").innerHTML = it.options.map((o, i) =>
+    `<button class="opt" data-i="${i}">
+       <span class="ix">${String.fromCharCode(65+i)}</span>${esc(o)}</button>`).join("");
+  document.querySelectorAll("#quizOpts .opt").forEach(b =>
+    b.onclick = () => answerQuestion(parseInt(b.dataset.i, 10)));
+}
+
+function answerQuestion(choice){
+  const it = curItem;
+  const step = IV.answer(it.id, choice);
+  document.querySelectorAll("#quizOpts .opt").forEach((b, i) => {
+    b.disabled = true;
+    if(i === it.answer) b.classList.add("right");
+    else if(i === choice) b.classList.add("wrong");
+  });
+  const up = step.delta >= 0;
+  $("#quizFeed").hidden = false;
+  $("#quizFeed").innerHTML = `
+    <div class="deltabar">
+      <span class="num ${up ? "up" : "down"}">${up ? "+" : ""}${(step.delta*100).toFixed(1)}%</span>
+      <span class="txt">
+        「${esc(step.kp_name)}」掌握概率 ${(step.before*100).toFixed(0)}% →
+        <b class="mono">${(step.after*100).toFixed(0)}%</b>，
+        估计可信度 ${(step.confidence*100).toFixed(0)}%。
+        ${step.probe ? "<br><b>触发追问：</b>" + esc(step.probe) : ""}
+      </span>
+    </div>
+    <button class="cmd" id="quizNext" style="margin-top:12px; width:auto; padding:9px 20px">
+      ${IV.next() ? "下一题" : "完成测评，生成资源"}</button>`;
+  $("#quizNext").onclick = nextQuestion;
+}
+
+function finishQuiz(){
+  $("#quizMod").hidden = true;
+  $("#ivStage").textContent = "已完成";
+  setRun("busy", "调度中");
+  $("#rail").innerHTML = "";
+  $("#arena").innerHTML = "";
+
+  const diag = IV.diagnose(TH);
+  const t0 = performance.now();
+  S = Engine.runPipeline(diag, IV_R, kpIndexFromSnap(), TH, 4);
+  S.profile = {id:"LIVE", name:"本次访谈", label:"现场输入"};
+  const ms = Math.round(performance.now() - t0);
+
+  $("#ivIntro").innerHTML = `
+    <div class="lbl">测评完成</div>
+    <p class="note" style="margin-top:6px">
+      共 ${IV.asked.length} 题，覆盖 ${Object.values(IV.state).filter(x=>x.n>0).length}
+      / ${SNAP.kps.length} 个知识点，触发追问
+      ${IV.log.filter(x=>x.probe).length} 次。整条流水线在浏览器内跑完，用时 ${ms} ms。
+    </p>
+    <button class="cmd" id="ivAgain" style="margin-top:10px">重新访谈</button>`;
+  $("#ivAgain").onclick = () => location.reload();
+
+  paintDiagnosis();
+  streamRail(S.events, 0).then(() => {
+    paintArena(); paintResources(); paintFeedback();
+    paintMetrics(); paintCharts();
+    setRun("run", "就绪");
+  });
+}
+
+/* ---------- 启动 ---------- */
+$("#go").onclick = start;
+$("#ivStart").onclick = startInterview;
+probe().then(subjects);
+</script>
+</body>
+</html>

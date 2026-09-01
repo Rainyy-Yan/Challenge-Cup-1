@@ -1,0 +1,44 @@
+{
+  "cases": 50,
+  "grounding": {
+    "verified_claims": 1176,
+    "unverified_claims": 7179,
+    "verified_share": 0.1408,
+    "kb_verified_ratio": 0.1923,
+    "hallucination_on_verified": 0.0,
+    "hallucination_on_unverified": 0.0
+  },
+  "by_consensus": {
+    "both": {
+      "claims": 4974,
+      "unsupported": 0,
+      "rate": 0.0
+    },
+    "single": {
+      "claims": 3381,
+      "unsupported": 0,
+      "rate": 0.0
+    }
+  },
+  "debate_totals": {
+    "agreed": 1658,
+    "arbitrated": 0,
+    "dropped": 0,
+    "single": 1127
+  },
+  "hallucination_rate": 0.0,
+  "adapt_accuracy": 1.0,
+  "coverage": 1.0,
+  "claims_total": 8355,
+  "claims_intercepted": 0,
+  "targets": {
+    "hallucination_rate": "<0.05",
+    "adapt_accuracy": ">=0.85",
+    "coverage": ">=0.9"
+  },
+  "pass": {
+    "hallucination_rate": true,
+    "adapt_accuracy": true,
+    "coverage": true
+  }
+}

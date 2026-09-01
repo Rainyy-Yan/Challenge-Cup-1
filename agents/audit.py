@@ -1,0 +1,111 @@
+"""审核裁判 Agent。
+
+整套方案的地基。逻辑很短，但它是"幻觉率<5%"这个指标能成立的原因：
+无依据的断言在输出之前就被拦掉了，不是生成完再去统计有多少条错的。
+
+判据分三层，任何一层不过就打回：
+  1. 有没有引用。没有 source_id 直接判无依据，模型不给出处就等于没说。
+  2. 引用对不对。断言与所引切片的二元组覆盖率要过线，防止张冠李戴。
+  3. 数字准不准。断言里出现的数字必须在切片里出现过。这一条专治
+     大模型最典型的失败模式：句式抄对了，把 250 写成 200。
+
+接了真模型以后会多一层蕴含判断，但上面三条规则始终并行跑，取更严的结果。
+不要用模型替掉规则，模型自己也会判错，两套独立判据一起用才有意义。
+"""
+
+from __future__ import annotations
+
+import json
+
+import config
+from core.llm import parse_json
+from core.retrieval import Retriever, numbers_in, overlap_ratio, tokenize
+from core.schema import (Claim, VERDICT_CONTRADICTED, VERDICT_SUPPORTED,
+                         VERDICT_UNSUPPORTED)
+
+_SYSTEM = (
+    "你是专业内容的审核员。给你一条陈述和一段资料，判断资料是否支持该陈述。"
+    "只输出 JSON：{\"verdict\": \"supported|unsupported|contradicted\", \"reason\": \"简短理由\"}。"
+    "资料没提到的内容一律判 unsupported，不要凭常识补充。"
+)
+
+
+class AuditAgent:
+    name = "审核裁判Agent"
+
+    def __init__(self, llm, retriever: Retriever):
+        self.llm = llm
+        self.retriever = retriever
+
+    def _rule_check(self, claim: Claim) -> tuple[str, str, float]:
+        if not claim.source_id:
+            return VERDICT_UNSUPPORTED, "未给出知识库引用", 0.0
+        chunk = self.retriever.get(claim.source_id)
+        if chunk is None:
+            return VERDICT_UNSUPPORTED, f"引用的切片 {claim.source_id} 不存在", 0.0
+        ratio = overlap_ratio(claim.text, chunk.text)
+        if config.NUMERIC_STRICT:
+            extra = numbers_in(claim.text) - numbers_in(chunk.text)
+            if extra:
+                return (VERDICT_CONTRADICTED,
+                        f"断言中的数值 {sorted(extra)} 在所引切片中不存在", ratio)
+        if ratio < config.EVIDENCE_MIN:
+            return VERDICT_UNSUPPORTED, f"与所引切片的证据覆盖率仅 {ratio:.2f}", ratio
+        if config.TERM_STRICT:
+            # 张冠李戴之一：断言用了知识库里的特征术语，但所引切片没有这个术语。
+            # 索引建在 title + text 上，这里也必须用同一份文本，否则会误伤标题里的词。
+            missing = self.retriever.distinctive_in(claim.text) - set(
+                tokenize(f"{chunk.title} {chunk.text}"))
+            if len(missing) >= config.TERM_MISS_TOLERANCE:
+                return (VERDICT_CONTRADICTED,
+                        f"断言使用的术语 {sorted(missing)} 不属于所引切片", ratio)
+        if config.MISATTRIB_MARGIN > 0:
+            # 张冠李戴之二：全库里有别的切片明显更能支撑这条断言，
+            # 说明模型把 A 的内容挂到了 B 的出处上。典型形态是报警代码对错含义。
+            best_id, best = "", 0.0
+            for other in self.retriever.chunks:
+                r = overlap_ratio(claim.text, f"{other.title} {other.text}")
+                if r > best:
+                    best_id, best = other.id, r
+            if best_id != chunk.id and best - ratio >= config.MISATTRIB_MARGIN:
+                return (VERDICT_CONTRADICTED,
+                        f"切片 {best_id} 的支撑度 {best:.2f} 明显高于所引 "
+                        f"{chunk.id} 的 {ratio:.2f}，疑似引用错位", ratio)
+        return VERDICT_SUPPORTED, f"证据覆盖率 {ratio:.2f}", ratio
+
+    def _llm_check(self, claim: Claim) -> str | None:
+        """真模型在场时的第二判据。Mock 后端返回空串，直接跳过。"""
+        chunk = self.retriever.get(claim.source_id) if claim.source_id else None
+        if chunk is None:
+            return None
+        raw = self.llm.run(
+            task="verify",
+            system=_SYSTEM,
+            user=json.dumps({"陈述": claim.text, "资料": chunk.text}, ensure_ascii=False),
+            json_mode=True,
+        )
+        if not raw:
+            return None
+        verdict = parse_json(raw).get("verdict")
+        return verdict if verdict in (
+            VERDICT_SUPPORTED, VERDICT_UNSUPPORTED, VERDICT_CONTRADICTED) else None
+
+    def review(self, claims: list[Claim]) -> tuple[list[Claim], list[Claim]]:
+        kept, dropped = [], []
+        for claim in claims:
+            verdict, note, ratio = self._rule_check(claim)
+            claim.evidence_score = round(ratio, 3)
+            llm_verdict = self._llm_check(claim) if verdict == VERDICT_SUPPORTED else None
+            if llm_verdict and llm_verdict != VERDICT_SUPPORTED:
+                # 规则放行、模型拦下，取严的一方
+                verdict = llm_verdict
+                note = f"{note}；模型判定为 {llm_verdict}"
+            claim.verdict = verdict
+            claim.audit_note = note
+            (kept if verdict == VERDICT_SUPPORTED else dropped).append(claim)
+        return kept, dropped
+
+    @staticmethod
+    def intercept_rate(kept: list[Claim], dropped: list[Claim]) -> float:
+        total = len(kept) + len(dropped)
+        return round(len(dropped) / total, 4) if total else 0.0

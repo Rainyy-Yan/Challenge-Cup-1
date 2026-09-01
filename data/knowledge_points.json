@@ -1,0 +1,21 @@
+{
+  "domain": "工业机器人现场操作与调试",
+  "version": "0.1",
+  "points": [
+    {"id": "KP-01", "name": "机器人本体与控制柜构成", "level": 1, "prereq": [], "tags": ["机械", "认知"]},
+    {"id": "KP-02", "name": "示教器操作与运行模式", "level": 1, "prereq": ["KP-01"], "tags": ["操作", "安全"]},
+    {"id": "KP-03", "name": "坐标系类型与切换", "level": 2, "prereq": ["KP-02"], "tags": ["理论", "操作"]},
+    {"id": "KP-04", "name": "工具坐标系TCP标定", "level": 3, "prereq": ["KP-03"], "tags": ["操作", "精度"]},
+    {"id": "KP-05", "name": "工件坐标系标定", "level": 3, "prereq": ["KP-03"], "tags": ["操作", "精度"]},
+    {"id": "KP-06", "name": "基本运动指令", "level": 2, "prereq": ["KP-03"], "tags": ["编程"]},
+    {"id": "KP-07", "name": "定位等级与转弯区", "level": 3, "prereq": ["KP-06"], "tags": ["编程", "节拍"]},
+    {"id": "KP-08", "name": "程序结构与子程序", "level": 3, "prereq": ["KP-06"], "tags": ["编程"]},
+    {"id": "KP-09", "name": "数字IO配置与互锁", "level": 4, "prereq": ["KP-08"], "tags": ["编程", "集成"]},
+    {"id": "KP-10", "name": "常见报警代码处理", "level": 3, "prereq": ["KP-02"], "tags": ["运维", "安全"]},
+    {"id": "KP-11", "name": "零点校对", "level": 4, "prereq": ["KP-10"], "tags": ["运维", "精度"]},
+    {"id": "KP-12", "name": "润滑保养与日常点检", "level": 2, "prereq": ["KP-01"], "tags": ["运维"]},
+    {"id": "KP-13", "name": "安全围栏与示教安全规程", "level": 1, "prereq": [], "tags": ["安全"]},
+    {"id": "KP-14", "name": "负载设定与碰撞检测", "level": 4, "prereq": ["KP-04"], "tags": ["调试", "精度"]},
+    {"id": "KP-15", "name": "节拍优化", "level": 5, "prereq": ["KP-07", "KP-09"], "tags": ["工艺", "优化"]}
+  ]
+}

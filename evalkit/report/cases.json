@@ -1,0 +1,802 @@
+[
+  {
+    "case": "P-A",
+    "debate": {
+      "agreed_n": 35,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B",
+    "debate": {
+      "agreed_n": 20,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 15
+    },
+    "gaps": 7,
+    "covered": 7,
+    "claims": 105,
+    "hallucinated": 0,
+    "resources": 21,
+    "adapted": 21,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-001",
+    "debate": {
+      "agreed_n": 29,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 17
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 138,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-002",
+    "debate": {
+      "agreed_n": 37,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 29
+    },
+    "gaps": 12,
+    "covered": 12,
+    "claims": 198,
+    "hallucinated": 0,
+    "resources": 36,
+    "adapted": 36,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-003",
+    "debate": {
+      "agreed_n": 30,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 153,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-004",
+    "debate": {
+      "agreed_n": 20,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 15
+    },
+    "gaps": 7,
+    "covered": 7,
+    "claims": 105,
+    "hallucinated": 0,
+    "resources": 21,
+    "adapted": 21,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-005",
+    "debate": {
+      "agreed_n": 37,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 29
+    },
+    "gaps": 12,
+    "covered": 12,
+    "claims": 198,
+    "hallucinated": 0,
+    "resources": 36,
+    "adapted": 36,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-006",
+    "debate": {
+      "agreed_n": 38,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 23
+    },
+    "gaps": 11,
+    "covered": 11,
+    "claims": 183,
+    "hallucinated": 0,
+    "resources": 33,
+    "adapted": 33,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-007",
+    "debate": {
+      "agreed_n": 25,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 23
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 144,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-008",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-009",
+    "debate": {
+      "agreed_n": 26,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 19
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 135,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-010",
+    "debate": {
+      "agreed_n": 20,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 10
+    },
+    "gaps": 6,
+    "covered": 6,
+    "claims": 90,
+    "hallucinated": 0,
+    "resources": 18,
+    "adapted": 18,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-011",
+    "debate": {
+      "agreed_n": 39,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 27
+    },
+    "gaps": 12,
+    "covered": 12,
+    "claims": 198,
+    "hallucinated": 0,
+    "resources": 36,
+    "adapted": 36,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-012",
+    "debate": {
+      "agreed_n": 35,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-013",
+    "debate": {
+      "agreed_n": 30,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 15
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 135,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-014",
+    "debate": {
+      "agreed_n": 45,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 31
+    },
+    "gaps": 14,
+    "covered": 14,
+    "claims": 228,
+    "hallucinated": 0,
+    "resources": 42,
+    "adapted": 42,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-015",
+    "debate": {
+      "agreed_n": 34,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 22
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-016",
+    "debate": {
+      "agreed_n": 26,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 22
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 144,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-017",
+    "debate": {
+      "agreed_n": 43,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 28
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-018",
+    "debate": {
+      "agreed_n": 39,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 22
+    },
+    "gaps": 11,
+    "covered": 11,
+    "claims": 183,
+    "hallucinated": 0,
+    "resources": 33,
+    "adapted": 33,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-019",
+    "debate": {
+      "agreed_n": 23,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 17
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 120,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-020",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-021",
+    "debate": {
+      "agreed_n": 33,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 18
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 153,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-022",
+    "debate": {
+      "agreed_n": 19,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 18
+    },
+    "gaps": 7,
+    "covered": 7,
+    "claims": 111,
+    "hallucinated": 0,
+    "resources": 21,
+    "adapted": 21,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-023",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-024",
+    "debate": {
+      "agreed_n": 35,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-025",
+    "debate": {
+      "agreed_n": 25,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 25
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 150,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-026",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-027",
+    "debate": {
+      "agreed_n": 33,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 18
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 153,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-028",
+    "debate": {
+      "agreed_n": 25,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 15
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 120,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-029",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-030",
+    "debate": {
+      "agreed_n": 35,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-031",
+    "debate": {
+      "agreed_n": 17,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 13
+    },
+    "gaps": 6,
+    "covered": 6,
+    "claims": 90,
+    "hallucinated": 0,
+    "resources": 18,
+    "adapted": 18,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-032",
+    "debate": {
+      "agreed_n": 39,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 27
+    },
+    "gaps": 12,
+    "covered": 12,
+    "claims": 198,
+    "hallucinated": 0,
+    "resources": 36,
+    "adapted": 36,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-033",
+    "debate": {
+      "agreed_n": 38,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 23
+    },
+    "gaps": 11,
+    "covered": 11,
+    "claims": 183,
+    "hallucinated": 0,
+    "resources": 33,
+    "adapted": 33,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-034",
+    "debate": {
+      "agreed_n": 28,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 19
+    },
+    "gaps": 9,
+    "covered": 9,
+    "claims": 141,
+    "hallucinated": 0,
+    "resources": 27,
+    "adapted": 27,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-035",
+    "debate": {
+      "agreed_n": 45,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 31
+    },
+    "gaps": 14,
+    "covered": 14,
+    "claims": 228,
+    "hallucinated": 0,
+    "resources": 42,
+    "adapted": 42,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-036",
+    "debate": {
+      "agreed_n": 38,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 23
+    },
+    "gaps": 11,
+    "covered": 11,
+    "claims": 183,
+    "hallucinated": 0,
+    "resources": 33,
+    "adapted": 33,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-037",
+    "debate": {
+      "agreed_n": 27,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 13
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 120,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-038",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-039",
+    "debate": {
+      "agreed_n": 35,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-040",
+    "debate": {
+      "agreed_n": 26,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 14
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 120,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-041",
+    "debate": {
+      "agreed_n": 38,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 26
+    },
+    "gaps": 12,
+    "covered": 12,
+    "claims": 192,
+    "hallucinated": 0,
+    "resources": 36,
+    "adapted": 36,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-042",
+    "debate": {
+      "agreed_n": 35,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 21
+    },
+    "gaps": 10,
+    "covered": 10,
+    "claims": 168,
+    "hallucinated": 0,
+    "resources": 30,
+    "adapted": 30,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-043",
+    "debate": {
+      "agreed_n": 23,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 19
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 126,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-044",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  },
+  {
+    "case": "P-A-045",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 25
+    },
+    "gaps": 12,
+    "covered": 12,
+    "claims": 198,
+    "hallucinated": 0,
+    "resources": 36,
+    "adapted": 36,
+    "intercepted": 0
+  },
+  {
+    "case": "P-B-046",
+    "debate": {
+      "agreed_n": 23,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 19
+    },
+    "gaps": 8,
+    "covered": 8,
+    "claims": 126,
+    "hallucinated": 0,
+    "resources": 24,
+    "adapted": 24,
+    "intercepted": 0
+  },
+  {
+    "case": "P-C-047",
+    "debate": {
+      "agreed_n": 41,
+      "arbitrated_n": 0,
+      "dropped_n": 0,
+      "single_n": 30
+    },
+    "gaps": 13,
+    "covered": 13,
+    "claims": 213,
+    "hallucinated": 0,
+    "resources": 39,
+    "adapted": 39,
+    "intercepted": 0
+  }
+]

@@ -1,0 +1,931 @@
+{
+  "summary": {
+    "n": 47,
+    "mean_score": 85.7,
+    "unusable": 0,
+    "unusable_ids": [],
+    "flaw_counts": {
+      "FARDISTRACT": 18,
+      "THINEVIDENCE": 17,
+      "LENCLUE": 16,
+      "DUPDISTRACT": 4,
+      "SHORTSTEM": 1
+    },
+    "calibrated": 0,
+    "mean_discrimination": null,
+    "negative_discrimination": []
+  },
+  "position": {
+    "n": 47,
+    "counts": {
+      "A": 13,
+      "B": 9,
+      "C": 9,
+      "D": 16
+    },
+    "skewed": false,
+    "detail": "位置分布大致均匀"
+  },
+  "items": [
+    {
+      "id": "Q-001",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-002",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.11，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-003",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-004",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "DUPDISTRACT",
+          "severity": "warn",
+          "detail": "干扰项「500毫米每秒」与「100毫米每秒」相似度 0.78，实际有效选项少于名义值"
+        }
+      ]
+    },
+    {
+      "id": "Q-005",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-006",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 8 字，最短干扰项 4 字，应试者不用会也能蒙对"
+        }
+      ]
+    },
+    {
+      "id": "Q-007",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-008",
+      "score": 65,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 8 字，最短干扰项 3 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "DUPDISTRACT",
+          "severity": "warn",
+          "detail": "干扰项「不大于0.1毫米」与「不大于2毫米」相似度 0.75，实际有效选项少于名义值"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.27，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-009",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 9 字，最短干扰项 3 字，应试者不用会也能蒙对"
+        }
+      ]
+    },
+    {
+      "id": "Q-010",
+      "score": 70,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 4 字，最短干扰项 2 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-011",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-012",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-013",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-014",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.08，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-015",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-016",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.00，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-017",
+      "score": 65,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 13 字，最短干扰项 6 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.08，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-018",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-019",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-020",
+      "score": 70,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 7 字，最短干扰项 3 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "DUPDISTRACT",
+          "severity": "warn",
+          "detail": "干扰项「不低于1.0米」与「不低于2.0米」相似度 0.80，实际有效选项少于名义值"
+        }
+      ]
+    },
+    {
+      "id": "Q-021",
+      "score": 95,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.11，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-022",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-023",
+      "score": 95,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.11，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-024",
+      "score": 95,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.00，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-025",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-026",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 12 字，最短干扰项 5 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.30，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-027",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-028",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-029",
+      "score": 65,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 14 字，最短干扰项 5 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.36，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-030",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-031",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-032",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.00，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-033",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-034",
+      "score": 70,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 9 字，最短干扰项 4 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-035",
+      "score": 95,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.27，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-036",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-037",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 8 字，最短干扰项 4 字，应试者不用会也能蒙对"
+        }
+      ]
+    },
+    {
+      "id": "Q-038",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 12 字，最短干扰项 3 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.56，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-039",
+      "score": 50,
+      "grade": "待改",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 13 字，最短干扰项 5 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "SHORTSTEM",
+          "severity": "warn",
+          "detail": "题干仅 9 字，缺少作答语境"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.17，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-040",
+      "score": 85,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-041",
+      "score": 65,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 7 字，最短干扰项 2 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.00，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-042",
+      "score": 100,
+      "grade": "良",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": []
+    },
+    {
+      "id": "Q-043",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.06，偏低，建议人工复核"
+        }
+      ]
+    },
+    {
+      "id": "Q-044",
+      "score": 70,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 7 字，最短干扰项 3 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "DUPDISTRACT",
+          "severity": "warn",
+          "detail": "干扰项「不小于1.0米」与「不小于0.2米」相似度 0.80，实际有效选项少于名义值"
+        }
+      ]
+    },
+    {
+      "id": "Q-045",
+      "score": 70,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 15 字，最短干扰项 5 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-046",
+      "score": 70,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "LENCLUE",
+          "severity": "warn",
+          "detail": "正确答案 12 字，最短干扰项 5 字，应试者不用会也能蒙对"
+        },
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "3 个干扰项与所考内容几乎无关，缺乏干扰力"
+        }
+      ]
+    },
+    {
+      "id": "Q-047",
+      "score": 80,
+      "grade": "可用",
+      "usable": true,
+      "p_value": null,
+      "discrimination": null,
+      "flaws": [
+        {
+          "code": "FARDISTRACT",
+          "severity": "warn",
+          "detail": "2 个干扰项与所考内容几乎无关，缺乏干扰力"
+        },
+        {
+          "code": "THINEVIDENCE",
+          "severity": "info",
+          "detail": "正确答案与出处的证据覆盖率 0.43，偏低，建议人工复核"
+        }
+      ]
+    }
+  ],
+  "worklist": [
+    {
+      "id": "Q-039",
+      "score": 50,
+      "grade": "待改",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "题干过短，缺少语境",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-008",
+      "score": 65,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项重复，有效选项少于名义值"
+      ]
+    },
+    {
+      "id": "Q-017",
+      "score": 65,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-029",
+      "score": 65,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-041",
+      "score": 65,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-010",
+      "score": 70,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-020",
+      "score": 70,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项重复，有效选项少于名义值"
+      ]
+    },
+    {
+      "id": "Q-034",
+      "score": 70,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-044",
+      "score": 70,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项重复，有效选项少于名义值"
+      ]
+    },
+    {
+      "id": "Q-045",
+      "score": 70,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-046",
+      "score": 70,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长",
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-002",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-014",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-016",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-026",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长"
+      ]
+    },
+    {
+      "id": "Q-032",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-038",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "长度线索：正确答案明显更长"
+      ]
+    },
+    {
+      "id": "Q-043",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "干扰项离题，缺乏干扰力"
+      ]
+    },
+    {
+      "id": "Q-047",
+      "score": 80,
+      "grade": "可用",
+      "todo": [
+        "干扰项离题，缺乏干扰力"
+      ]
+    }
+  ]
+}

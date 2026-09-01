@@ -1,0 +1,250 @@
+{
+  "summary": {
+    "fixtures": 21,
+    "caught": 19,
+    "recall": 0.9048,
+    "true_claims": 10,
+    "false_positives": 0,
+    "false_positive_rate": 0.0
+  },
+  "by_category": {
+    "H1": {
+      "name": "凭空捏造",
+      "total": 3,
+      "caught": 3,
+      "recall": 1.0,
+      "missed": []
+    },
+    "H2": {
+      "name": "引用悬空",
+      "total": 2,
+      "caught": 2,
+      "recall": 1.0,
+      "missed": []
+    },
+    "H3": {
+      "name": "数值篡改",
+      "total": 6,
+      "caught": 6,
+      "recall": 1.0,
+      "missed": []
+    },
+    "H4": {
+      "name": "张冠李戴",
+      "total": 4,
+      "caught": 4,
+      "recall": 1.0,
+      "missed": []
+    },
+    "H5": {
+      "name": "过度泛化",
+      "total": 3,
+      "caught": 2,
+      "recall": 0.6667,
+      "missed": [
+        "所有工业机器人的TCP标定误差都必须不大于0.2毫米。"
+      ]
+    },
+    "H6": {
+      "name": "似真外推",
+      "total": 3,
+      "caught": 2,
+      "recall": 0.6667,
+      "missed": [
+        "更换编码器电池后系统会自动恢复原有零点数据。"
+      ]
+    }
+  },
+  "detail": [
+    {
+      "category": "H1",
+      "claim": "控制柜每运行500小时需要更换一次主控板电池。",
+      "cited": null,
+      "why_wrong": "无出处",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "未给出知识库引用"
+    },
+    {
+      "category": "H1",
+      "claim": "示教器支持通过蓝牙与控制柜无线连接。",
+      "cited": null,
+      "why_wrong": "无出处",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "未给出知识库引用"
+    },
+    {
+      "category": "H1",
+      "claim": "机器人在自动模式下会自动优化路径以缩短节拍。",
+      "cited": null,
+      "why_wrong": "无出处",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "未给出知识库引用"
+    },
+    {
+      "category": "H2",
+      "claim": "工具坐标系可通过六点法标定。",
+      "cited": "KB-999",
+      "why_wrong": "切片不存在",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "引用的切片 KB-999 不存在"
+    },
+    {
+      "category": "H2",
+      "claim": "安全回路板具备自诊断功能。",
+      "cited": "KB-500",
+      "why_wrong": "切片不存在",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "引用的切片 KB-500 不存在"
+    },
+    {
+      "category": "H3",
+      "claim": "T1模式下末端法兰中心的移动速度被限制在200毫米每秒以内。",
+      "cited": "KB-004",
+      "why_wrong": "原文为250",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['200'] 在所引切片中不存在"
+    },
+    {
+      "category": "H3",
+      "claim": "机器人安全围栏高度不低于2.4米。",
+      "cited": "KB-022",
+      "why_wrong": "原文为1.4米",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['2.4'] 在所引切片中不存在"
+    },
+    {
+      "category": "H3",
+      "claim": "TCP四点标定法要求四个姿态之间的夹角不小于60度。",
+      "cited": "KB-006",
+      "why_wrong": "原文为30度",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['60'] 在所引切片中不存在"
+    },
+    {
+      "category": "H3",
+      "claim": "一般工业现场要求TCP标定误差不大于1.5毫米。",
+      "cited": "KB-007",
+      "why_wrong": "原文为0.5毫米",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['1.5'] 在所引切片中不存在"
+    },
+    {
+      "category": "H3",
+      "claim": "子程序调用层数一般不超过16层。",
+      "cited": "KB-012",
+      "why_wrong": "原文为8层",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['16'] 在所引切片中不存在"
+    },
+    {
+      "category": "H3",
+      "claim": "减速机润滑脂的更换周期通常为运行两万小时或五年。",
+      "cited": "KB-020",
+      "why_wrong": "原文为一万小时或三年",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['20000', '5'] 在所引切片中不存在"
+    },
+    {
+      "category": "H4",
+      "claim": "报警SRVO-002含义为机器人超程。",
+      "cited": "KB-016",
+      "why_wrong": "SRVO-002是示教器急停",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言使用的术语 ['超程'] 不属于所引切片"
+    },
+    {
+      "category": "H4",
+      "claim": "报警SRVO-005含义为编码器电池电压过低。",
+      "cited": "KB-017",
+      "why_wrong": "SRVO-005是超程",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言使用的术语 ['压过', '池电', '电压', '电池', '编码', '过低'] 不属于所引切片"
+    },
+    {
+      "category": "H4",
+      "claim": "减速机润滑脂应当每运行三千小时更换一次。",
+      "cited": "KB-022",
+      "why_wrong": "内容讲润滑，引用的是安全围栏",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['1', '3000'] 在所引切片中不存在"
+    },
+    {
+      "category": "H4",
+      "claim": "工件坐标系采用四点法标定。",
+      "cited": "KB-008",
+      "why_wrong": "原文为三点法",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['4'] 在所引切片中不存在"
+    },
+    {
+      "category": "H5",
+      "claim": "所有工业机器人的TCP标定误差都必须不大于0.2毫米。",
+      "cited": "KB-007",
+      "why_wrong": "原文0.2毫米仅限精密装配场合",
+      "caught": false,
+      "verdict": "supported",
+      "audit_note": "证据覆盖率 0.67"
+    },
+    {
+      "category": "H5",
+      "claim": "任何情况下都必须使用MOVL指令以保证轨迹精度。",
+      "cited": "KB-009",
+      "why_wrong": "原文仅说焊接涂胶工艺段适合",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "与所引切片的证据覆盖率仅 0.24"
+    },
+    {
+      "category": "H5",
+      "claim": "润滑脂加注量越接近规定值上限效果越好。",
+      "cited": "KB-020",
+      "why_wrong": "原文说过量加注会损坏油封",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言使用的术语 ['接近'] 不属于所引切片"
+    },
+    {
+      "category": "H6",
+      "claim": "更换编码器电池后系统会自动恢复原有零点数据。",
+      "cited": "KB-018",
+      "why_wrong": "原文说必须重新执行零点校对",
+      "caught": false,
+      "verdict": "supported",
+      "audit_note": "证据覆盖率 0.46"
+    },
+    {
+      "category": "H6",
+      "claim": "软限位设置后可以完全替代机械硬限位。",
+      "cited": "KB-025",
+      "why_wrong": "原文说软限位范围应小于硬限位，是补充不是替代",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言使用的术语 ['完全'] 不属于所引切片"
+    },
+    {
+      "category": "H6",
+      "claim": "碰撞检测功能开启后无需再设定末端负载参数。",
+      "cited": "KB-024",
+      "why_wrong": "原文说负载参数错误会导致检测失效",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言使用的术语 ['功能', '无需', '能开'] 不属于所引切片"
+    }
+  ],
+  "false_positive_detail": []
+}
