@@ -13,7 +13,6 @@ from urllib.request import Request, urlopen
 
 
 BOT_MARKER = "<!-- minimax-code-review -->"
-BOT_LOGIN = "github-actions[bot]"
 DEFAULT_BASE_URL = "https://api.minimaxi.com/v1"
 DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
@@ -30,6 +29,7 @@ class ReviewConfig:
     minimax_api_key: str
     repository: str
     pr_number: int
+    bot_login: str
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
     github_api_url: str = DEFAULT_GITHUB_API_URL
@@ -40,6 +40,9 @@ class ReviewConfig:
             "GITHUB_REPOSITORY": os.environ.get("GITHUB_REPOSITORY", "").strip(),
             "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", "").strip(),
             "MINIMAX_API_KEY": os.environ.get("MINIMAX_API_KEY", "").strip(),
+            "MINIMAX_REVIEW_BOT_LOGIN": os.environ.get(
+                "MINIMAX_REVIEW_BOT_LOGIN", ""
+            ).strip(),
             "PR_NUMBER": os.environ.get("PR_NUMBER", "").strip(),
         }
         missing = sorted(name for name, value in required.items() if not value)
@@ -63,6 +66,7 @@ class ReviewConfig:
             minimax_api_key=required["MINIMAX_API_KEY"],
             repository=repository,
             pr_number=pr_number,
+            bot_login=required["MINIMAX_REVIEW_BOT_LOGIN"],
             base_url=os.environ.get("MINIMAX_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
             model=os.environ.get("MINIMAX_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
             github_api_url=os.environ.get(
@@ -149,12 +153,24 @@ def render_comment(review: str, model: str) -> str:
     )
 
 
-def find_bot_comment_id(comments: list[dict[str, Any]]) -> int | None:
-    """Find the latest review comment owned by GitHub Actions."""
+def render_progress_comment() -> str:
+    """Render the transient status shown while MiniMax is reviewing."""
+    return f"{BOT_MARKER}\n😄 正在审查，请稍候…"
+
+
+def render_failure_comment() -> str:
+    """Render a safe status when the automated review cannot finish."""
+    return f"{BOT_MARKER}\n⚠️ 审查失败，请查看本次 Actions 运行日志。"
+
+
+def find_bot_comment_id(
+    comments: list[dict[str, Any]], *, bot_login: str
+) -> int | None:
+    """Find the latest review comment owned by the configured GitHub App."""
     for comment in reversed(comments):
         user = comment.get("user") or {}
         body = comment.get("body") or ""
-        if user.get("login") == BOT_LOGIN and BOT_MARKER in body:
+        if user.get("login") == bot_login and BOT_MARKER in body:
             comment_id = comment.get("id")
             if isinstance(comment_id, int):
                 return comment_id
@@ -233,22 +249,6 @@ def review_pull_request(config: ReviewConfig) -> str:
     if not diff.strip():
         raise ReviewError("Pull request diff is empty")
 
-    payload = build_minimax_payload(
-        diff,
-        repository=config.repository,
-        pr_number=config.pr_number,
-        model=config.model,
-    )
-    response = _request_json(
-        f"{config.base_url}/chat/completions",
-        method="POST",
-        token=config.minimax_api_key,
-        payload=payload,
-    )
-    if not isinstance(response, dict):
-        raise ReviewError("MiniMax returned invalid JSON")
-    comment_body = render_comment(extract_review_content(response), config.model)
-
     comments_url = (
         f"{config.github_api_url}/repos/{config.repository}/issues/"
         f"{config.pr_number}/comments?per_page=100"
@@ -260,27 +260,74 @@ def review_pull_request(config: ReviewConfig) -> str:
     )
     if not isinstance(comments, list):
         raise ReviewError("GitHub returned an invalid comments response")
-    comment_id = find_bot_comment_id(comments)
+    comment_id = find_bot_comment_id(comments, bot_login=config.bot_login)
     if comment_id is None:
-        target_url = (
+        create_url = (
             f"{config.github_api_url}/repos/{config.repository}/issues/"
             f"{config.pr_number}/comments"
         )
-        method = "POST"
+        created_comment = _request_json(
+            create_url,
+            method="POST",
+            token=config.github_token,
+            payload={"body": render_progress_comment()},
+        )
+        if not isinstance(created_comment, dict) or not isinstance(
+            created_comment.get("id"), int
+        ):
+            raise ReviewError("GitHub returned an invalid comment response")
+        comment_id = created_comment["id"]
         result = "created"
     else:
-        target_url = (
+        progress_url = (
             f"{config.github_api_url}/repos/{config.repository}/issues/comments/"
             f"{comment_id}"
         )
-        method = "PATCH"
+        _request_json(
+            progress_url,
+            method="PATCH",
+            token=config.github_token,
+            payload={"body": render_progress_comment()},
+        )
         result = "updated"
-    _request_json(
-        target_url,
-        method=method,
-        token=config.github_token,
-        payload={"body": comment_body},
+
+    target_url = (
+        f"{config.github_api_url}/repos/{config.repository}/issues/comments/"
+        f"{comment_id}"
     )
+    try:
+        payload = build_minimax_payload(
+            diff,
+            repository=config.repository,
+            pr_number=config.pr_number,
+            model=config.model,
+        )
+        response = _request_json(
+            f"{config.base_url}/chat/completions",
+            method="POST",
+            token=config.minimax_api_key,
+            payload=payload,
+        )
+        if not isinstance(response, dict):
+            raise ReviewError("MiniMax returned invalid JSON")
+        comment_body = render_comment(extract_review_content(response), config.model)
+        _request_json(
+            target_url,
+            method="PATCH",
+            token=config.github_token,
+            payload={"body": comment_body},
+        )
+    except ReviewError:
+        try:
+            _request_json(
+                target_url,
+                method="PATCH",
+                token=config.github_token,
+                payload={"body": render_failure_comment()},
+            )
+        except ReviewError:
+            pass
+        raise
     return result
 
 

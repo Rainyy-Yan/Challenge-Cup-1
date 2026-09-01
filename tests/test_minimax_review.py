@@ -14,6 +14,7 @@ class TestReviewConfig(unittest.TestCase):
         env = {
             "GITHUB_TOKEN": "github-token",
             "MINIMAX_API_KEY": "minimax-key",
+            "MINIMAX_REVIEW_BOT_LOGIN": "qiyuankaiwu-code-reviewer[bot]",
             "GITHUB_REPOSITORY": "owner/repo",
             "PR_NUMBER": "12",
         }
@@ -23,13 +24,18 @@ class TestReviewConfig(unittest.TestCase):
         self.assertEqual(config.base_url, "https://api.minimaxi.com/v1")
         self.assertEqual(config.model, "MiniMax-M3")
         self.assertEqual(config.pr_number, 12)
+        self.assertEqual(
+            config.bot_login,
+            "qiyuankaiwu-code-reviewer[bot]",
+        )
 
     def test_missing_secret_is_rejected_without_echoing_values(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(
                 minimax_review.ReviewError,
                 "Missing required environment variables: GITHUB_REPOSITORY, "
-                "GITHUB_TOKEN, MINIMAX_API_KEY, PR_NUMBER",
+                "GITHUB_TOKEN, MINIMAX_API_KEY, MINIMAX_REVIEW_BOT_LOGIN, "
+                "PR_NUMBER",
             ):
                 minimax_review.ReviewConfig.from_env()
 
@@ -95,7 +101,7 @@ class TestReviewOutput(unittest.TestCase):
         self.assertIn("MiniMax code review", comment)
         self.assertIn("Model: `MiniMax-M3`", comment)
 
-    def test_only_the_existing_bot_comment_is_updated(self) -> None:
+    def test_only_the_configured_app_comment_is_updated(self) -> None:
         comments = [
             {
                 "id": 10,
@@ -112,9 +118,123 @@ class TestReviewOutput(unittest.TestCase):
                 "user": {"login": "github-actions[bot]"},
                 "body": "<!-- minimax-code-review --> previous review",
             },
+            {
+                "id": 40,
+                "user": {"login": "qiyuankaiwu-code-reviewer[bot]"},
+                "body": "<!-- minimax-code-review --> app review",
+            },
         ]
 
-        self.assertEqual(minimax_review.find_bot_comment_id(comments), 30)
+        self.assertEqual(
+            minimax_review.find_bot_comment_id(
+                comments,
+                bot_login="qiyuankaiwu-code-reviewer[bot]",
+            ),
+            40,
+        )
+
+    def test_progress_comment_is_created_before_review_and_then_replaced(self) -> None:
+        config = minimax_review.ReviewConfig(
+            github_token="github-token",
+            minimax_api_key="minimax-key",
+            repository="owner/repo",
+            pr_number=12,
+            bot_login="qiyuankaiwu-code-reviewer[bot]",
+        )
+        events: list[str] = []
+
+        def fake_request(url: str, **_: object) -> bytes:
+            self.assertTrue(url.endswith("/repos/owner/repo/pulls/12"))
+            return b"diff --git a/file.py b/file.py"
+
+        def fake_request_json(
+            url: str,
+            *,
+            method: str,
+            token: str,
+            payload: dict[str, object] | None = None,
+        ) -> object:
+            self.assertTrue(token)
+            if url.endswith("/issues/12/comments?per_page=100"):
+                events.append("list-comments")
+                return []
+            if url.endswith("/issues/12/comments") and method == "POST":
+                body = str((payload or {}).get("body", ""))
+                events.append(f"progress:{body}")
+                return {"id": 99}
+            if url.endswith("/chat/completions"):
+                events.append("minimax")
+                return {"choices": [{"message": {"content": "Review complete"}}]}
+            if url.endswith("/issues/comments/99") and method == "PATCH":
+                body = str((payload or {}).get("body", ""))
+                events.append(f"final:{body}")
+                return {"id": 99}
+            self.fail(f"Unexpected request: {method} {url}")
+
+        with patch.object(minimax_review, "_request", side_effect=fake_request):
+            with patch.object(
+                minimax_review,
+                "_request_json",
+                side_effect=fake_request_json,
+            ):
+                result = minimax_review.review_pull_request(config)
+
+        self.assertEqual(result, "created")
+        self.assertEqual(events[0], "list-comments")
+        self.assertIn("😄", events[1])
+        self.assertIn("正在审查", events[1])
+        self.assertEqual(events[2], "minimax")
+        self.assertIn("Review complete", events[3])
+
+    def test_failed_review_replaces_the_progress_comment(self) -> None:
+        config = minimax_review.ReviewConfig(
+            github_token="github-token",
+            minimax_api_key="minimax-key",
+            repository="owner/repo",
+            pr_number=12,
+            bot_login="qiyuankaiwu-code-reviewer[bot]",
+        )
+        events: list[str] = []
+
+        def fake_request(_: str, **__: object) -> bytes:
+            return b"diff --git a/file.py b/file.py"
+
+        def fake_request_json(
+            url: str,
+            *,
+            method: str,
+            token: str,
+            payload: dict[str, object] | None = None,
+        ) -> object:
+            self.assertTrue(token)
+            if url.endswith("/issues/12/comments?per_page=100"):
+                return []
+            if url.endswith("/issues/12/comments") and method == "POST":
+                events.append("progress")
+                return {"id": 99}
+            if url.endswith("/chat/completions"):
+                events.append("minimax-error")
+                raise minimax_review.ReviewError("MiniMax unavailable")
+            if url.endswith("/issues/comments/99") and method == "PATCH":
+                body = str((payload or {}).get("body", ""))
+                events.append(f"failure:{body}")
+                return {"id": 99}
+            self.fail(f"Unexpected request: {method} {url}")
+
+        with patch.object(minimax_review, "_request", side_effect=fake_request):
+            with patch.object(
+                minimax_review,
+                "_request_json",
+                side_effect=fake_request_json,
+            ):
+                with self.assertRaisesRegex(
+                    minimax_review.ReviewError,
+                    "MiniMax unavailable",
+                ):
+                    minimax_review.review_pull_request(config)
+
+        self.assertEqual(events[:2], ["progress", "minimax-error"])
+        self.assertIn("审查失败", events[2])
 
 
 if __name__ == "__main__":
