@@ -14,7 +14,7 @@ class TestReviewConfig(unittest.TestCase):
         env = {
             "GITHUB_TOKEN": "github-token",
             "MINIMAX_API_KEY": "minimax-key",
-            "MINIMAX_REVIEW_BOT_LOGIN": "qykw[bot]",
+            "MINIMAX_REVIEW_BOT_LOGIN": "qykw",
             "GITHUB_REPOSITORY": "owner/repo",
             "PR_NUMBER": "12",
         }
@@ -26,7 +26,7 @@ class TestReviewConfig(unittest.TestCase):
         self.assertEqual(config.pr_number, 12)
         self.assertEqual(
             config.bot_login,
-            "qykw[bot]",
+            "qykw",
         )
 
     def test_missing_secret_is_rejected_without_echoing_values(self) -> None:
@@ -102,7 +102,7 @@ class TestReviewOutput(unittest.TestCase):
         self.assertIn("## Summary\nSafe", comment)
         self.assertIn("Model: `MiniMax-M3`", comment)
 
-    def test_only_the_configured_app_comment_is_updated(self) -> None:
+    def test_only_the_configured_bot_comment_is_updated(self) -> None:
         comments = [
             {
                 "id": 10,
@@ -121,15 +121,15 @@ class TestReviewOutput(unittest.TestCase):
             },
             {
                 "id": 40,
-                "user": {"login": "qykw[bot]"},
-                "body": "<!-- minimax-code-review --> app review",
+                "user": {"login": "qykw"},
+                "body": "<!-- minimax-code-review --> machine-user review",
             },
         ]
 
         self.assertEqual(
             minimax_review.find_bot_comment_id(
                 comments,
-                bot_login="qykw[bot]",
+                bot_login="qykw",
             ),
             40,
         )
@@ -140,7 +140,7 @@ class TestReviewOutput(unittest.TestCase):
             minimax_api_key="minimax-key",
             repository="owner/repo",
             pr_number=12,
-            bot_login="qykw[bot]",
+            bot_login="qykw",
         )
         events: list[str] = []
 
@@ -193,7 +193,7 @@ class TestReviewOutput(unittest.TestCase):
             minimax_api_key="minimax-key",
             repository="owner/repo",
             pr_number=12,
-            bot_login="qykw[bot]",
+            bot_login="qykw",
         )
         events: list[str] = []
 

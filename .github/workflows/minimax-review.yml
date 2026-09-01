@@ -41,18 +41,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Create reviewer app token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ vars.MINIMAX_REVIEW_APP_CLIENT_ID }}
-          private-key: ${{ secrets.MINIMAX_REVIEW_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-
       - name: Review pull request with MiniMax
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.QYKW_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           MINIMAX_BASE_URL: ${{ vars.MINIMAX_BASE_URL || 'https://api.minimaxi.com/v1' }}
