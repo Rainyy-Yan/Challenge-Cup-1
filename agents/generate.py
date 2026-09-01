@@ -250,17 +250,17 @@ class GenerateAgent:
         if not mine:
             return None
         # 从别的知识点里取替换词，确保它确实不属于本切片
-        pool: list[str] = []
+        pool: set[str] = set()
         for c in self.retriever.chunks:
             if c.kp == cited.kp:
                 continue
             for t in self.retriever.distinctive_in(f"{c.title} {c.text}"):
                 if t not in mine:
-                    pool.append(t)
+                    pool.add(t)
         if not pool:
             return None
         for src_term in sorted(mine):
-            for repl in pool[:40]:
+            for repl in sorted(pool)[:40]:
                 cand = claim.text.replace(src_term, repl, 1)
                 if cand == claim.text:
                     continue
