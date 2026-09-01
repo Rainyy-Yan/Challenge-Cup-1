@@ -415,6 +415,7 @@ class ContextPlan:
     coverage: CoverageReport
     commentable_lines: frozenset[ChangedLine]
     max_chunk_tokens: int
+    effective_input_budget_tokens: int
 
 
 @dataclass(frozen=True)

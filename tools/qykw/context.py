@@ -1,9 +1,9 @@
 """Deterministic, bounded context planning for qykw pull-request reviews.
 
-The module deliberately uses a character-upper-bound token estimate.  It is
+The module deliberately uses a UTF-8 byte upper-bound token estimate.  It is
 less efficient than a provider tokenizer, but is deterministic, works for CJK
-and source code, and cannot undercount the documented one-token-per-character
-approximation used for admission control.
+and source code, and cannot undercount the documented byte-oriented admission
+bound shared with prompt serialization.
 """
 
 from __future__ import annotations
@@ -62,13 +62,13 @@ class _ContextRecord:
 def estimate_tokens(text: str) -> int:
     """Return a conservative deterministic token bound for UTF-8 text.
 
-    Admission is intentionally one token for every Unicode character.  This
+    Admission is intentionally one token for every UTF-8 byte.  This
     upper-bounds the approximation used here for ASCII, CJK and punctuation;
     callers must use this same function for both chunks and budgets.
     """
     if not isinstance(text, str):
         raise ContextError("text_must_be_string")
-    return len(text)
+    return len(text.encode("utf-8"))
 
 
 def parse_hunks(file: ChangedFile) -> tuple[DiffHunk, ...]:
@@ -324,6 +324,7 @@ def build_context_plan(
         coverage=coverage,
         commentable_lines=frozenset(commentable),
         max_chunk_tokens=max_chunk_tokens,
+        effective_input_budget_tokens=effective_budget,
     )
 
 
@@ -608,9 +609,10 @@ def _allocate_record(
         payload_capacity = allowance - estimate_tokens(prefix)
         if payload_capacity <= 0:
             break
-        piece = prefix + record.text[offset : offset + payload_capacity]
-        if not piece:
+        payload = _prefix_within_token_budget(record.text[offset:], payload_capacity)
+        if not payload:
             break
+        piece = prefix + payload
         tokens = estimate_tokens(piece)
         chunks.append(
             ContextChunk(
@@ -623,8 +625,23 @@ def _allocate_record(
         allocated = True
         chunk_index += 1
         used += tokens
-        offset += len(piece) - len(prefix)
+        offset += len(payload)
     return allocated, offset == len(record.text), chunk_index, used
+
+
+def _prefix_within_token_budget(text: str, budget: int) -> str:
+    """Return the longest character prefix whose conservative UTF-8 cost fits."""
+    if budget <= 0:
+        return ""
+    used = 0
+    end = 0
+    for character in text:
+        cost = estimate_tokens(character)
+        if used + cost > budget:
+            break
+        used += cost
+        end += 1
+    return text[:end]
 
 
 def _record_prefix(provenance_identity: str, record: _ContextRecord) -> str:

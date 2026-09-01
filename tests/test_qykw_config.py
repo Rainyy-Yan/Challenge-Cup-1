@@ -150,7 +150,7 @@ class TestSharedDomainContracts(unittest.TestCase):
             "DiffHunk": ("path", "previous_path", "header", "changed_lines", "text"),
             "FileManifest": ("paths", "risk_order"),
             "ContextChunk": ("chunk_id", "paths", "text", "estimated_tokens"),
-            "ContextPlan": ("repository", "pr_number", "source_head_sha", "run_id", "manifest", "chunks", "coverage", "commentable_lines", "max_chunk_tokens"),
+            "ContextPlan": ("repository", "pr_number", "source_head_sha", "run_id", "manifest", "chunks", "coverage", "commentable_lines", "max_chunk_tokens", "effective_input_budget_tokens"),
             "AdvisoryResult": ("title", "body", "evidence", "limitations"),
             "PublishResult": ("status", "summary_comment_id", "summary_body", "review_id", "published_fingerprints", "warning_codes"),
         }

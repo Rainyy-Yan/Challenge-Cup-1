@@ -123,6 +123,17 @@ class TestContextPlanning(unittest.TestCase):
         self.assertLessEqual(sum(chunk.estimated_tokens for chunk in plan.chunks), 800)
         self.assertTrue(all(chunk.estimated_tokens <= plan.max_chunk_tokens for chunk in plan.chunks))
 
+    def test_effective_input_budget_is_immutable_and_cjk_chunks_do_not_exceed_it(self) -> None:
+        plan = build_context_plan(
+            snapshot(changed_file("src/cjk.py", base_content="", head_content="长" * 1_000,
+                                  patch="@@ -0,0 +1 @@\n+" + ("长" * 1_000))),
+            **budget(repository_limit=900, backend_context_window=1_000, max_chunk_ratio=1.0),
+        )
+
+        self.assertEqual(plan.effective_input_budget_tokens, 800)
+        self.assertLessEqual(sum(chunk.estimated_tokens for chunk in plan.chunks), plan.effective_input_budget_tokens)
+        self.assertTrue(all(chunk.estimated_tokens <= plan.max_chunk_tokens for chunk in plan.chunks))
+
     def test_deleted_line_is_commentable_on_left_side(self) -> None:
         file = changed_file(
             "old.py",

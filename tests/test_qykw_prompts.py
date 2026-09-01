@@ -25,6 +25,7 @@ from tools.qykw.domain import (
 )
 from tools.qykw.prompts import (
     PROMPT_VERSION,
+    PromptError,
     build_analysis_request,
     build_patch_request,
     build_plan_request,
@@ -32,6 +33,7 @@ from tools.qykw.prompts import (
     build_triage_request,
     build_validation_request,
 )
+from tools.qykw.provider import estimate_request_input_tokens
 
 
 def run() -> RunContext:
@@ -85,6 +87,7 @@ def context_plan() -> ContextPlan:
         coverage=coverage(),
         commentable_lines=frozenset({ChangedLine("src/app.py", 1, DiffSide.RIGHT)}),
         max_chunk_tokens=100,
+        effective_input_budget_tokens=100_000,
     )
 
 
@@ -317,8 +320,11 @@ class TestQykwPromptBuilders(unittest.TestCase):
         self.assertLess(metadata["included_lines"], 10_000)
         self.assertTrue(metadata["truncated"])
         self.assertEqual(metadata["truncated_lines"], 10_000 - metadata["included_lines"])
-        self.assertLessEqual(len(metadata["ranges"]), 128)
-        self.assertLess(len(json.dumps(metadata, ensure_ascii=False)), 16_000)
+        self.assertLess(len(metadata["ranges"]), metadata["total_ranges"])
+        self.assertLessEqual(
+            estimate_request_input_tokens(build_analysis_request(run(), plan)),
+            plan.effective_input_budget_tokens,
+        )
         self.assertIn(ChangedLine("src/sparse.py", 19_999, DiffSide.RIGHT), plan.commentable_lines)
         self.assertFalse(any(entry["start_line"] <= 19_999 <= entry["end_line"] for entry in metadata["ranges"]))
 
@@ -332,9 +338,77 @@ class TestQykwPromptBuilders(unittest.TestCase):
         self.assertLess(metadata["included_entries"], 10_000)
         self.assertEqual(metadata["truncated_entries"], 10_000 - metadata["included_entries"])
         self.assertTrue(metadata["truncated"])
-        self.assertLessEqual(len(metadata["entries"]), 128)
-        self.assertLess(len(json.dumps(metadata, ensure_ascii=False)), 16_000)
+        self.assertLess(len(metadata["entries"]), metadata["total_entries"])
+        self.assertLessEqual(
+            estimate_request_input_tokens(build_analysis_request(run(), plan)),
+            plan.effective_input_budget_tokens,
+        )
         self.assertTrue(coverage_data["explains_every_file"])
+
+    def test_plan_request_proves_effective_budget_and_rejects_one_token_short_core(self) -> None:
+        plan = replace(context_plan(), chunks=(), commentable_lines=frozenset())
+        low, high = 1, 100_000
+        while low < high:
+            midpoint = (low + high) // 2
+            try:
+                build_analysis_request(run(), replace(plan, effective_input_budget_tokens=midpoint))
+            except PromptError:
+                low = midpoint + 1
+            else:
+                high = midpoint
+        exact = replace(plan, effective_input_budget_tokens=low)
+        exact_request = build_analysis_request(run(), exact)
+
+        self.assertLessEqual(estimate_request_input_tokens(exact_request), exact.effective_input_budget_tokens)
+        with self.assertRaisesRegex(PromptError, "plan_input_budget_exceeded"):
+            build_analysis_request(run(), replace(exact, effective_input_budget_tokens=exact.effective_input_budget_tokens - 1))
+
+    def test_huge_maps_cannot_emit_over_a_thousand_token_plan_budget(self) -> None:
+        lines = frozenset(ChangedLine("src/sparse.py", line, DiffSide.RIGHT) for line in range(1, 20_001, 2))
+        omissions = tuple(f"budget_truncated_unallocated:src/{line}.py:hunk=0:records=0-2" for line in range(10_000))
+        plan = replace(
+            context_plan(), chunks=(), commentable_lines=lines,
+            coverage=CoverageReport(1, 0, 10_000, 0, omissions, True),
+            effective_input_budget_tokens=1_000,
+        )
+
+        with self.assertRaisesRegex(PromptError, "plan_input_budget_exceeded"):
+            build_analysis_request(run(), plan)
+
+    def test_dynamic_metadata_counts_share_remaining_plan_budget(self) -> None:
+        lines = frozenset(ChangedLine("src/sparse.py", line, DiffSide.RIGHT) for line in range(1, 20_001, 2))
+        omissions = tuple(f"budget_truncated_unallocated:src/{line}.py:hunk=0:records=0-2" for line in range(10_000))
+        generous = replace(
+            context_plan(), chunks=(), commentable_lines=lines,
+            coverage=CoverageReport(1, 0, 10_000, 0, omissions, True),
+            effective_input_budget_tokens=100_000,
+        )
+        full = build_analysis_request(run(), generous)
+        constrained = replace(generous, effective_input_budget_tokens=estimate_request_input_tokens(full) - 500)
+        request = build_analysis_request(run(), constrained)
+        data = request.payload["untrusted"]["context_plan"]
+
+        self.assertLessEqual(estimate_request_input_tokens(request), constrained.effective_input_budget_tokens)
+        self.assertTrue(data["commentable_line_ranges"]["truncated"] or data["coverage"]["omission_metadata"]["truncated"])
+        self.assertEqual(data["commentable_line_ranges"]["total_lines"], 10_000)
+        self.assertEqual(data["coverage"]["omission_metadata"]["total_entries"], 10_000)
+        self.assertEqual(len(generous.commentable_lines), 10_000)
+
+    def test_large_normal_plan_sheds_serialized_chunks_to_prove_provider_budget(self) -> None:
+        chunks = (
+            ContextChunk("chunk-1", ("src/first.py",), "x" * 20_000, 20_000),
+            ContextChunk("chunk-2", ("src/second.py",), "y" * 20_000, 20_000),
+        )
+        plan = replace(context_plan(), chunks=chunks, effective_input_budget_tokens=30_000)
+
+        request = build_analysis_request(run(), plan)
+        data = request.payload["untrusted"]["context_plan"]
+
+        self.assertLessEqual(estimate_request_input_tokens(request), plan.effective_input_budget_tokens)
+        self.assertEqual(data["chunk_metadata"]["total_chunks"], 2)
+        self.assertLess(data["chunk_metadata"]["included_chunks"], 2)
+        self.assertTrue(data["chunk_metadata"]["truncated"])
+        self.assertEqual(len(plan.chunks), 2)
 
 
 if __name__ == "__main__":
