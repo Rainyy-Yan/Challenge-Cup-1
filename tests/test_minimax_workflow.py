@@ -38,9 +38,10 @@ class TestMiniMaxWorkflow(unittest.TestCase):
         self.assertIn("github.event_name == 'issue_comment'", workflow)
         self.assertIn("github.event_name == 'pull_request_review_comment'", workflow)
         self.assertIn(
-            "github.event.comment.user.login == vars.MINIMAX_REVIEW_BOT_LOGIN",
+            "vars.MINIMAX_REVIEW_BOT_LOGIN != ''",
             workflow,
         )
+        self.assertIn("contains(github.event.comment.body", workflow)
         self.assertIn("cancel-in-progress: >-", workflow)
 
 

@@ -521,9 +521,12 @@ def _classify_network_error(
         ), False
     if isinstance(reason, socket.gaierror):
         return ReviewError("Remote API DNS resolution failed"), True
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return ReviewError(
+            "Remote API TLS certificate verification failed"
+        ), False
     if isinstance(reason, ssl.SSLError):
-        retryable = not isinstance(reason, ssl.SSLCertVerificationError)
-        return ReviewError("Remote API TLS handshake failed"), retryable
+        return ReviewError("Remote API TLS handshake failed"), True
     if isinstance(
         reason,
         (ConnectionError, IncompleteRead, RemoteDisconnected),

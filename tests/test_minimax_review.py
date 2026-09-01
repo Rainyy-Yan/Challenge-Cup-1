@@ -190,7 +190,7 @@ class TestRemoteRequests(unittest.TestCase):
         ) as urlopen:
             with self.assertRaisesRegex(
                 minimax_review.ReviewError,
-                "TLS handshake failed",
+                "TLS certificate verification failed",
             ):
                 minimax_review._request(
                     "https://api.minimaxi.com/v1/responses",
