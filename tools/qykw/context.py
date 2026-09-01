@@ -8,6 +8,7 @@ approximation used for admission control.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Iterable
@@ -36,6 +37,24 @@ _HUNK_HEADER = re.compile(
 )
 _SENSITIVE_PARTS = (".env", "credential", "secret", "id_rsa", "private_key")
 _OVERSIZED_CHARACTERS = 1_000_000
+_MINIMUM_TRIAGE_TEXT = "TRIAGE\n"
+
+
+@dataclass(frozen=True)
+class _ContextRecord:
+    """One provenance-stable context record, split only within its own line."""
+
+    path: str
+    previous_path: str | None
+    base_ref: str | None
+    head_ref: str | None
+    side: str
+    old_start: int | None
+    old_end: int | None
+    new_start: int | None
+    new_end: int | None
+    text: str
+    hunk_index: int | None = None
 
 
 def estimate_tokens(text: str) -> int:
@@ -54,6 +73,7 @@ def parse_hunks(file: ChangedFile) -> tuple[DiffHunk, ...]:
     """Parse a complete unified patch and retain only commentable changed lines."""
     if not isinstance(file, ChangedFile):
         raise ContextError("invalid_changed_file")
+    _validate_changed_file_paths(file)
     if file.patch is None:
         return ()
     if not isinstance(file.patch, str):
@@ -154,7 +174,7 @@ def build_context_plan(
     handled: set[str] = set()
     hunks_by_path: dict[str, tuple[DiffHunk, ...]] = {}
     commentable: set[ChangedLine] = set()
-    candidates: dict[str, tuple[str, ...]] = {}
+    candidates: dict[str, tuple[_ContextRecord, ...]] = {}
 
     for path in manifest.risk_order:
         file = by_path[path]
@@ -179,22 +199,54 @@ def build_context_plan(
             continue
         hunks_by_path[path] = hunks
         commentable.update(line for hunk in hunks for line in hunk.changed_lines)
-        candidates[path] = _file_context_units(file, hunks)
+        candidates[path] = _file_context_records(file, hunks)
 
     chunks: list[ContextChunk] = []
     used = 0
     chunk_index = 1
     reviewed: set[str] = set()
     reviewed_hunks: set[tuple[str, int]] = set()
+
+    # First pass is an all-or-nothing minimum allocation.  A low-risk file
+    # cannot be starved merely because a prior high-risk file has a huge diff.
+    triage_records = {
+        path: _triage_record(by_path[path]) for path in manifest.risk_order if path in candidates
+    }
+    triage_costs = {
+        path: _record_cost(snapshot, record) for path, record in triage_records.items()
+    }
+    if any(cost > max_chunk_tokens for cost in triage_costs.values()):
+        raise ContextError("impossible_triage_chunk_budget")
+    if sum(triage_costs.values()) > effective_budget:
+        raise ContextError("impossible_triage_budget")
     for path in manifest.risk_order:
-        units = candidates.get(path)
-        if units is None:
+        record = triage_records.get(path)
+        if record is None:
             continue
-        any_allocated = False
-        for unit_index, unit in enumerate(units):
-            allocated, chunk_index, used = _allocate_unit(
-                unit,
-                path=path,
+        allocated, chunk_index, used = _allocate_record(
+            record,
+            snapshot=snapshot,
+            chunk_index=chunk_index,
+            used=used,
+            effective_budget=effective_budget,
+            max_chunk_tokens=max_chunk_tokens,
+            chunks=chunks,
+        )
+        if not allocated:
+            raise ContextError("impossible_triage_budget")
+        reviewed.add(path)
+        handled.add(path)
+        omissions.append(f"minimum_triage:{path}")
+
+    # Only the residual budget is prioritized by risk.  Every eligible path is
+    # already explicitly triaged at this point.
+    for path in manifest.risk_order:
+        records = candidates.get(path)
+        if records is None:
+            continue
+        for record in records:
+            allocated, chunk_index, used = _allocate_record(
+                record,
                 snapshot=snapshot,
                 chunk_index=chunk_index,
                 used=used,
@@ -203,25 +255,16 @@ def build_context_plan(
                 chunks=chunks,
             )
             if allocated:
-                any_allocated = True
-                if unit_index < len(hunks_by_path[path]):
-                    reviewed_hunks.add((path, unit_index))
+                if record.hunk_index is not None:
+                    reviewed_hunks.add((path, record.hunk_index))
             if used >= effective_budget:
                 break
-        if any_allocated:
-            reviewed.add(path)
-            handled.add(path)
-        else:
-            omissions.append(f"budget_exhausted:{path}")
-            handled.add(path)
 
     # Rules and related files are trusted/read-only context, never PR manifest
     # entries.  They are appended only after every PR file has been triaged.
     for reference in _ordered_references(snapshot.trusted_rules, snapshot.related_files):
-        unit = _reference_context_unit(reference)
-        _, chunk_index, used = _allocate_unit(
-            unit,
-            path=reference.path,
+        _, chunk_index, used = _allocate_record(
+            _reference_context_record(reference),
             snapshot=snapshot,
             chunk_index=chunk_index,
             used=used,
@@ -308,8 +351,25 @@ def _validate_snapshot(snapshot: PullSnapshot) -> None:
     if snapshot.number <= 0 or not snapshot.target_repository or not snapshot.source_head_sha:
         raise ContextError("invalid_snapshot_identity")
     for file in snapshot.changed_files:
-        if not isinstance(file, ChangedFile) or not file.path or file.path.startswith(("/", "\\")) or ".." in file.path.split("/"):
+        if not isinstance(file, ChangedFile):
             raise ContextError("unsafe_changed_path")
+        _validate_changed_file_paths(file)
+
+
+def _validate_changed_file_paths(file: ChangedFile) -> None:
+    _validate_relative_path(file.path)
+    if file.previous_path is not None:
+        _validate_relative_path(file.previous_path)
+
+
+def _validate_relative_path(path: str) -> None:
+    if not isinstance(path, str) or not path or path.startswith(("/", "\\")):
+        raise ContextError("unsafe_changed_path")
+    if "\\" in path or any(ord(character) < 32 or ord(character) == 127 for character in path):
+        raise ContextError("unsafe_changed_path")
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts) or ":" in parts[0]:
+        raise ContextError("unsafe_changed_path")
 
 
 def _snapshot_omissions(snapshot: PullSnapshot) -> tuple[str, ...]:
@@ -343,38 +403,107 @@ def _is_mode_only(file: ChangedFile) -> bool:
     return not file.patch and file.base_mode != file.head_mode
 
 
-def _file_context_units(file: ChangedFile, hunks: tuple[DiffHunk, ...]) -> tuple[str, ...]:
-    units = [_diff_unit(file, hunk) for hunk in hunks]
-    if not units:
-        units.append(_content_unit(file, "base", DiffSide.LEFT, file.previous_path or file.path, file.base_mode, file.base_content))
-        units.append(_content_unit(file, "head", DiffSide.RIGHT, file.path, file.head_mode, file.head_content))
-    else:
-        # A compact, provenance-preserving state record complements the patch.
-        units.append(
-            f"FILE path={file.path} previous_path={file.previous_path or '-'} status={file.status} "
-            f"base_mode={file.base_mode or '-'} head_mode={file.head_mode or '-'}\n"
+def _file_context_records(
+    file: ChangedFile, hunks: tuple[DiffHunk, ...]
+) -> tuple[_ContextRecord, ...]:
+    if hunks:
+        return tuple(
+            record
+            for hunk_index, hunk in enumerate(hunks)
+            for record in _diff_records(file, hunk, hunk_index)
         )
-    return tuple(unit for unit in units if unit)
+    return _content_records(file)
 
 
-def _diff_unit(file: ChangedFile, hunk: DiffHunk) -> str:
-    return (
-        f"DIFF path={file.path} previous_path={file.previous_path or '-'} "
-        f"base_ref={file.base_sha or '-'} head_ref={file.head_sha or '-'}\n{hunk.text}"
+def _diff_records(
+    file: ChangedFile, hunk: DiffHunk, hunk_index: int
+) -> tuple[_ContextRecord, ...]:
+    """Represent every diff line separately so later fragments retain coordinates."""
+    header = _HUNK_HEADER.fullmatch(hunk.header)
+    if header is None:
+        raise ContextError("malformed_hunk_header")
+    old_line, old_count = _hunk_range(header, "old")
+    new_line, new_count = _hunk_range(header, "new")
+    records = [
+        _record(
+            file, "CONTEXT", old_line if old_count else None,
+            old_line + old_count - 1 if old_count else None,
+            new_line if new_count else None,
+            new_line + new_count - 1 if new_count else None,
+            hunk.header + "\n", hunk_index,
+        )
+    ]
+    for item in hunk.text.splitlines(keepends=True)[1:]:
+        if item.rstrip("\r\n") == r"\ No newline at end of file":
+            records[-1] = replace(records[-1], text=records[-1].text + item)
+            continue
+        prefix = item[0]
+        if prefix == " ":
+            records.append(_record(file, "CONTEXT", old_line, old_line, new_line, new_line, item, hunk_index))
+            old_line += 1
+            new_line += 1
+        elif prefix == "-":
+            records.append(_record(file, DiffSide.LEFT.value, old_line, old_line, None, None, item, hunk_index))
+            old_line += 1
+        elif prefix == "+":
+            records.append(_record(file, DiffSide.RIGHT.value, None, None, new_line, new_line, item, hunk_index))
+            new_line += 1
+        else:
+            raise ContextError("malformed_hunk_line")
+    return tuple(records)
+
+
+def _content_records(file: ChangedFile) -> tuple[_ContextRecord, ...]:
+    records: list[_ContextRecord] = []
+    for side, path, content in (
+        (DiffSide.LEFT.value, file.previous_path or file.path, file.base_content),
+        (DiffSide.RIGHT.value, file.path, file.head_content),
+    ):
+        if content is None:
+            continue
+        for line_number, text in enumerate(content.splitlines(keepends=True), start=1):
+            records.append(
+                _record(
+                    file, side,
+                    line_number if side == DiffSide.LEFT.value else None,
+                    line_number if side == DiffSide.LEFT.value else None,
+                    line_number if side == DiffSide.RIGHT.value else None,
+                    line_number if side == DiffSide.RIGHT.value else None,
+                    text, None, path=path,
+                )
+            )
+    return tuple(records)
+
+
+def _record(
+    file: ChangedFile,
+    side: str,
+    old_start: int | None,
+    old_end: int | None,
+    new_start: int | None,
+    new_end: int | None,
+    text: str,
+    hunk_index: int | None,
+    *,
+    path: str | None = None,
+) -> _ContextRecord:
+    return _ContextRecord(
+        path=path or (file.previous_path or file.path if side == DiffSide.LEFT.value else file.path),
+        previous_path=file.previous_path,
+        base_ref=file.base_sha,
+        head_ref=file.head_sha,
+        side=side,
+        old_start=old_start,
+        old_end=old_end,
+        new_start=new_start,
+        new_end=new_end,
+        text=text,
+        hunk_index=hunk_index,
     )
 
 
-def _content_unit(
-    file: ChangedFile,
-    ref_name: str,
-    side: DiffSide,
-    path: str,
-    mode: str | None,
-    content: str | None,
-) -> str:
-    if content is None:
-        return ""
-    return f"CONTENT path={path} ref={ref_name} side={side.value} line=1 mode={mode or '-'}\n{content}"
+def _triage_record(file: ChangedFile) -> _ContextRecord:
+    return _record(file, "TRIAGE", None, None, None, None, _MINIMUM_TRIAGE_TEXT, None, path=file.path)
 
 
 def _ordered_references(
@@ -383,14 +512,28 @@ def _ordered_references(
     return tuple(sorted(trusted_rules + related_files, key=lambda item: (item.purpose, item.path, item.ref)))
 
 
-def _reference_context_unit(file: RepositoryFile) -> str:
-    return f"REFERENCE path={file.path} ref={file.ref} purpose={file.purpose} line=1\n{file.content}"
+def _reference_context_record(file: RepositoryFile) -> _ContextRecord:
+    return _ContextRecord(
+        path=file.path,
+        previous_path=None,
+        base_ref=file.ref,
+        head_ref=file.ref,
+        side="REFERENCE",
+        old_start=None,
+        old_end=None,
+        new_start=1,
+        new_end=1,
+        text=f"REFERENCE purpose={file.purpose}\n{file.content}",
+    )
 
 
-def _allocate_unit(
-    unit: str,
+def _record_cost(snapshot: PullSnapshot, record: _ContextRecord) -> int:
+    return estimate_tokens(_record_prefix(snapshot, record) + record.text)
+
+
+def _allocate_record(
+    record: _ContextRecord,
     *,
-    path: str,
     snapshot: PullSnapshot,
     chunk_index: int,
     used: int,
@@ -398,26 +541,26 @@ def _allocate_unit(
     max_chunk_tokens: int,
     chunks: list[ContextChunk],
 ) -> tuple[bool, int, int]:
-    """Allocate a unit without exceeding either budget, even for one huge line."""
+    """Allocate a record without exceeding either budget, even for one huge line."""
     remaining = min(max_chunk_tokens, effective_budget - used)
-    if remaining <= 0 or not unit:
+    if remaining <= 0 or not record.text:
         return False, chunk_index, used
     offset = 0
     allocated = False
-    while offset < len(unit) and used < effective_budget:
+    while offset < len(record.text) and used < effective_budget:
         allowance = min(max_chunk_tokens, effective_budget - used)
-        prefix = _fragment_prefix(snapshot, path, unit, offset)
+        prefix = _record_prefix(snapshot, record)
         payload_capacity = allowance - estimate_tokens(prefix)
         if payload_capacity <= 0:
             break
-        piece = prefix + unit[offset : offset + payload_capacity]
+        piece = prefix + record.text[offset : offset + payload_capacity]
         if not piece:
             break
         tokens = estimate_tokens(piece)
         chunks.append(
             ContextChunk(
                 chunk_id=f"{snapshot.target_repository}#{snapshot.number}:{snapshot.source_head_sha}:{chunk_index}",
-                paths=(path,),
+                paths=(record.path,),
                 text=piece,
                 estimated_tokens=tokens,
             )
@@ -429,30 +572,19 @@ def _allocate_unit(
     return allocated, chunk_index, used
 
 
-def _fragment_prefix(snapshot: PullSnapshot, path: str, unit: str, offset: int) -> str:
-    """Attach self-contained provenance to every fragment, not just its first."""
-    header = next(
-        (_HUNK_HEADER.fullmatch(line) for line in unit.splitlines() if line.startswith("@@")),
-        None,
-    )
-    if "\n+" in unit and "\n-" not in unit:
-        side = DiffSide.RIGHT.value
-        line = int(header.group("new_start")) if header is not None else 1
-    elif "\n-" in unit and "\n+" not in unit:
-        side = DiffSide.LEFT.value
-        line = int(header.group("old_start")) if header is not None else 1
-    elif "\n+" in unit or "\n-" in unit:
-        side = "LEFT,RIGHT"
-        line = int(header.group("new_start")) if header is not None else 1
-    else:
-        side = "CONTEXT"
-        line = 1
-    # Offset records the exact fragment boundary.  The parser, rather than this
-    # context label, is the authority for publishable comment coordinates.
+def _record_prefix(snapshot: PullSnapshot, record: _ContextRecord) -> str:
+    """Emit complete immutable diff provenance on every physical fragment."""
     return (
-        f"PROVENANCE repository={snapshot.target_repository} pr={snapshot.number} "
-        f"head={snapshot.source_head_sha} path={path} side={side} line={line} offset={offset}\n"
+        f"P repository={snapshot.target_repository} pr={snapshot.number} "
+        f"base_ref={record.base_ref or '-'} head_ref={record.head_ref or '-'} "
+        f"path={record.path} previous_path={record.previous_path or '-'} "
+        f"side={record.side} old={_line_range(record.old_start, record.old_end)} "
+        f"new={_line_range(record.new_start, record.new_end)}\n"
     )
+
+
+def _line_range(start: int | None, end: int | None) -> str:
+    return "-" if start is None or end is None else f"{start}-{end}"
 
 
 def _risk_key(path: str) -> tuple[int, str]:

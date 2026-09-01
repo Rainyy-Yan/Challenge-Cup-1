@@ -83,11 +83,32 @@ class TestContextPlanning(unittest.TestCase):
     def test_late_high_risk_file_is_not_silently_lost(self) -> None:
         files = [changed_file(f"docs/{index:03}.txt") for index in range(101)]
         files.append(changed_file("auth/permissions.py"))
-        plan = build_context_plan(snapshot(*files), **budget())
+        plan = build_context_plan(
+            snapshot(*files),
+            **budget(repository_limit=30_000, backend_context_window=40_000),
+        )
 
         self.assertIn("auth/permissions.py", plan.manifest.paths)
         self.assertEqual(plan.manifest.risk_order[0], "auth/permissions.py")
         self.assertTrue(plan.coverage.explains_every_file)
+
+    def test_every_eligible_file_receives_minimum_triage_before_risk_depth(self) -> None:
+        plan = build_context_plan(
+            snapshot(*(changed_file(f"src/{index}.py") for index in range(3))),
+            **budget(repository_limit=800, backend_context_window=1_000, max_chunk_ratio=1.0),
+        )
+
+        self.assertEqual(plan.coverage.reviewed_files, 3)
+        self.assertFalse(any(item.startswith("budget_exhausted:") for item in plan.coverage.omissions))
+        for path in plan.manifest.paths:
+            self.assertIn(f"minimum_triage:{path}", plan.coverage.omissions)
+
+    def test_insufficient_budget_for_every_minimum_triage_is_rejected_upfront(self) -> None:
+        with self.assertRaisesRegex(ContextError, "impossible_triage_budget"):
+            build_context_plan(
+                snapshot(*(changed_file(f"src/{index}.py") for index in range(5))),
+                **budget(repository_limit=500, backend_context_window=1_000, max_chunk_ratio=1.0),
+            )
 
     def test_each_chunk_respects_effective_budget_for_a_giant_line(self) -> None:
         giant = "x" * 10_000
@@ -130,6 +151,15 @@ class TestContextPlanning(unittest.TestCase):
             hunks[0].changed_lines,
             (ChangedLine("old.py", 3, DiffSide.LEFT), ChangedLine("new.py", 3, DiffSide.RIGHT)),
         )
+
+    def test_unsafe_previous_path_is_rejected_before_commentable_mapping(self) -> None:
+        for previous_path in ("../old.py", "/old.py", r"old\\name.py", "old//name.py", "old/\x01name.py"):
+            with self.subTest(previous_path=previous_path):
+                unsafe = changed_file("new.py", previous_path=previous_path)
+                with self.assertRaises(ContextError):
+                    parse_hunks(unsafe)
+                with self.assertRaises(ContextError):
+                    build_context_plan(snapshot(unsafe), **budget())
 
     def test_hunk_rejects_incorrect_counts_and_never_marks_context_commentable(self) -> None:
         valid = changed_file(
@@ -176,12 +206,45 @@ class TestContextPlanning(unittest.TestCase):
         )
 
         self.assertGreater(len(plan.chunks), 1)
-        for chunk in plan.chunks:
+        diff_chunks = [chunk for chunk in plan.chunks if "side=RIGHT" in chunk.text]
+        self.assertTrue(diff_chunks)
+        for chunk in diff_chunks:
             self.assertIn("repository=owner/repo", chunk.text)
             self.assertIn("pr=53", chunk.text)
             self.assertIn("path=src/large.py", chunk.text)
             self.assertIn("side=RIGHT", chunk.text)
-            self.assertRegex(chunk.text, r"line=\d+")
+            self.assertRegex(chunk.text, r"new=1-1")
+
+    def test_diff_fragments_keep_fixed_refs_and_exact_later_side_coordinates(self) -> None:
+        additions = "".join(f"+line_{line:04}\n" for line in range(1, 101))
+        file = changed_file(
+            "new.py",
+            previous_path="old.py",
+            status="renamed",
+            patch="@@ -1,1 +1,100 @@\n-old\n" + additions,
+            base_content="old\n",
+            head_content="".join(f"line_{line:04}\n" for line in range(1, 101)),
+        )
+        plan = build_context_plan(
+            snapshot(file),
+            **budget(repository_limit=40_000, backend_context_window=50_000, output_reserve=1_000),
+        )
+        line_100 = next(chunk.text for chunk in plan.chunks if "+line_0100" in chunk.text)
+        deleted = next(chunk.text for chunk in plan.chunks if "-old" in chunk.text)
+
+        self.assertIn("side=LEFT", deleted)
+        self.assertIn("old=1-1", deleted)
+        self.assertIn("new=-", deleted)
+        self.assertIn("path=old.py", deleted)
+        self.assertIn("side=RIGHT", line_100)
+        self.assertIn("old=-", line_100)
+        self.assertIn("new=100-100", line_100)
+        self.assertIn("base_ref=" + ("b" * 40), line_100)
+        self.assertIn("head_ref=" + ("h" * 40), line_100)
+        self.assertIn("path=new.py", line_100)
+        self.assertIn("previous_path=old.py", line_100)
+        self.assertTrue(all("base_ref=" + ("b" * 40) in chunk.text for chunk in plan.chunks))
+        self.assertTrue(all("head_ref=" + ("h" * 40) in chunk.text for chunk in plan.chunks))
 
     def test_ten_thousand_line_patch_is_bounded_without_prefix_truncation(self) -> None:
         patch = "@@ -1,0 +1,10000 @@\n" + "".join(f"+value_{line}\n" for line in range(1, 10_001))
