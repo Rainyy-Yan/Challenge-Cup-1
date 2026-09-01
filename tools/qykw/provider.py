@@ -13,6 +13,8 @@ _REQUIRED_ENVIRONMENT = ("QYKW_INFERENCE_API_KEY", "QYKW_INFERENCE_BASE_URL", "Q
 _MAX_RESPONSE_BODY_BYTES = 1_048_576
 _RETRY_DELAY_SECONDS = 0.1
 _SAFE_REQUEST_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+_MAX_ACTIVE_RESOLVERS = 2
+_RESOLVER_SLOTS = threading.BoundedSemaphore(_MAX_ACTIVE_RESOLVERS)
 
 class InferenceProvider(Protocol):
     def capabilities(self) -> ProviderCapabilities: ...
@@ -84,8 +86,8 @@ def estimate_request_input_tokens(request: InferenceRequest) -> int:
 
 class ResponsesInferenceProvider:
     """HTTPS-only adapter with DNS pinning, bounded retry, and safe telemetry."""
-    def __init__(self, *, api_key: str, base_url: str, model: str, allowed_hosts: Sequence[str], context_window: int, max_output_tokens: int, timeout_seconds: int, transport: InferenceTransport|None=None, dns_resolver: Callable[[str,int,float],Sequence[str]]|None=None, clock: Callable[[],float]=time.monotonic, sleep: Callable[[float],None]=time.sleep, logger: Callable[[Mapping[str,object]],None]|None=None) -> None:
-        self._api_key=api_key; self._base_url=base_url; self._model=model; self._allowed_hosts=tuple(_canonical_host(host) for host in allowed_hosts); self._context_window=context_window; self._max_output_tokens=max_output_tokens; self._timeout_seconds=timeout_seconds; self._transport=transport or StdlibHTTPSInferenceTransport(); self._dns_resolver=dns_resolver or _stdlib_dns_resolver; self._clock=clock; self._sleep=sleep; self._logger=logger
+    def __init__(self, *, api_key: str, base_url: str, model: str, allowed_hosts: Sequence[str], context_window: int, max_output_tokens: int, timeout_seconds: int, transport: InferenceTransport|None=None, dns_resolver: Callable[[str,int,float],Sequence[str]]|None=None, clock: Callable[[],float]=time.monotonic, sleep: Callable[[float],None]=time.sleep, logger: Callable[[Mapping[str,object]],None]|None=None, resolver_slots: threading.BoundedSemaphore|None=None) -> None:
+        self._api_key=api_key; self._base_url=base_url; self._model=model; self._allowed_hosts=tuple(_canonical_host(host) for host in allowed_hosts); self._context_window=context_window; self._max_output_tokens=max_output_tokens; self._timeout_seconds=timeout_seconds; self._transport=transport or StdlibHTTPSInferenceTransport(); self._dns_resolver=dns_resolver or _stdlib_dns_resolver; self._clock=clock; self._sleep=sleep; self._logger=logger; self._resolver_slots=resolver_slots or _RESOLVER_SLOTS
     @classmethod
     def from_env(cls) -> "ResponsesInferenceProvider":
         values={name:os.environ.get(name) for name in _REQUIRED_ENVIRONMENT}
@@ -115,7 +117,7 @@ class ResponsesInferenceProvider:
             try:
                 remaining=self._remaining_seconds(deadline_at)
                 if remaining<=0: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
-                resolved_ip=_resolve_public(endpoint.host,endpoint.port,remaining,self._dns_resolver); calls+=1
+                resolved_ip=_resolve_public(endpoint.host,endpoint.port,remaining,self._dns_resolver,self._resolver_slots); calls+=1
                 remaining=self._remaining_seconds(deadline_at)
                 if remaining<=0: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
                 response=self._transport.send(TransportRequest("POST",self._base_url,endpoint.host,endpoint.port,resolved_ip,{"accept":"application/json","authorization":f"Bearer {self._api_key}","content-type":"application/json","idempotency-key":request.idempotency_key},body,min(float(self._timeout_seconds),remaining)))
@@ -172,8 +174,8 @@ def _validate_endpoint(url: str, allowed_hosts: tuple[str,...]) -> _Endpoint:
     return _Endpoint(canonical,443)
 class _ResolutionDeadlineExceeded(Exception): pass
 def _stdlib_dns_resolver(host: str, port: int, _remaining: float) -> Sequence[str]: return tuple(record[4][0] for record in socket.getaddrinfo(host,port,type=socket.SOCK_STREAM))
-def _resolve_public(host: str, port: int, remaining: float, resolver: Callable[[str,int,float],Sequence[str]]) -> str:
-    try: addresses=_resolve_with_deadline(host,port,remaining,resolver)
+def _resolve_public(host: str, port: int, remaining: float, resolver: Callable[[str,int,float],Sequence[str]], slots: threading.BoundedSemaphore) -> str:
+    try: addresses=_resolve_with_deadline(host,port,remaining,resolver,slots)
     except _ResolutionDeadlineExceeded: raise ProviderError(ProviderErrorCode.DEADLINE_EXCEEDED) from None
     except (socket.gaierror,OSError,ValueError) as exc: raise TransportFailure(TransportFailureKind.DNS,pre_send=True) from exc
     if not addresses: raise TransportFailure(TransportFailureKind.DNS,pre_send=True)
@@ -184,12 +186,18 @@ def _resolve_public(host: str, port: int, remaining: float, resolver: Callable[[
         if not _is_acceptable_global_address(candidate): raise ProviderError(ProviderErrorCode.ENDPOINT_BLOCKED)
         parsed.append(candidate)
     return str(parsed[0])
-def _resolve_with_deadline(host: str, port: int, remaining: float, resolver: Callable[[str,int,float],Sequence[str]]) -> tuple[str,...]:
+def _resolve_with_deadline(host: str, port: int, remaining: float, resolver: Callable[[str,int,float],Sequence[str]], slots: threading.BoundedSemaphore) -> tuple[str,...]:
+    if not slots.acquire(blocking=False): raise TransportFailure(TransportFailureKind.DNS,pre_send=True)
     results: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
     def resolve() -> None:
-        try: results.put_nowait((True, tuple(resolver(host,port,remaining))))
-        except BaseException: results.put_nowait((False, None))
-    threading.Thread(target=resolve, daemon=True).start()
+        try:
+            try: results.put_nowait((True, tuple(resolver(host,port,remaining))))
+            except BaseException: results.put_nowait((False, None))
+        finally: slots.release()
+    try: threading.Thread(target=resolve, daemon=True).start()
+    except BaseException:
+        slots.release()
+        raise TransportFailure(TransportFailureKind.DNS,pre_send=True) from None
     try: succeeded, value=results.get(timeout=remaining)
     except queue.Empty: raise _ResolutionDeadlineExceeded from None
     if not succeeded: raise socket.gaierror

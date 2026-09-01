@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 import time
+import threading
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -207,6 +208,7 @@ def secure_provider(
     clock: object | None = None,
     sleep: object | None = None,
     timeout_seconds: int = 30,
+    resolver_slots: object | None = None,
 ) -> ResponsesInferenceProvider:
     return ResponsesInferenceProvider(
         api_key="SENTINEL_API_KEY",
@@ -220,6 +222,7 @@ def secure_provider(
         dns_resolver=dns or (lambda _host, _port, _remaining: ("93.184.216.34",)),
         clock=clock or (lambda: 0.0),
         sleep=sleep or (lambda _seconds: None),
+        resolver_slots=resolver_slots,
     )
 
 
@@ -385,6 +388,63 @@ class TestResponsesInferenceProvider(unittest.TestCase):
             ).complete(replace(request(), deadline_seconds=0.05))
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertEqual(transport.calls, 0)
+
+    def test_resolver_capacity_is_bounded_and_slots_recover_after_worker_exit(self) -> None:
+        slots = threading.BoundedSemaphore(1)
+        entered = threading.Event()
+        release = threading.Event()
+        active = [0]
+        highest_active = [0]
+        active_lock = threading.Lock()
+
+        def blocked_resolver(_host: str, _port: int, _remaining: float) -> tuple[str, ...]:
+            with active_lock:
+                active[0] += 1
+                highest_active[0] = max(highest_active[0], active[0])
+            entered.set()
+            release.wait()
+            with active_lock:
+                active[0] -= 1
+            return ("93.184.216.34",)
+
+        first_transport = RecordingTransport([good_response()])
+        first = secure_provider(first_transport, dns=blocked_resolver, resolver_slots=slots)
+        first_error: list[BaseException] = []
+        first_thread = threading.Thread(target=lambda: self._complete_in_thread(first, first_error))
+        first_thread.start()
+        self.assertTrue(entered.wait(1))
+
+        saturated_transport = RecordingTransport([good_response()])
+        with self.assertRaisesRegex(ProviderError, "dns_error"):
+            secure_provider(saturated_transport, resolver_slots=slots).complete(request())
+        self.assertEqual(saturated_transport.calls, 0)
+        self.assertEqual(highest_active[0], 1)
+
+        release.set()
+        first_thread.join(1)
+        self.assertFalse(first_thread.is_alive())
+        self.assertEqual(first_error, [])
+
+        recovered_transport = RecordingTransport([good_response()])
+        secure_provider(recovered_transport, resolver_slots=slots).complete(request())
+        self.assertEqual(recovered_transport.calls, 1)
+
+    @staticmethod
+    def _complete_in_thread(provider: ResponsesInferenceProvider, errors: list[BaseException]) -> None:
+        try:
+            provider.complete(request())
+        except BaseException as error:
+            errors.append(error)
+
+    def test_resolver_thread_start_failure_releases_slot(self) -> None:
+        slots = threading.BoundedSemaphore(1)
+        with patch("tools.qykw.provider.threading.Thread", side_effect=RuntimeError("SENTINEL")):
+            with self.assertRaisesRegex(ProviderError, "dns_error"):
+                secure_provider(RecordingTransport([good_response()]), resolver_slots=slots).complete(request())
+
+        recovered_transport = RecordingTransport([good_response()])
+        secure_provider(recovered_transport, resolver_slots=slots).complete(request())
+        self.assertEqual(recovered_transport.calls, 1)
 
     def test_resolver_receives_decreasing_remaining_deadline_on_retry(self) -> None:
         now = [0.0]
