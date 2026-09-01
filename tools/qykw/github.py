@@ -155,6 +155,10 @@ class HttpGitHubGateway:
         )
         checks = self.list_check_runs(pull_ref.source_head_sha)
         rules, rule_omissions = self._get_default_branch_rules_with_omissions()
+        final_pull_ref = self.get_pull_ref(pr_number)
+        if final_pull_ref != pull_ref:
+            raise GitHubError("stale_pull_ref")
+        self._assert_run_matches(run, final_pull_ref)
         payload = _mapping(pull_payload, "invalid_pull")
         return GitHubPullSnapshot(
             number=pull_ref.number,

@@ -210,6 +210,24 @@ class TestGitHubGateway(unittest.TestCase):
             gw.get_pull_snapshot(53, run=None)  # type: ignore[arg-type]
         self.assertEqual(transport.calls, [])
 
+    def test_snapshot_rechecks_pull_ref_after_collection_and_rejects_synchronize_race(self) -> None:
+        api = "https://api.github.test/repos/owner/repo"
+        routes = {
+            f"GET {api}/pulls/53": [response(pull()), response(pull(head="e" * 40))],
+            f"GET {api}/pulls/53/files?per_page=100": response([]),
+            f"GET {api}/git/commits/{BASE_SHA}": response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}),
+            f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}),
+            f"GET {api}/git/trees/{BASE_TREE_SHA}?recursive=1": response({"tree": []}),
+            f"GET https://api.github.test/repos/source/repo/git/trees/{HEAD_TREE_SHA}?recursive=1": response({"tree": []}),
+            f"GET {api}/commits/{HEAD_SHA}/check-runs?per_page=100": response({"check_runs": []}),
+            f"GET {api}/contents/AGENTS.md?ref=main": response({"message": "missing"}, status=404),
+            f"GET {api}/contents/.github/qykw.toml?ref=main": response({"message": "missing"}, status=404),
+        }
+        gw, transport = gateway(routes)
+        with self.assertRaisesRegex(GitHubError, "stale_pull_ref"):
+            gw.get_pull_snapshot(53, run=run_context())
+        self.assertEqual([url for _, url, _ in transport.calls].count(f"{api}/pulls/53"), 2)
+
     def test_snapshot_covers_ordinary_missing_renamed_and_deleted_data_on_both_sides(self) -> None:
         api = "https://api.github.test/repos/owner/repo"
         files = [
@@ -218,7 +236,7 @@ class TestGitHubGateway(unittest.TestCase):
             changed("missing.py"),
         ]
         routes = {
-            f"GET {api}/pulls/53": response(pull()),
+            f"GET {api}/pulls/53": [response(pull()), response(pull())],
             f"GET {api}/pulls/53/files?per_page=100": response(files),
             f"GET {api}/git/commits/{BASE_SHA}": response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}),
             f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}),
@@ -259,7 +277,7 @@ class TestGitHubGateway(unittest.TestCase):
     def test_added_file_has_only_fixed_head_content_and_mode(self) -> None:
         api = "https://api.github.test/repos/owner/repo"
         routes = {
-            f"GET {api}/pulls/53": response(pull()),
+            f"GET {api}/pulls/53": [response(pull()), response(pull())],
             f"GET {api}/pulls/53/files?per_page=100": response([changed("added.py", status="added")]),
             f"GET {api}/git/commits/{BASE_SHA}": response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}),
             f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}),
@@ -284,7 +302,7 @@ class TestGitHubGateway(unittest.TestCase):
         api = "https://api.github.test/repos/owner/repo"
         missing = response({"message": "missing"}, status=404)
         routes = {
-            f"GET {api}/pulls/53": [response(pull()), response(pull())],
+            f"GET {api}/pulls/53": [response(pull()), response(pull()), response(pull()), response(pull())],
             f"GET {api}/pulls/53/files?per_page=100": [response([]), response([])],
             f"GET {api}/git/commits/{BASE_SHA}": [response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}), response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}})],
             f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": [response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}), response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}})],
