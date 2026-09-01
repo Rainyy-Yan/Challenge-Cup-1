@@ -35,6 +35,7 @@ _HUNK_HEADER = re.compile(
     r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@(?:.*)$"
 )
+_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SENSITIVE_PARTS = (".env", "credential", "secret", "id_rsa", "private_key")
 _OVERSIZED_CHARACTERS = 1_000_000
 _MINIMUM_TRIAGE_TEXT = "TRIAGE\n"
@@ -55,6 +56,7 @@ class _ContextRecord:
     new_end: int | None
     text: str
     hunk_index: int | None = None
+    record_index: int = 0
 
 
 def estimate_tokens(text: str) -> int:
@@ -148,6 +150,8 @@ def parse_hunks(file: ChangedFile) -> tuple[DiffHunk, ...]:
 def build_context_plan(
     snapshot: PullSnapshot,
     *,
+    run_id: str,
+    repository_id: int,
     repository_limit: int,
     backend_context_window: int,
     output_reserve: int,
@@ -156,6 +160,9 @@ def build_context_plan(
 ) -> ContextPlan:
     """Build a single-PR context plan with total and per-chunk hard limits."""
     _validate_snapshot(snapshot)
+    _validate_run_identity(run_id, repository_id)
+    plan_identity = _plan_identity(snapshot, run_id, repository_id)
+    provenance_identity = _provenance_identity(snapshot, run_id, repository_id)
     effective_budget, max_chunk_tokens = _effective_budget(
         repository_limit,
         backend_context_window,
@@ -213,7 +220,7 @@ def build_context_plan(
         path: _triage_record(by_path[path]) for path in manifest.risk_order if path in candidates
     }
     triage_costs = {
-        path: _record_cost(snapshot, record) for path, record in triage_records.items()
+        path: _record_cost(provenance_identity, record) for path, record in triage_records.items()
     }
     if any(cost > max_chunk_tokens for cost in triage_costs.values()):
         raise ContextError("impossible_triage_chunk_budget")
@@ -223,16 +230,17 @@ def build_context_plan(
         record = triage_records.get(path)
         if record is None:
             continue
-        allocated, chunk_index, used = _allocate_record(
+        allocated, completed, chunk_index, used = _allocate_record(
             record,
-            snapshot=snapshot,
+            plan_identity=plan_identity,
+            provenance_identity=provenance_identity,
             chunk_index=chunk_index,
             used=used,
             effective_budget=effective_budget,
             max_chunk_tokens=max_chunk_tokens,
             chunks=chunks,
         )
-        if not allocated:
+        if not allocated or not completed:
             raise ContextError("impossible_triage_budget")
         reviewed.add(path)
         handled.add(path)
@@ -240,32 +248,43 @@ def build_context_plan(
 
     # Only the residual budget is prioritized by risk.  Every eligible path is
     # already explicitly triaged at this point.
+    complete_records: set[tuple[str, int, int]] = set()
+    expected_records: dict[tuple[str, int], set[int]] = {}
+    for path, records in candidates.items():
+        for record in records:
+            if record.hunk_index is not None:
+                expected_records.setdefault((path, record.hunk_index), set()).add(record.record_index)
     for path in manifest.risk_order:
         records = candidates.get(path)
         if records is None:
             continue
         for record in records:
-            allocated, chunk_index, used = _allocate_record(
+            allocated, completed, chunk_index, used = _allocate_record(
                 record,
-                snapshot=snapshot,
+                plan_identity=plan_identity,
+                provenance_identity=provenance_identity,
                 chunk_index=chunk_index,
                 used=used,
                 effective_budget=effective_budget,
                 max_chunk_tokens=max_chunk_tokens,
                 chunks=chunks,
             )
-            if allocated:
-                if record.hunk_index is not None:
-                    reviewed_hunks.add((path, record.hunk_index))
-            if used >= effective_budget:
-                break
+            if record.hunk_index is not None:
+                key = (path, record.hunk_index, record.record_index)
+                if completed:
+                    complete_records.add(key)
+                else:
+                    omissions.append(
+                        f"budget_truncated:{path}:hunk={record.hunk_index}:record={record.record_index}"
+                    )
 
     # Rules and related files are trusted/read-only context, never PR manifest
     # entries.  They are appended only after every PR file has been triaged.
     for reference in _ordered_references(snapshot.trusted_rules, snapshot.related_files):
-        _, chunk_index, used = _allocate_record(
+        _, _, chunk_index, used = _allocate_record(
             _reference_context_record(reference),
-            snapshot=snapshot,
+            plan_identity=plan_identity,
+            provenance_identity=provenance_identity,
             chunk_index=chunk_index,
             used=used,
             effective_budget=effective_budget,
@@ -274,6 +293,11 @@ def build_context_plan(
         )
 
     total_hunks = sum(len(value) for value in hunks_by_path.values())
+    reviewed_hunks = {
+        hunk_key
+        for hunk_key, record_indexes in expected_records.items()
+        if all((hunk_key[0], hunk_key[1], record_index) in complete_records for record_index in record_indexes)
+    }
     coverage = CoverageReport(
         total_files=len(paths),
         reviewed_files=len(reviewed),
@@ -286,7 +310,7 @@ def build_context_plan(
         repository=snapshot.target_repository,
         pr_number=snapshot.number,
         source_head_sha=snapshot.source_head_sha,
-        run_id=_run_id(snapshot),
+        run_id=plan_identity,
         manifest=manifest,
         chunks=tuple(chunks),
         coverage=coverage,
@@ -372,6 +396,28 @@ def _validate_relative_path(path: str) -> None:
         raise ContextError("unsafe_changed_path")
 
 
+def _validate_run_identity(run_id: str, repository_id: int) -> None:
+    if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
+        raise ContextError("invalid_run_id")
+    if not isinstance(repository_id, int) or isinstance(repository_id, bool) or repository_id <= 0:
+        raise ContextError("invalid_repository_id")
+
+
+def _plan_identity(snapshot: PullSnapshot, run_id: str, repository_id: int) -> str:
+    return (
+        f"run_id={run_id}|repository_id={repository_id}|repository={snapshot.target_repository}"
+        f"|pr={snapshot.number}|base_sha={snapshot.target_base_sha}"
+        f"|base_ref={snapshot.target_base_ref}|head_sha={snapshot.source_head_sha}"
+    )
+
+
+def _provenance_identity(snapshot: PullSnapshot, run_id: str, repository_id: int) -> str:
+    return (
+        f"run={run_id} rid={repository_id} repo={snapshot.target_repository} pr={snapshot.number} "
+        f"bs={snapshot.target_base_sha} br={snapshot.target_base_ref} hs={snapshot.source_head_sha}"
+    )
+
+
 def _snapshot_omissions(snapshot: PullSnapshot) -> tuple[str, ...]:
     value = getattr(snapshot, "omissions", ())
     if not isinstance(value, tuple) or not all(isinstance(item, str) for item in value):
@@ -450,7 +496,7 @@ def _diff_records(
             new_line += 1
         else:
             raise ContextError("malformed_hunk_line")
-    return tuple(records)
+    return tuple(replace(record, record_index=index) for index, record in enumerate(records))
 
 
 def _content_records(file: ChangedFile) -> tuple[_ContextRecord, ...]:
@@ -527,29 +573,30 @@ def _reference_context_record(file: RepositoryFile) -> _ContextRecord:
     )
 
 
-def _record_cost(snapshot: PullSnapshot, record: _ContextRecord) -> int:
-    return estimate_tokens(_record_prefix(snapshot, record) + record.text)
+def _record_cost(provenance_identity: str, record: _ContextRecord) -> int:
+    return estimate_tokens(_record_prefix(provenance_identity, record) + record.text)
 
 
 def _allocate_record(
     record: _ContextRecord,
     *,
-    snapshot: PullSnapshot,
+    plan_identity: str,
+    provenance_identity: str,
     chunk_index: int,
     used: int,
     effective_budget: int,
     max_chunk_tokens: int,
     chunks: list[ContextChunk],
-) -> tuple[bool, int, int]:
+) -> tuple[bool, bool, int, int]:
     """Allocate a record without exceeding either budget, even for one huge line."""
     remaining = min(max_chunk_tokens, effective_budget - used)
     if remaining <= 0 or not record.text:
-        return False, chunk_index, used
+        return False, False, chunk_index, used
     offset = 0
     allocated = False
     while offset < len(record.text) and used < effective_budget:
         allowance = min(max_chunk_tokens, effective_budget - used)
-        prefix = _record_prefix(snapshot, record)
+        prefix = _record_prefix(provenance_identity, record)
         payload_capacity = allowance - estimate_tokens(prefix)
         if payload_capacity <= 0:
             break
@@ -559,7 +606,7 @@ def _allocate_record(
         tokens = estimate_tokens(piece)
         chunks.append(
             ContextChunk(
-                chunk_id=f"{snapshot.target_repository}#{snapshot.number}:{snapshot.source_head_sha}:{chunk_index}",
+                chunk_id=f"{plan_identity}|chunk={chunk_index}",
                 paths=(record.path,),
                 text=piece,
                 estimated_tokens=tokens,
@@ -569,15 +616,13 @@ def _allocate_record(
         chunk_index += 1
         used += tokens
         offset += len(piece) - len(prefix)
-    return allocated, chunk_index, used
+    return allocated, offset == len(record.text), chunk_index, used
 
 
-def _record_prefix(snapshot: PullSnapshot, record: _ContextRecord) -> str:
+def _record_prefix(provenance_identity: str, record: _ContextRecord) -> str:
     """Emit complete immutable diff provenance on every physical fragment."""
     return (
-        f"P repository={snapshot.target_repository} pr={snapshot.number} "
-        f"base_ref={record.base_ref or '-'} head_ref={record.head_ref or '-'} "
-        f"path={record.path} previous_path={record.previous_path or '-'} "
+        f"P {provenance_identity} path={record.path} prev={record.previous_path or '-'} "
         f"side={record.side} old={_line_range(record.old_start, record.old_end)} "
         f"new={_line_range(record.new_start, record.new_end)}\n"
     )

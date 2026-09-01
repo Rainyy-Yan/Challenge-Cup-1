@@ -67,8 +67,10 @@ def snapshot(*files: ChangedFile, omissions: tuple[str, ...] = ()) -> PullSnapsh
     return value
 
 
-def budget(**overrides: int | float) -> dict[str, int | float]:
-    values: dict[str, int | float] = {
+def budget(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "run_id": "QY-PR53-A1B2",
+        "repository_id": 9001,
         "repository_limit": 1_000,
         "backend_context_window": 1_000,
         "output_reserve": 100,
@@ -114,7 +116,7 @@ class TestContextPlanning(unittest.TestCase):
         giant = "x" * 10_000
         plan = build_context_plan(
             snapshot(changed_file("src/giant.py", head_content=giant, patch="@@ -0,0 +1 @@\n+" + giant)),
-            **budget(repository_limit=800, backend_context_window=1_000),
+            **budget(repository_limit=800, backend_context_window=1_000, max_chunk_ratio=1.0),
         )
 
         self.assertTrue(plan.chunks)
@@ -202,14 +204,14 @@ class TestContextPlanning(unittest.TestCase):
         patch = "@@ -1,0 +1,1 @@\n+" + ("长" * 1_000) + "\n"
         plan = build_context_plan(
             snapshot(changed_file("src/large.py", patch=patch, base_content="", head_content="长" * 1_000)),
-            **budget(repository_limit=900, backend_context_window=1_000),
+            **budget(repository_limit=900, backend_context_window=1_000, max_chunk_ratio=1.0),
         )
 
         self.assertGreater(len(plan.chunks), 1)
         diff_chunks = [chunk for chunk in plan.chunks if "side=RIGHT" in chunk.text]
         self.assertTrue(diff_chunks)
         for chunk in diff_chunks:
-            self.assertIn("repository=owner/repo", chunk.text)
+            self.assertIn("repo=owner/repo", chunk.text)
             self.assertIn("pr=53", chunk.text)
             self.assertIn("path=src/large.py", chunk.text)
             self.assertIn("side=RIGHT", chunk.text)
@@ -239,12 +241,12 @@ class TestContextPlanning(unittest.TestCase):
         self.assertIn("side=RIGHT", line_100)
         self.assertIn("old=-", line_100)
         self.assertIn("new=100-100", line_100)
-        self.assertIn("base_ref=" + ("b" * 40), line_100)
-        self.assertIn("head_ref=" + ("h" * 40), line_100)
+        self.assertIn("bs=" + ("b" * 40), line_100)
+        self.assertIn("hs=" + ("h" * 40), line_100)
         self.assertIn("path=new.py", line_100)
-        self.assertIn("previous_path=old.py", line_100)
-        self.assertTrue(all("base_ref=" + ("b" * 40) in chunk.text for chunk in plan.chunks))
-        self.assertTrue(all("head_ref=" + ("h" * 40) in chunk.text for chunk in plan.chunks))
+        self.assertIn("prev=old.py", line_100)
+        self.assertTrue(all("bs=" + ("b" * 40) in chunk.text for chunk in plan.chunks))
+        self.assertTrue(all("hs=" + ("h" * 40) in chunk.text for chunk in plan.chunks))
 
     def test_ten_thousand_line_patch_is_bounded_without_prefix_truncation(self) -> None:
         patch = "@@ -1,0 +1,10000 @@\n" + "".join(f"+value_{line}\n" for line in range(1, 10_001))
@@ -294,11 +296,39 @@ class TestContextPlanning(unittest.TestCase):
         first = build_context_plan(snapshot(changed_file("same.py")), **budget())
         second_snapshot = snapshot(changed_file("same.py"))
         second_snapshot = PullSnapshot(**{**second_snapshot.__dict__, "number": 54, "source_head_sha": "z" * 40})
-        second = build_context_plan(second_snapshot, **budget())
+        second = build_context_plan(second_snapshot, **budget(run_id="QY-PR54-A1B2"))
 
         self.assertNotEqual(first.run_id, second.run_id)
-        self.assertTrue(all("#53:" in chunk.chunk_id for chunk in first.chunks))
-        self.assertTrue(all("#54:" in chunk.chunk_id for chunk in second.chunks))
+        self.assertIn("run_id=QY-PR53-A1B2", first.run_id)
+        self.assertIn("repository_id=9001", first.run_id)
+        self.assertTrue(all("run_id=QY-PR53-A1B2" in chunk.chunk_id for chunk in first.chunks))
+        self.assertTrue(all("run_id=QY-PR54-A1B2" in chunk.chunk_id for chunk in second.chunks))
+
+    def test_truncated_hunk_record_is_not_counted_as_reviewed(self) -> None:
+        giant = "x" * 10_000
+        plan = build_context_plan(
+            snapshot(changed_file("src/giant.py", base_content="", head_content=giant, patch="@@ -0,0 +1 @@\n+" + giant)),
+            **budget(repository_limit=450, backend_context_window=1_000, max_chunk_ratio=1.0),
+        )
+
+        self.assertEqual(plan.coverage.total_hunks, 1)
+        self.assertEqual(plan.coverage.reviewed_hunks, 0)
+        self.assertTrue(any(item.startswith("budget_truncated:src/giant.py:hunk=0:record=") for item in plan.coverage.omissions))
+
+    def test_controller_run_ids_isolate_identical_snapshots_and_reject_unsafe_values(self) -> None:
+        same_snapshot = snapshot(changed_file("same.py"))
+        first = build_context_plan(same_snapshot, **budget(run_id="QY-PR53-FIRST"))
+        repeated = build_context_plan(same_snapshot, **budget(run_id="QY-PR53-FIRST"))
+        second = build_context_plan(same_snapshot, **budget(run_id="QY-PR53-SECOND"))
+
+        self.assertEqual(first.run_id, repeated.run_id)
+        self.assertEqual(tuple(chunk.chunk_id for chunk in first.chunks), tuple(chunk.chunk_id for chunk in repeated.chunks))
+        self.assertTrue(set(chunk.chunk_id for chunk in first.chunks).isdisjoint(chunk.chunk_id for chunk in second.chunks))
+        self.assertIn("base_sha=" + ("b" * 40), first.run_id)
+        self.assertIn("base_ref=main", first.run_id)
+        self.assertIn("head_sha=" + ("h" * 40), first.run_id)
+        with self.assertRaises(ContextError):
+            build_context_plan(same_snapshot, **budget(run_id="unsafe/run"))
 
 
 if __name__ == "__main__":
