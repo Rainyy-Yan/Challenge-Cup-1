@@ -29,6 +29,7 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 90
 MINIMAX_REQUEST_TIMEOUT_SECONDS = 240
 MINIMAX_NETWORK_RETRIES = 1
 FAST_FAILURE_RETRY_WINDOW_SECONDS = 15
+RETRY_BACKOFF_SECONDS = 1
 
 
 class ReviewError(RuntimeError):
@@ -502,6 +503,7 @@ def _request(
                 and attempt < retries
                 and elapsed <= FAST_FAILURE_RETRY_WINDOW_SECONDS
             ):
+                time.sleep(RETRY_BACKOFF_SECONDS)
                 continue
             raise error from exc
     raise AssertionError("request retry loop exited unexpectedly")

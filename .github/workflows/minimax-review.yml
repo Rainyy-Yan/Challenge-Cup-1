@@ -25,7 +25,14 @@ permissions:
 
 concurrency:
   group: minimax-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: true
+  # Comments posted by qykw trigger this workflow again. Those skipped runs must
+  # not cancel the active review that is still publishing inline findings.
+  cancel-in-progress: >-
+    ${{ !(
+      (github.event_name == 'issue_comment' ||
+       github.event_name == 'pull_request_review_comment') &&
+      github.event.comment.user.login == vars.MINIMAX_REVIEW_BOT_LOGIN
+    ) }}
 
 jobs:
   review:

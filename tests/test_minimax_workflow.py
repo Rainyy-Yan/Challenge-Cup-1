@@ -32,6 +32,17 @@ class TestMiniMaxWorkflow(unittest.TestCase):
         self.assertIn("TRIGGER_COMMENT_KIND:", workflow)
         self.assertIn("REVIEW_REQUEST:", workflow)
 
+    def test_bot_comments_do_not_cancel_the_active_review(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("github.event_name == 'issue_comment'", workflow)
+        self.assertIn("github.event_name == 'pull_request_review_comment'", workflow)
+        self.assertIn(
+            "github.event.comment.user.login == vars.MINIMAX_REVIEW_BOT_LOGIN",
+            workflow,
+        )
+        self.assertIn("cancel-in-progress: >-", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

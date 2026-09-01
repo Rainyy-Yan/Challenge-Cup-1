@@ -112,6 +112,11 @@ class TestMiniMaxPayload(unittest.TestCase):
 
 
 class TestRemoteRequests(unittest.TestCase):
+    def setUp(self) -> None:
+        sleep_patcher = patch.object(minimax_review.time, "sleep")
+        self.sleep = sleep_patcher.start()
+        self.addCleanup(sleep_patcher.stop)
+
     @staticmethod
     def _response(body: bytes = b"{}") -> MagicMock:
         response = MagicMock()
@@ -157,6 +162,7 @@ class TestRemoteRequests(unittest.TestCase):
 
         self.assertEqual(raw, b'{"ok": true}')
         self.assertEqual(urlopen.call_count, 2)
+        self.sleep.assert_called_once_with(1)
 
     def test_tls_handshake_failure_is_retried_once(self) -> None:
         response = self._response(b'{"ok": true}')
@@ -235,6 +241,27 @@ class TestRemoteRequests(unittest.TestCase):
                     )
 
         self.assertEqual(urlopen.call_count, 1)
+
+    def test_retry_exhaustion_raises_the_classified_error(self) -> None:
+        error = URLError(socket.gaierror(-2, "Name or service not known"))
+        with patch.object(
+            minimax_review,
+            "urlopen",
+            side_effect=error,
+        ) as urlopen:
+            with self.assertRaisesRegex(
+                minimax_review.ReviewError,
+                "DNS resolution failed",
+            ):
+                minimax_review._request(
+                    "https://api.minimaxi.com/v1/responses",
+                    method="POST",
+                    token="minimax-key",
+                    retries=1,
+                )
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.sleep.assert_called_once_with(1)
 
     def test_github_requests_keep_default_timeout_and_no_retry(self) -> None:
         with patch.object(
