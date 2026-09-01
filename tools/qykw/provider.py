@@ -50,17 +50,31 @@ def validate_provider_capabilities(
 
 
 def estimate_request_input_tokens(request: InferenceRequest) -> int:
-    """Conservatively bound input tokens by UTF-8 bytes in canonical payload JSON.
+    """Conservatively bound input tokens by UTF-8 bytes in complete request JSON.
 
     A byte is an upper bound for token count for byte-oriented tokenizers.  This
     deliberately overestimates instead of accepting an unknown or zero input
     budget when the shared request contract has no explicit input estimate.
+    The serialized envelope includes the payload, strict schema, and all
+    request metadata a transport needs to preserve.
     """
 
-    payload = json.dumps(
-        request.payload,
+    envelope = {
+        "run_id": request.run_id,
+        "stage": request.stage.value,
+        "prompt_version": request.prompt_version,
+        "reasoning_profile": request.reasoning_profile,
+        "deadline_seconds": request.deadline_seconds,
+        "max_output_tokens": request.max_output_tokens,
+        "idempotency_key": request.idempotency_key,
+        "schema_name": request.schema_name,
+        "schema": request.schema,
+        "payload": request.payload,
+    }
+    serialized = json.dumps(
+        envelope,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     )
-    return max(1, len(payload.encode("utf-8")))
+    return max(1, len(serialized.encode("utf-8")))

@@ -244,6 +244,27 @@ class TestQykwPromptBuilders(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_triage_request(run(), manifest(), (untrusted_rule,))
 
+    def test_trusted_rules_accept_only_exact_default_branch_allowlist(self) -> None:
+        cases = (
+            ("AGENTS.md", "main", True),
+            (".github/qykw.toml", "base-abc", True),
+            ("agents/AGENTS.md", "main", False),
+            ("AGENTS.md/..", "main", False),
+            (".github/../qykw.toml", "main", False),
+            (".github/QYKW.toml", "main", False),
+            ("README.md", "main", False),
+            ("AGENTS.md", "head-abc", False),
+        )
+        for path, ref, allowed in cases:
+            with self.subTest(path=path, ref=ref):
+                rule = replace(trusted_rules()[0], path=path, ref=ref)
+                if allowed:
+                    request = build_triage_request(run(), manifest(), (rule,))
+                    self.assertEqual(request.payload["trusted"]["trusted_rules"][0]["path"], path)
+                else:
+                    with self.assertRaises(ValueError):
+                        build_triage_request(run(), manifest(), (rule,))
+
     def test_payload_keeps_constitution_and_untrusted_input_separate(self) -> None:
         request = build_review_request(run(), context_chunk())
 

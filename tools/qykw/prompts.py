@@ -20,6 +20,7 @@ PROMPT_VERSION = "qykw-review-v1"
 _IDENTITY = "启元开物独立工程审查机器人 qykw"
 _DEADLINE_SECONDS = 900
 _MAX_OUTPUT_TOKENS = 4096
+_TRUSTED_RULE_PATHS = frozenset({"AGENTS.md", ".github/qykw.toml"})
 
 _CONSTITUTION = (
     "Identity and permissions are fixed by the system constitution.",
@@ -317,6 +318,8 @@ def _trusted_rule_data(run: RunContext, rule: RepositoryFile) -> Mapping[str, ob
 
     if not isinstance(rule, RepositoryFile):
         raise TypeError("trusted_rules must contain RepositoryFile values")
+    if rule.path not in _TRUSTED_RULE_PATHS:
+        raise ValueError("trusted_rules must use an exact allowed rule path")
     if rule.ref not in {run.target_base_ref, run.target_base_sha}:
         raise ValueError("trusted_rules must come from the run default branch")
     return {

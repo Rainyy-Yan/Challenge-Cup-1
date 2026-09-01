@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from tools.qykw.domain import (
     CommandMode,
@@ -113,6 +114,28 @@ class TestInferenceProviderBoundary(unittest.TestCase):
         validate_provider_capabilities(
             RecordingProvider(capabilities(context_window=required_window)), inference_request
         )
+
+    def test_schema_growth_requires_more_context_than_payload_boundary(self) -> None:
+        inference_request = request()
+        payload_boundary = (
+            inference_request.max_output_tokens + estimate_request_input_tokens(inference_request)
+        )
+        expanded_schema = {
+            **inference_request.schema,
+            "description": "strict schema detail " * 500,
+        }
+        expanded_request = replace(inference_request, schema=expanded_schema)
+
+        self.assertEqual(expanded_request.payload, inference_request.payload)
+        self.assertEqual(expanded_request.max_output_tokens, inference_request.max_output_tokens)
+        self.assertGreater(
+            estimate_request_input_tokens(expanded_request),
+            estimate_request_input_tokens(inference_request),
+        )
+        with self.assertRaises(InferenceError):
+            validate_provider_capabilities(
+                RecordingProvider(capabilities(context_window=payload_boundary)), expanded_request
+            )
 
     def test_capabilities_fail_closed_without_maximum_reasoning(self) -> None:
         provider = RecordingProvider(capabilities(profiles=frozenset({"high"})))
