@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from tools.qykw.domain import (
     CommandMode,
@@ -21,6 +22,12 @@ from tools.qykw.domain import (
 from tools.qykw.prompts import build_triage_request
 from tools.qykw.provider import (
     InferenceProvider,
+    ProviderError,
+    ProviderErrorCode,
+    ResponsesInferenceProvider,
+    TransportFailure,
+    TransportFailureKind,
+    TransportResponse,
     estimate_request_input_tokens,
     validate_provider_capabilities,
 )
@@ -154,6 +161,244 @@ class TestInferenceProviderBoundary(unittest.TestCase):
 
         self.assertEqual(raised.exception.failure.code, InferenceErrorCode.CAPABILITY_UNSUPPORTED)
         self.assertFalse(raised.exception.failure.request_may_have_been_accepted)
+
+
+class RecordingTransport:
+    """Deterministic adapter fixture; it never contacts a network."""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = outcomes
+        self.calls = 0
+        self.requests: list[object] = []
+
+    def send(self, transport_request: object) -> TransportResponse:
+        self.calls += 1
+        self.requests.append(transport_request)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        assert isinstance(outcome, TransportResponse)
+        return outcome
+
+
+def good_response(value: dict[str, object] | None = None) -> TransportResponse:
+    import json
+
+    return TransportResponse(
+        200,
+        {"content-type": "application/json"},
+        json.dumps(
+            {
+                "id": "safe-request-id",
+                "output": {"value": value or {"candidates": []}},
+                "usage": {"input_tokens": 10, "output_tokens": 3},
+            }
+        ).encode(),
+    )
+
+
+def secure_provider(
+    transport: RecordingTransport,
+    *,
+    base_url: str = "https://allowed.example/v1/responses",
+    allowed_hosts: tuple[str, ...] = ("allowed.example",),
+    dns: object | None = None,
+    clock: object | None = None,
+    sleep: object | None = None,
+) -> ResponsesInferenceProvider:
+    return ResponsesInferenceProvider(
+        api_key="SENTINEL_API_KEY",
+        base_url=base_url,
+        model="configured-model",
+        allowed_hosts=allowed_hosts,
+        context_window=100_000,
+        max_output_tokens=8_000,
+        timeout_seconds=30,
+        transport=transport,
+        dns_resolver=dns or (lambda _host, _port: ("93.184.216.34",)),
+        clock=clock or (lambda: 0.0),
+        sleep=sleep or (lambda _seconds: None),
+    )
+
+
+class TestResponsesInferenceProvider(unittest.TestCase):
+    def test_rejects_insecure_endpoint_before_transport(self) -> None:
+        transport = RecordingTransport([good_response()])
+        provider = secure_provider(transport, base_url="http://allowed.example/v1")
+
+        with self.assertRaisesRegex(ProviderError, "endpoint_invalid"):
+            provider.complete(request())
+        self.assertEqual(transport.calls, 0)
+
+    def test_rejects_userinfo_query_fragment_and_nondefault_port(self) -> None:
+        for url in (
+            "https://user@allowed.example/v1",
+            "https://allowed.example/v1?token=SENTINEL_API_KEY",
+            "https://allowed.example/v1#fragment",
+            "https://allowed.example:444/v1",
+        ):
+            with self.subTest(url=url):
+                transport = RecordingTransport([good_response()])
+                with self.assertRaisesRegex(ProviderError, "endpoint_invalid"):
+                    secure_provider(transport, base_url=url).complete(request())
+                self.assertEqual(transport.calls, 0)
+
+    def test_rejects_private_literal_and_private_dns_before_transport(self) -> None:
+        cases = (
+            ("https://127.0.0.1/v1", lambda _h, _p: ("127.0.0.1",)),
+            ("https://allowed.example/v1", lambda _h, _p: ("10.0.0.2",)),
+            ("https://allowed.example/v1", lambda _h, _p: ("::1",)),
+        )
+        for url, dns in cases:
+            with self.subTest(url=url):
+                transport = RecordingTransport([good_response()])
+                with self.assertRaisesRegex(ProviderError, "endpoint_blocked"):
+                    secure_provider(transport, base_url=url, dns=dns).complete(request())
+                self.assertEqual(transport.calls, 0)
+
+    def test_exact_canonical_allowed_host_blocks_suffix_and_idna_spoofing(self) -> None:
+        for url in (
+            "https://allowed.example.attacker.test/v1",
+            "https://\u0430llowed.example/v1",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(ProviderError, "endpoint_(not_allowed|invalid)"):
+                    secure_provider(RecordingTransport([good_response()]), base_url=url).complete(request())
+        canonical = secure_provider(RecordingTransport([good_response()]), base_url="https://allowed.example./v1").complete(request())
+        self.assertEqual(canonical.value, {"candidates": []})
+
+    def test_capabilities_are_checked_before_dns_or_transport(self) -> None:
+        transport = RecordingTransport([good_response()])
+        dns_calls: list[object] = []
+        provider = secure_provider(
+            transport,
+            dns=lambda host, port: (dns_calls.append((host, port)) or ("93.184.216.34",)),
+        )
+
+        with self.assertRaises(InferenceError):
+            provider.complete(replace(request(), reasoning_profile="high"))
+        self.assertEqual(dns_calls, [])
+        self.assertEqual(transport.calls, 0)
+
+    def test_cross_origin_redirect_is_rejected(self) -> None:
+        transport = RecordingTransport(
+            [TransportResponse(302, {"location": "https://other.example/path"}, b"")]
+        )
+        with self.assertRaisesRegex(ProviderError, "endpoint_redirect_rejected"):
+            secure_provider(transport).complete(request())
+        self.assertEqual(transport.calls, 1)
+
+    def test_read_timeout_is_not_retried(self) -> None:
+        transport = RecordingTransport(
+            [TransportFailure(TransportFailureKind.READ_TIMEOUT)]
+        )
+        with self.assertRaisesRegex(ProviderError, "read_timeout"):
+            secure_provider(transport).complete(request())
+        self.assertEqual(transport.calls, 1)
+
+    def test_dns_tls_and_confirmed_presend_failure_are_retried_once(self) -> None:
+        for failure in (
+            TransportFailure(TransportFailureKind.DNS),
+            TransportFailure(TransportFailureKind.TLS_HANDSHAKE),
+            TransportFailure(TransportFailureKind.CONNECTION, pre_send=True),
+        ):
+            with self.subTest(failure=failure.kind):
+                transport = RecordingTransport([failure, good_response()])
+                sleeps: list[float] = []
+                response = secure_provider(transport, sleep=sleeps.append).complete(request())
+                self.assertEqual(response.value, {"candidates": []})
+                self.assertEqual(transport.calls, 2)
+                self.assertEqual(sleeps, [0.1])
+
+    def test_certificate_response_and_maybe_accepted_failures_are_not_retried(self) -> None:
+        for failure in (
+            TransportFailure(TransportFailureKind.CERTIFICATE),
+            TransportFailure(TransportFailureKind.RESPONSE_INTERRUPTED),
+            TransportFailure(TransportFailureKind.CONNECTION, pre_send=False),
+        ):
+            with self.subTest(failure=failure.kind):
+                transport = RecordingTransport([failure, good_response()])
+                with self.assertRaises(ProviderError):
+                    secure_provider(transport).complete(request())
+                self.assertEqual(transport.calls, 1)
+
+    def test_valid_429_retry_after_retries_only_within_deadline(self) -> None:
+        limited = TransportResponse(429, {"retry-after": "2"}, b"")
+        transport = RecordingTransport([limited, good_response()])
+        sleeps: list[float] = []
+        result = secure_provider(transport, sleep=sleeps.append).complete(request())
+        self.assertEqual(result.usage.input_tokens, 10)
+        self.assertEqual(transport.calls, 2)
+        self.assertEqual(sleeps, [2.0])
+
+        late = RecordingTransport([limited, good_response()])
+        late_ticks = iter((0.0, 0.0, 899.0))
+        with self.assertRaisesRegex(ProviderError, "rate_limited"):
+            secure_provider(late, clock=lambda: next(late_ticks)).complete(request())
+        self.assertEqual(late.calls, 1)
+
+    def test_strict_response_rejects_extra_data_body_and_content_type(self) -> None:
+        import json
+
+        malformed = TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            json.dumps({"id": "one", "output": {"value": {"candidates": []}}, "extra": 1}).encode(),
+        )
+        with self.assertRaisesRegex(ProviderError, "invalid_response"):
+            secure_provider(RecordingTransport([malformed])).complete(request())
+        bad_type = TransportResponse(200, {"content-type": "text/plain"}, b"{}")
+        with self.assertRaisesRegex(ProviderError, "invalid_response"):
+            secure_provider(RecordingTransport([bad_type])).complete(request())
+
+    def test_errors_logs_and_chains_never_disclose_secrets_or_prompt_data(self) -> None:
+        secret_source = "SOURCE_CODE_SHOULD_NOT_LEAK"
+        full_comment = "FULL_COMMENT_SHOULD_NOT_LEAK"
+        response_body = "FULL_RESPONSE_SHOULD_NOT_LEAK"
+        logged: list[dict[str, object]] = []
+        failure = TransportFailure(
+            TransportFailureKind.CONNECTION,
+            detail=f"{secret_source} {full_comment} {response_body} SENTINEL_API_KEY",
+            pre_send=False,
+        )
+        transport = RecordingTransport([failure])
+        provider = secure_provider(transport)
+        provider._logger = logged.append
+        sensitive_request = replace(request(), payload={"comment": full_comment, "code": secret_source})
+
+        with self.assertRaises(ProviderError) as raised:
+            provider.complete(sensitive_request)
+        error = raised.exception
+        chain = (error, error.__cause__, error.__context__)
+        serialized = repr(logged) + "".join(
+            repr(item) + str(item) + repr(getattr(item, "args", ())) + repr(getattr(item, "__dict__", {}))
+            for item in chain
+            if item is not None
+        )
+        for forbidden in ("SENTINEL_API_KEY", secret_source, full_comment, response_body, "allowed.example"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertEqual(set(logged[0]), {"run_id", "stage", "call_count", "error_code"})
+
+    def test_from_env_requires_every_protected_setting_and_redacts_values(self) -> None:
+        env = {
+            "QYKW_INFERENCE_API_KEY": "SENTINEL_API_KEY",
+            "QYKW_INFERENCE_BASE_URL": "https://allowed.example/v1/responses",
+            "QYKW_INFERENCE_MODEL": "configured-model",
+            "QYKW_INFERENCE_ALLOWED_HOSTS": "allowed.example",
+            "QYKW_INFERENCE_CONTEXT_WINDOW": "100000",
+            "QYKW_INFERENCE_MAX_OUTPUT_TOKENS": "8000",
+            "QYKW_INFERENCE_TIMEOUT_SECONDS": "30",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            provider = ResponsesInferenceProvider.from_env()
+        self.assertEqual(provider.capabilities().context_window, 100000)
+        for missing in env:
+            incomplete = dict(env)
+            raw = incomplete.pop(missing)
+            with self.subTest(missing=missing), patch.dict("os.environ", incomplete, clear=True):
+                with self.assertRaises(ProviderError) as raised:
+                    ResponsesInferenceProvider.from_env()
+            self.assertNotIn(raw, str(raised.exception))
 
 
 if __name__ == "__main__":
