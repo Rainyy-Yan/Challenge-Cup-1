@@ -99,12 +99,21 @@ class ResponsesInferenceProvider:
         return ProviderCapabilities(self._context_window,self._max_output_tokens,True,frozenset({"maximum"}))
     def complete(self, request: InferenceRequest) -> InferenceResponse:
         validate_provider_capabilities(self,request)
+        try:
+            _validate_schema_contract(request.schema)
+            body = _request_body(self._model, request)
+            if len(body) + request.max_output_tokens > self._context_window:
+                raise ValueError
+        except ProviderError:
+            raise
+        except (TypeError, ValueError, UnicodeError):
+            raise ProviderError(ProviderErrorCode.INVALID_CONFIG) from None
         endpoint=_validate_endpoint(self._base_url,self._allowed_hosts); started=self._clock(); calls=0
         for attempt in range(2):
             if self._clock()-started>=request.deadline_seconds: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
             try:
                 resolved_ip=_resolve_public(endpoint.host,endpoint.port,self._dns_resolver); calls+=1
-                response=self._transport.send(TransportRequest("POST",self._base_url,endpoint.host,endpoint.port,resolved_ip,{"accept":"application/json","authorization":f"Bearer {self._api_key}","content-type":"application/json","idempotency-key":request.idempotency_key},_request_body(self._model,request),self._timeout_seconds))
+                response=self._transport.send(TransportRequest("POST",self._base_url,endpoint.host,endpoint.port,resolved_ip,{"accept":"application/json","authorization":f"Bearer {self._api_key}","content-type":"application/json","idempotency-key":request.idempotency_key},body,self._timeout_seconds))
             except BaseException as exc:
                 failure=_transport_failure(exc)
                 if failure is None: self._fail(request,calls,ProviderErrorCode.CONNECTION_ERROR)
@@ -117,7 +126,7 @@ class ResponsesInferenceProvider:
                 if attempt==0 and delay is not None and self._within_deadline(started,request.deadline_seconds,delay): self._sleep(delay); continue
                 self._fail(request,calls,ProviderErrorCode.RATE_LIMITED)
             if response.status!=200: self._fail(request,calls,ProviderErrorCode.INVALID_RESPONSE)
-            try: parsed=_parse_response(response,request.schema)
+            try: parsed=_parse_response(response,request.schema,request.max_output_tokens,self._context_window)
             except (TypeError,ValueError,UnicodeDecodeError,json.JSONDecodeError): self._fail(request,calls,ProviderErrorCode.INVALID_RESPONSE)
             self._emit(run_id=request.run_id,stage=request.stage.value,request_id=parsed.request_id,elapsed=max(0.0,self._clock()-started),call_count=calls,token_usage={"input_tokens":parsed.usage.input_tokens,"output_tokens":parsed.usage.output_tokens})
             return parsed
@@ -148,12 +157,12 @@ def _validate_endpoint(url: str, allowed_hosts: tuple[str,...]) -> _Endpoint:
         if parsed.scheme!="https" or not parsed.netloc or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or not parsed.path.startswith("/"): raise ValueError
         host=parsed.hostname
         if host is None: raise ValueError
+        try: ipaddress.ip_address(host)
+        except ValueError: pass
+        else: raise ProviderError(ProviderErrorCode.ENDPOINT_BLOCKED)
         canonical=_canonical_host(host)
         if parsed.port not in (None,443): raise ValueError
     except (ValueError,UnicodeError): raise ProviderError(ProviderErrorCode.ENDPOINT_INVALID) from None
-    try: ipaddress.ip_address(canonical)
-    except ValueError: pass
-    else: raise ProviderError(ProviderErrorCode.ENDPOINT_BLOCKED)
     if canonical not in allowed_hosts: raise ProviderError(ProviderErrorCode.ENDPOINT_NOT_ALLOWED)
     return _Endpoint(canonical,443)
 def _stdlib_dns_resolver(host: str, port: int) -> Sequence[str]: return tuple(record[4][0] for record in socket.getaddrinfo(host,port,type=socket.SOCK_STREAM))
@@ -165,13 +174,44 @@ def _resolve_public(host: str, port: int, resolver: Callable[[str,int],Sequence[
     for address in addresses:
         try: candidate=ipaddress.ip_address(address)
         except ValueError as exc: raise TransportFailure(TransportFailureKind.DNS,pre_send=True) from exc
-        if not candidate.is_global: raise ProviderError(ProviderErrorCode.ENDPOINT_BLOCKED)
+        if not _is_acceptable_global_address(candidate): raise ProviderError(ProviderErrorCode.ENDPOINT_BLOCKED)
         parsed.append(candidate)
     return str(parsed[0])
 def _request_body(model: str, request: InferenceRequest) -> bytes:
     body=json.dumps({"model":model,"input":request.payload,"reasoning":{"effort":request.reasoning_profile},"max_output_tokens":request.max_output_tokens,"response_format":{"type":"json_schema","name":request.schema_name,"strict":True,"schema":request.schema}},ensure_ascii=False,separators=(",",":")).encode("utf-8")
     if len(body)>_MAX_RESPONSE_BODY_BYTES: raise ProviderError(ProviderErrorCode.INVALID_CONFIG)
     return body
+def _is_acceptable_global_address(candidate: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return candidate.is_global and not any((candidate.is_private, candidate.is_loopback, candidate.is_link_local, candidate.is_multicast, candidate.is_reserved, candidate.is_unspecified, getattr(candidate, "is_site_local", False)))
+def _validate_schema_contract(schema: Mapping[str, object], *, root: bool=True) -> None:
+    if not isinstance(schema, Mapping): raise ValueError
+    expected=schema.get("type")
+    if root and expected != "object": raise ValueError
+    common={"type", "description"}
+    if root: common.add("title")
+    if expected=="object":
+        allowed=common|{"additionalProperties", "required", "properties"}
+        properties=schema.get("properties"); required=schema.get("required")
+        if set(schema)-allowed or schema.get("additionalProperties") is not False or not isinstance(properties,Mapping) or not isinstance(required,list) or len(required)!=len(set(required)) or set(required)!=set(properties) or not all(isinstance(name,str) for name in required): raise ValueError
+        for child in properties.values(): _validate_schema_contract(child,root=False)
+    elif expected=="array":
+        if set(schema) - (common | {"items"}): raise ValueError
+        items=schema.get("items")
+        if not isinstance(items,Mapping): raise ValueError
+        _validate_schema_contract(items,root=False)
+    elif expected=="string":
+        allowed=common|{"minLength", "enum"}
+        if set(schema)-allowed: raise ValueError
+        minimum=schema.get("minLength")
+        enum=schema.get("enum")
+        if minimum is not None and (not isinstance(minimum,int) or isinstance(minimum,bool) or minimum<0): raise ValueError
+        if enum is not None and (not isinstance(enum,list) or not enum or not all(isinstance(value,str) for value in enum)): raise ValueError
+    elif expected=="integer":
+        allowed=common|{"minimum"}
+        if set(schema)-allowed: raise ValueError
+        minimum=schema.get("minimum")
+        if minimum is not None and (not isinstance(minimum,int) or isinstance(minimum,bool)): raise ValueError
+    else: raise ValueError
 def _transport_failure(exc: BaseException) -> tuple[ProviderErrorCode,bool]|None:
     if isinstance(exc,ProviderError): raise exc
     if not isinstance(exc,TransportFailure): return None
@@ -186,7 +226,7 @@ def _retry_after(headers: Mapping[str,str]) -> float|None:
     try: delay=float(value)
     except (TypeError,ValueError): return None
     return delay if 0<delay<=60 else None
-def _parse_response(response: TransportResponse, schema: Mapping[str,object]) -> InferenceResponse:
+def _parse_response(response: TransportResponse, schema: Mapping[str,object], max_output_tokens: int, context_window: int) -> InferenceResponse:
     content_type=next((v for k,v in response.headers.items() if k.lower()=="content-type"),"")
     if "application/json" not in content_type.lower() or len(response.body)>_MAX_RESPONSE_BODY_BYTES: raise ValueError
     document=json.loads(response.body.decode("utf-8"))
@@ -197,6 +237,10 @@ def _parse_response(response: TransportResponse, schema: Mapping[str,object]) ->
     if not isinstance(usage,dict) or set(usage)!={"input_tokens","output_tokens"}: raise ValueError
     for count in usage.values():
         if count is not None and (not isinstance(count,int) or isinstance(count,bool) or count<0): raise ValueError
+    input_tokens, output_tokens = usage["input_tokens"], usage["output_tokens"]
+    if output_tokens is not None and output_tokens > max_output_tokens: raise ValueError
+    if input_tokens is not None and input_tokens > context_window: raise ValueError
+    if input_tokens is not None and output_tokens is not None and input_tokens + output_tokens > context_window: raise ValueError
     _validate_schema(output["value"],schema)
     return InferenceResponse(request_id,output["value"],InferenceUsage(usage["input_tokens"],usage["output_tokens"]))
 def _validate_schema(value: object, schema: Mapping[str,object]) -> None:

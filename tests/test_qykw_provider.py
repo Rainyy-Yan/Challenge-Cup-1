@@ -256,6 +256,37 @@ class TestResponsesInferenceProvider(unittest.TestCase):
                     secure_provider(transport, base_url=url, dns=dns).complete(request())
                 self.assertEqual(transport.calls, 0)
 
+    def test_rejects_special_use_ip_literals_and_dns_results_before_transport(self) -> None:
+        for literal in ("224.0.0.1", "255.255.255.255", "fe00::1"):
+            with self.subTest(literal=literal):
+                transport = RecordingTransport([good_response()])
+                with self.assertRaisesRegex(ProviderError, "endpoint_blocked"):
+                    secure_provider(transport, base_url=f"https://[{literal}]/v1" if ":" in literal else f"https://{literal}/v1").complete(request())
+                self.assertEqual(transport.calls, 0)
+
+        for resolved in ("224.0.0.1", "255.255.255.255", "fe00::1", "fec0::1", "192.0.2.1"):
+            with self.subTest(resolved=resolved):
+                transport = RecordingTransport([good_response()])
+                with self.assertRaisesRegex(ProviderError, "endpoint_blocked"):
+                    secure_provider(transport, dns=lambda _host, _port: (resolved,)).complete(request())
+                self.assertEqual(transport.calls, 0)
+
+    def test_malformed_schema_is_rejected_before_resolver_or_transport(self) -> None:
+        transport = RecordingTransport([good_response()])
+        dns_calls: list[object] = []
+        provider = secure_provider(
+            transport,
+            dns=lambda host, port: (dns_calls.append((host, port)) or ("93.184.216.34",)),
+        )
+        for schema in (
+            {"type": "object", "properties": {}, "required": []},
+            {"type": "string", "minLength": 1},
+        ):
+            with self.subTest(schema=schema), self.assertRaisesRegex(ProviderError, "invalid_config"):
+                provider.complete(replace(request(), schema=schema))
+        self.assertEqual(dns_calls, [])
+        self.assertEqual(transport.calls, 0)
+
     def test_exact_canonical_allowed_host_blocks_suffix_and_idna_spoofing(self) -> None:
         for url in (
             "https://allowed.example.attacker.test/v1",
@@ -350,6 +381,22 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         bad_type = TransportResponse(200, {"content-type": "text/plain"}, b"{}")
         with self.assertRaisesRegex(ProviderError, "invalid_response"):
             secure_provider(RecordingTransport([bad_type])).complete(request())
+
+    def test_response_usage_cannot_exceed_request_or_context_limits(self) -> None:
+        import json
+
+        for usage in (
+            {"input_tokens": 10, "output_tokens": 4097},
+            {"input_tokens": -1, "output_tokens": 3},
+            {"input_tokens": 100_000, "output_tokens": 1},
+        ):
+            with self.subTest(usage=usage):
+                body = json.dumps(
+                    {"id": "safe-request-id", "output": {"value": {"candidates": []}}, "usage": usage}
+                ).encode()
+                response = TransportResponse(200, {"content-type": "application/json"}, body)
+                with self.assertRaisesRegex(ProviderError, "invalid_response"):
+                    secure_provider(RecordingTransport([response])).complete(request())
 
     def test_errors_logs_and_chains_never_disclose_secrets_or_prompt_data(self) -> None:
         secret_source = "SOURCE_CODE_SHOULD_NOT_LEAK"
