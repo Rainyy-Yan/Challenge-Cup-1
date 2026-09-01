@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import socket
 import ssl
 import sys
 import time
 from dataclasses import dataclass
-from http.client import IncompleteRead, RemoteDisconnected
+from http.client import IncompleteRead
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -24,12 +25,14 @@ DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 MAX_DIFF_CHARS = 60_000
 MAX_REVIEW_REQUEST_CHARS = 4_000
+# Reasoning and structured findings share this budget; large reviews need headroom.
 MAX_OUTPUT_TOKENS = 32_768
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 90
 MINIMAX_REQUEST_TIMEOUT_SECONDS = 240
 MINIMAX_NETWORK_RETRIES = 1
 FAST_FAILURE_RETRY_WINDOW_SECONDS = 15
 RETRY_BACKOFF_SECONDS = 1
+RETRY_JITTER_SECONDS = 0.5
 
 
 class ReviewError(RuntimeError):
@@ -490,11 +493,11 @@ def _request(
         except (
             URLError,
             TimeoutError,
+            socket.timeout,
             socket.gaierror,
             ssl.SSLError,
             ConnectionError,
             IncompleteRead,
-            RemoteDisconnected,
         ) as exc:
             error, retryable = _classify_network_error(exc, timeout=timeout)
             elapsed = time.monotonic() - attempt_started_at
@@ -503,7 +506,10 @@ def _request(
                 and attempt < retries
                 and elapsed <= FAST_FAILURE_RETRY_WINDOW_SECONDS
             ):
-                time.sleep(RETRY_BACKOFF_SECONDS)
+                time.sleep(
+                    RETRY_BACKOFF_SECONDS
+                    + random.uniform(0, RETRY_JITTER_SECONDS)
+                )
                 continue
             raise error from exc
     raise AssertionError("request retry loop exited unexpectedly")
@@ -515,7 +521,7 @@ def _classify_network_error(
     timeout: int,
 ) -> tuple[ReviewError, bool]:
     reason = error.reason if isinstance(error, URLError) else error
-    if isinstance(reason, TimeoutError):
+    if isinstance(reason, (TimeoutError, socket.timeout)):
         return ReviewError(
             f"Remote API read timed out after {timeout} seconds"
         ), False
@@ -529,7 +535,7 @@ def _classify_network_error(
         return ReviewError("Remote API TLS handshake failed"), True
     if isinstance(
         reason,
-        (ConnectionError, IncompleteRead, RemoteDisconnected),
+        (ConnectionError, IncompleteRead),
     ):
         return ReviewError("Remote API connection was interrupted"), True
     return ReviewError("Remote API connection failed"), True

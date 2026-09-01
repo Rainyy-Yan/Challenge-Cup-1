@@ -116,6 +116,13 @@ class TestRemoteRequests(unittest.TestCase):
         sleep_patcher = patch.object(minimax_review.time, "sleep")
         self.sleep = sleep_patcher.start()
         self.addCleanup(sleep_patcher.stop)
+        jitter_patcher = patch.object(
+            minimax_review.random,
+            "uniform",
+            return_value=0.25,
+        )
+        self.jitter = jitter_patcher.start()
+        self.addCleanup(jitter_patcher.stop)
 
     @staticmethod
     def _response(body: bytes = b"{}") -> MagicMock:
@@ -162,7 +169,8 @@ class TestRemoteRequests(unittest.TestCase):
 
         self.assertEqual(raw, b'{"ok": true}')
         self.assertEqual(urlopen.call_count, 2)
-        self.sleep.assert_called_once_with(1)
+        self.jitter.assert_called_once_with(0, 0.5)
+        self.sleep.assert_called_once_with(1.25)
 
     def test_tls_handshake_failure_is_retried_once(self) -> None:
         response = self._response(b'{"ok": true}')
@@ -261,7 +269,8 @@ class TestRemoteRequests(unittest.TestCase):
                 )
 
         self.assertEqual(urlopen.call_count, 2)
-        self.sleep.assert_called_once_with(1)
+        self.jitter.assert_called_once_with(0, 0.5)
+        self.sleep.assert_called_once_with(1.25)
 
     def test_github_requests_keep_default_timeout_and_no_retry(self) -> None:
         with patch.object(
@@ -281,6 +290,27 @@ class TestRemoteRequests(unittest.TestCase):
 
         self.assertEqual(urlopen.call_count, 1)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 90)
+
+    def test_wrapped_socket_timeout_is_not_retried(self) -> None:
+        with patch.object(
+            minimax_review,
+            "urlopen",
+            side_effect=URLError(socket.timeout("timed out")),
+        ) as urlopen:
+            with self.assertRaisesRegex(
+                minimax_review.ReviewError,
+                "read timed out after 240 seconds",
+            ):
+                minimax_review._request(
+                    "https://api.minimaxi.com/v1/responses",
+                    method="POST",
+                    token="minimax-key",
+                    timeout=240,
+                    retries=1,
+                )
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.sleep.assert_not_called()
 
 
 class TestChangedLines(unittest.TestCase):
