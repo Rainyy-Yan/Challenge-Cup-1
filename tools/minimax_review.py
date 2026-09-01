@@ -20,6 +20,7 @@ DEFAULT_MODEL = "MiniMax-M3"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 MAX_DIFF_CHARS = 60_000
 MAX_REVIEW_REQUEST_CHARS = 4_000
+MAX_OUTPUT_TOKENS = 16_384
 
 
 class ReviewError(RuntimeError):
@@ -184,7 +185,7 @@ def build_minimax_payload(
         "input": user_prompt,
         "reasoning": {"effort": "high"},
         "temperature": 0.1,
-        "max_output_tokens": 4096,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
     }
 
 
@@ -244,9 +245,7 @@ def parse_review_result(
     changed_lines: set[tuple[str, int, str]],
 ) -> ReviewResult:
     """Parse the model JSON and keep only findings on real changed lines."""
-    content = response.get("output_text")
-    if not isinstance(content, str) or not content.strip():
-        raise ReviewError("MiniMax returned no review content")
+    content = _extract_response_text(response)
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I)
     try:
         payload = json.loads(cleaned)
@@ -287,6 +286,55 @@ def parse_review_result(
             Finding(priority, path, line, side, title.strip(), body.strip())
         )
     return ReviewResult(summary.strip(), tuple(findings))
+
+
+def _extract_response_text(response: dict[str, Any]) -> str:
+    """Extract text from both SDK-style and raw Responses API objects."""
+    output_text = response.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+
+    texts: list[str] = []
+    output = response.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            blocks = item.get("content")
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text")
+                if block.get("type") in {"output_text", "text"} and isinstance(
+                    text, str
+                ) and text.strip():
+                    texts.append(text)
+    if texts:
+        return "\n".join(texts)
+
+    details = []
+    status = response.get("status")
+    if isinstance(status, str):
+        details.append(f"status={status[:64]}")
+    incomplete = response.get("incomplete_details")
+    if isinstance(incomplete, dict):
+        reason = incomplete.get("reason")
+        if isinstance(reason, str):
+            details.append(f"reason={reason[:64]}")
+    if isinstance(output, list):
+        output_types = sorted(
+            {
+                item.get("type")
+                for item in output
+                if isinstance(item, dict) and isinstance(item.get("type"), str)
+            }
+        )
+        if output_types:
+            details.append("output_types=" + ",".join(output_types))
+    suffix = f" ({', '.join(details)})" if details else ""
+    raise ReviewError(f"MiniMax returned no review content{suffix}")
 
 
 def render_summary_comment(result: ReviewResult) -> str:
