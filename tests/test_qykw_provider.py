@@ -205,6 +205,7 @@ def secure_provider(
     dns: object | None = None,
     clock: object | None = None,
     sleep: object | None = None,
+    timeout_seconds: int = 30,
 ) -> ResponsesInferenceProvider:
     return ResponsesInferenceProvider(
         api_key="SENTINEL_API_KEY",
@@ -213,7 +214,7 @@ def secure_provider(
         allowed_hosts=allowed_hosts,
         context_window=100_000,
         max_output_tokens=8_000,
-        timeout_seconds=30,
+        timeout_seconds=timeout_seconds,
         transport=transport,
         dns_resolver=dns or (lambda _host, _port: ("93.184.216.34",)),
         clock=clock or (lambda: 0.0),
@@ -341,6 +342,79 @@ class TestResponsesInferenceProvider(unittest.TestCase):
                 self.assertEqual(transport.calls, 2)
                 self.assertEqual(sleeps, [0.1])
 
+    def test_transport_timeout_is_capped_to_remaining_absolute_deadline(self) -> None:
+        now = [0.0]
+
+        class AdvancingTransport:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.requests: list[object] = []
+
+            def send(self, transport_request: object) -> TransportResponse:
+                self.calls += 1
+                self.requests.append(transport_request)
+                if self.calls == 1:
+                    now[0] = 0.4
+                    raise TransportFailure(TransportFailureKind.TLS_HANDSHAKE)
+                return good_response()
+
+        transport = AdvancingTransport()
+        result = secure_provider(
+            transport,
+            timeout_seconds=3600,
+            clock=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        ).complete(replace(request(), deadline_seconds=1))
+
+        self.assertEqual(result.value, {"candidates": []})
+        self.assertEqual([item.timeout_seconds for item in transport.requests], [1.0, 0.5])
+
+    def test_expired_deadline_does_not_start_a_retry(self) -> None:
+        now = [0.0]
+
+        class ExpiringTransport:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def send(self, _transport_request: object) -> TransportResponse:
+                self.calls += 1
+                now[0] = 1.0
+                raise TransportFailure(TransportFailureKind.TLS_HANDSHAKE)
+
+        transport = ExpiringTransport()
+        with self.assertRaisesRegex(ProviderError, "tls_error"):
+            secure_provider(
+                transport,
+                timeout_seconds=3600,
+                clock=lambda: now[0],
+                sleep=lambda _seconds: self.fail("expired retry must not sleep"),
+            ).complete(replace(request(), deadline_seconds=1))
+        self.assertEqual(transport.calls, 1)
+
+    def test_complete_request_envelope_is_serialized_before_dispatch(self) -> None:
+        import json
+
+        transport = RecordingTransport([good_response()])
+        inference_request = request()
+        secure_provider(transport).complete(inference_request)
+
+        wire = json.loads(transport.requests[0].body.decode())
+        self.assertEqual(
+            {"run_id", "stage", "prompt_version", "deadline_seconds"},
+            set(wire) & {"run_id", "stage", "prompt_version", "deadline_seconds"},
+        )
+        self.assertEqual(wire["run_id"], inference_request.run_id)
+        self.assertEqual(wire["stage"], inference_request.stage.value)
+        self.assertEqual(wire["prompt_version"], inference_request.prompt_version)
+        self.assertEqual(wire["deadline_seconds"], inference_request.deadline_seconds)
+        self.assertEqual(wire["reasoning_profile"], inference_request.reasoning_profile)
+        self.assertEqual(wire["schema"], inference_request.schema)
+        self.assertEqual(
+            wire["payload"],
+            json.loads(json.dumps(inference_request.payload, ensure_ascii=False)),
+        )
+        self.assertEqual(wire["max_output_tokens"], inference_request.max_output_tokens)
+
     def test_certificate_response_and_maybe_accepted_failures_are_not_retried(self) -> None:
         for failure in (
             TransportFailure(TransportFailureKind.CERTIFICATE),
@@ -363,7 +437,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         self.assertEqual(sleeps, [2.0])
 
         late = RecordingTransport([limited, good_response()])
-        late_ticks = iter((0.0, 0.0, 899.0))
+        late_ticks = iter((0.0, 0.0, 899.0, 899.0, 899.0))
         with self.assertRaisesRegex(ProviderError, "rate_limited"):
             secure_provider(late, clock=lambda: next(late_ticks)).complete(request())
         self.assertEqual(late.calls, 1)

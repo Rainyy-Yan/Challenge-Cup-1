@@ -39,7 +39,7 @@ class TransportFailure(Exception):
 
 @dataclass(frozen=True)
 class TransportRequest:
-    method: str; url: str; host: str; port: int; resolved_ip: str; headers: Mapping[str,str]; body: bytes; timeout_seconds: int
+    method: str; url: str; host: str; port: int; resolved_ip: str; headers: Mapping[str,str]; body: bytes; timeout_seconds: float
 @dataclass(frozen=True)
 class TransportResponse:
     status: int; headers: Mapping[str,str]; body: bytes
@@ -47,7 +47,7 @@ class InferenceTransport(Protocol):
     def send(self, request: TransportRequest) -> TransportResponse: ...
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, host: str, port: int, resolved_ip: str, timeout: int) -> None:
+    def __init__(self, host: str, port: int, resolved_ip: str, timeout: float) -> None:
         super().__init__(host, port=port, timeout=timeout, context=ssl.create_default_context()); self._resolved_ip=resolved_ip
     def connect(self) -> None:
         raw_socket=socket.create_connection((self._resolved_ip, self.port), self.timeout)
@@ -98,6 +98,7 @@ class ResponsesInferenceProvider:
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(self._context_window,self._max_output_tokens,True,frozenset({"maximum"}))
     def complete(self, request: InferenceRequest) -> InferenceResponse:
+        started=self._clock(); deadline_at=started+request.deadline_seconds
         validate_provider_capabilities(self,request)
         try:
             _validate_schema_contract(request.schema)
@@ -108,22 +109,25 @@ class ResponsesInferenceProvider:
             raise
         except (TypeError, ValueError, UnicodeError):
             raise ProviderError(ProviderErrorCode.INVALID_CONFIG) from None
-        endpoint=_validate_endpoint(self._base_url,self._allowed_hosts); started=self._clock(); calls=0
+        endpoint=_validate_endpoint(self._base_url,self._allowed_hosts); calls=0
         for attempt in range(2):
-            if self._clock()-started>=request.deadline_seconds: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
+            if self._remaining_seconds(deadline_at)<=0: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
             try:
+                if self._remaining_seconds(deadline_at)<=0: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
                 resolved_ip=_resolve_public(endpoint.host,endpoint.port,self._dns_resolver); calls+=1
-                response=self._transport.send(TransportRequest("POST",self._base_url,endpoint.host,endpoint.port,resolved_ip,{"accept":"application/json","authorization":f"Bearer {self._api_key}","content-type":"application/json","idempotency-key":request.idempotency_key},body,self._timeout_seconds))
+                remaining=self._remaining_seconds(deadline_at)
+                if remaining<=0: self._fail(request,calls,ProviderErrorCode.DEADLINE_EXCEEDED)
+                response=self._transport.send(TransportRequest("POST",self._base_url,endpoint.host,endpoint.port,resolved_ip,{"accept":"application/json","authorization":f"Bearer {self._api_key}","content-type":"application/json","idempotency-key":request.idempotency_key},body,min(float(self._timeout_seconds),remaining)))
             except BaseException as exc:
                 failure=_transport_failure(exc)
                 if failure is None: self._fail(request,calls,ProviderErrorCode.CONNECTION_ERROR)
                 code,retry=failure
-                if retry and attempt==0 and self._within_deadline(started,request.deadline_seconds,_RETRY_DELAY_SECONDS): self._sleep(_RETRY_DELAY_SECONDS); continue
+                if retry and attempt==0 and self._remaining_seconds(deadline_at)>_RETRY_DELAY_SECONDS: self._sleep(_RETRY_DELAY_SECONDS); continue
                 self._fail(request,calls,code)
             if 300<=response.status<400: self._fail(request,calls,ProviderErrorCode.ENDPOINT_REDIRECT_REJECTED)
             if response.status==429:
                 delay=_retry_after(response.headers)
-                if attempt==0 and delay is not None and self._within_deadline(started,request.deadline_seconds,delay): self._sleep(delay); continue
+                if attempt==0 and delay is not None and self._remaining_seconds(deadline_at)>delay: self._sleep(delay); continue
                 self._fail(request,calls,ProviderErrorCode.RATE_LIMITED)
             if response.status!=200: self._fail(request,calls,ProviderErrorCode.INVALID_RESPONSE)
             try: parsed=_parse_response(response,request.schema,request.max_output_tokens,self._context_window)
@@ -131,7 +135,7 @@ class ResponsesInferenceProvider:
             self._emit(run_id=request.run_id,stage=request.stage.value,request_id=parsed.request_id,elapsed=max(0.0,self._clock()-started),call_count=calls,token_usage={"input_tokens":parsed.usage.input_tokens,"output_tokens":parsed.usage.output_tokens})
             return parsed
         self._fail(request,calls,ProviderErrorCode.CONNECTION_ERROR)
-    def _within_deadline(self, started: float, deadline: int, delay: float) -> bool: return self._clock()-started+delay<deadline
+    def _remaining_seconds(self, deadline_at: float) -> float: return max(0.0, deadline_at-self._clock())
     def _fail(self, request: InferenceRequest, calls: int, code: ProviderErrorCode) -> None:
         self._emit(run_id=request.run_id,stage=request.stage.value,call_count=calls,error_code=code.value); raise ProviderError(code) from None
     def _emit(self, **fields: object) -> None:
@@ -178,7 +182,7 @@ def _resolve_public(host: str, port: int, resolver: Callable[[str,int],Sequence[
         parsed.append(candidate)
     return str(parsed[0])
 def _request_body(model: str, request: InferenceRequest) -> bytes:
-    body=json.dumps({"model":model,"input":request.payload,"reasoning":{"effort":request.reasoning_profile},"max_output_tokens":request.max_output_tokens,"response_format":{"type":"json_schema","name":request.schema_name,"strict":True,"schema":request.schema}},ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    body=json.dumps({"model":model,"run_id":request.run_id,"stage":request.stage.value,"prompt_version":request.prompt_version,"deadline_seconds":request.deadline_seconds,"idempotency_key":request.idempotency_key,"reasoning_profile":request.reasoning_profile,"reasoning":{"effort":request.reasoning_profile},"max_output_tokens":request.max_output_tokens,"schema_name":request.schema_name,"schema":request.schema,"payload":request.payload,"input":request.payload,"response_format":{"type":"json_schema","name":request.schema_name,"strict":True,"schema":request.schema}},ensure_ascii=False,separators=(",",":")).encode("utf-8")
     if len(body)>_MAX_RESPONSE_BODY_BYTES: raise ProviderError(ProviderErrorCode.INVALID_CONFIG)
     return body
 def _is_acceptable_global_address(candidate: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
