@@ -18,7 +18,11 @@ from tools.qykw.domain import (
     RunContext,
 )
 from tools.qykw.prompts import build_triage_request
-from tools.qykw.provider import InferenceProvider, validate_provider_capabilities
+from tools.qykw.provider import (
+    InferenceProvider,
+    estimate_request_input_tokens,
+    validate_provider_capabilities,
+)
 
 
 def request() -> InferenceRequest:
@@ -56,13 +60,17 @@ class RecordingProvider:
 
 
 def capabilities(
-    *, structured_output: bool = True, profiles: frozenset[str] | None = None
+    *,
+    context_window: int = 32_000,
+    max_output_tokens: int = 8_000,
+    structured_output: bool = True,
+    profiles: frozenset[str] | None = None,
 ) -> ProviderCapabilities:
     """Return otherwise valid provider capabilities."""
 
     return ProviderCapabilities(
-        context_window=32_000,
-        max_output_tokens=8_000,
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
         structured_output=structured_output,
         supported_reasoning_profiles=profiles or frozenset({"maximum"}),
     )
@@ -82,6 +90,29 @@ class TestInferenceProviderBoundary(unittest.TestCase):
         provider = RecordingProvider(capabilities())
 
         validate_provider_capabilities(provider, request())
+
+    def test_capabilities_require_output_and_positive_input_budget(self) -> None:
+        inference_request = request()
+        input_tokens = estimate_request_input_tokens(inference_request)
+        required_window = inference_request.max_output_tokens + input_tokens
+        self.assertGreater(input_tokens, 0)
+
+        for window in (
+            inference_request.max_output_tokens - 1,
+            inference_request.max_output_tokens,
+            required_window - 1,
+        ):
+            with self.subTest(context_window=window):
+                provider = RecordingProvider(capabilities(context_window=window))
+                with self.assertRaises(InferenceError) as raised:
+                    validate_provider_capabilities(provider, inference_request)
+                self.assertEqual(
+                    raised.exception.failure.code, InferenceErrorCode.CAPABILITY_UNSUPPORTED
+                )
+
+        validate_provider_capabilities(
+            RecordingProvider(capabilities(context_window=required_window)), inference_request
+        )
 
     def test_capabilities_fail_closed_without_maximum_reasoning(self) -> None:
         provider = RecordingProvider(capabilities(profiles=frozenset({"high"})))

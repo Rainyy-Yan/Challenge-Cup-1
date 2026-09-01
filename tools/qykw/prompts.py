@@ -10,6 +10,7 @@ from tools.qykw.domain import (
     FileManifest,
     FindingCandidate,
     InferenceRequest,
+    RepositoryFile,
     RunContext,
     RunStage,
 )
@@ -30,7 +31,11 @@ _CONSTITUTION = (
 )
 
 
-def build_analysis_request(run: RunContext, plan: ContextPlan) -> InferenceRequest:
+def build_analysis_request(
+    run: RunContext,
+    plan: ContextPlan,
+    trusted_rules: tuple[RepositoryFile, ...] = (),
+) -> InferenceRequest:
     """Build a read-only repository analysis request."""
 
     return _request(
@@ -39,12 +44,16 @@ def build_analysis_request(run: RunContext, plan: ContextPlan) -> InferenceReque
         stage=RunStage.ANALYZING,
         schema=_advisory_schema("analysis"),
         task="Identify risks and evidence from the supplied review context.",
-        trusted={"run": _run_metadata(run), "trusted_rules": []},
+        trusted=_trusted_section(run, trusted_rules),
         untrusted={"context_plan": _plan_data(plan)},
     )
 
 
-def build_plan_request(run: RunContext, plan: ContextPlan) -> InferenceRequest:
+def build_plan_request(
+    run: RunContext,
+    plan: ContextPlan,
+    trusted_rules: tuple[RepositoryFile, ...] = (),
+) -> InferenceRequest:
     """Build a read-only review-plan request."""
 
     return _request(
@@ -53,12 +62,16 @@ def build_plan_request(run: RunContext, plan: ContextPlan) -> InferenceRequest:
         stage=RunStage.ANALYZING,
         schema=_advisory_schema("plan"),
         task="Create a concrete read-only review plan for the supplied context.",
-        trusted={"run": _run_metadata(run), "trusted_rules": []},
+        trusted=_trusted_section(run, trusted_rules),
         untrusted={"context_plan": _plan_data(plan)},
     )
 
 
-def build_triage_request(run: RunContext, manifest: FileManifest) -> InferenceRequest:
+def build_triage_request(
+    run: RunContext,
+    manifest: FileManifest,
+    trusted_rules: tuple[RepositoryFile, ...] = (),
+) -> InferenceRequest:
     """Build a risk-triage request over an untrusted file manifest."""
 
     return _request(
@@ -67,12 +80,16 @@ def build_triage_request(run: RunContext, manifest: FileManifest) -> InferenceRe
         stage=RunStage.ANALYZING,
         schema=_candidate_schema("triage"),
         task="Prioritize concrete review risks from the supplied file manifest.",
-        trusted={"run": _run_metadata(run), "trusted_rules": []},
+        trusted=_trusted_section(run, trusted_rules),
         untrusted={"manifest": _manifest_data(manifest)},
     )
 
 
-def build_review_request(run: RunContext, chunk: ContextChunk) -> InferenceRequest:
+def build_review_request(
+    run: RunContext,
+    chunk: ContextChunk,
+    trusted_rules: tuple[RepositoryFile, ...] = (),
+) -> InferenceRequest:
     """Build a deep-review request for one untrusted context chunk."""
 
     return _request(
@@ -81,13 +98,15 @@ def build_review_request(run: RunContext, chunk: ContextChunk) -> InferenceReque
         stage=RunStage.ANALYZING,
         schema=_candidate_schema("review"),
         task="Find only concrete, evidence-backed issues in this context chunk.",
-        trusted={"run": _run_metadata(run), "trusted_rules": []},
+        trusted=_trusted_section(run, trusted_rules),
         untrusted={"context": _chunk_data(chunk)},
     )
 
 
 def build_validation_request(
-    run: RunContext, candidates: tuple[FindingCandidate, ...]
+    run: RunContext,
+    candidates: tuple[FindingCandidate, ...],
+    trusted_rules: tuple[RepositoryFile, ...] = (),
 ) -> InferenceRequest:
     """Build a targeted counterexample and finding-validation request."""
 
@@ -97,12 +116,16 @@ def build_validation_request(
         stage=RunStage.VALIDATING,
         schema=_validation_schema(),
         task="Validate candidates with concrete counterexamples and retain only sound findings.",
-        trusted={"run": _run_metadata(run), "trusted_rules": []},
+        trusted=_trusted_section(run, trusted_rules),
         untrusted={"candidates": [_candidate_data(candidate) for candidate in candidates]},
     )
 
 
-def build_patch_request(run: RunContext, chunk: ContextChunk) -> InferenceRequest:
+def build_patch_request(
+    run: RunContext,
+    chunk: ContextChunk,
+    trusted_rules: tuple[RepositoryFile, ...] = (),
+) -> InferenceRequest:
     """Build the isolated second-phase patch-generation request template."""
 
     return _request(
@@ -111,7 +134,7 @@ def build_patch_request(run: RunContext, chunk: ContextChunk) -> InferenceReques
         stage=RunStage.ANALYZING,
         schema=_patch_schema(),
         task="Propose a minimal patch only for the supplied fixed context; do not execute it.",
-        trusted={"run": _run_metadata(run), "trusted_rules": []},
+        trusted=_trusted_section(run, trusted_rules),
         untrusted={"context": _chunk_data(chunk)},
     )
 
@@ -275,6 +298,33 @@ def _run_metadata(run: RunContext) -> Mapping[str, object]:
         "target_base_sha": run.target_base_sha,
         "target_base_ref": run.target_base_ref,
         "command": run.command.name.value,
+    }
+
+
+def _trusted_section(
+    run: RunContext, trusted_rules: tuple[RepositoryFile, ...]
+) -> Mapping[str, object]:
+    """Encode only typed, default-branch rules in the trusted section."""
+
+    return {
+        "run": _run_metadata(run),
+        "trusted_rules": [_trusted_rule_data(run, rule) for rule in trusted_rules],
+    }
+
+
+def _trusted_rule_data(run: RunContext, rule: RepositoryFile) -> Mapping[str, object]:
+    """Reject untyped input before it can reach the trusted prompt boundary."""
+
+    if not isinstance(rule, RepositoryFile):
+        raise TypeError("trusted_rules must contain RepositoryFile values")
+    if rule.ref not in {run.target_base_ref, run.target_base_sha}:
+        raise ValueError("trusted_rules must come from the run default branch")
+    return {
+        "path": rule.path,
+        "ref": rule.ref,
+        "sha": rule.sha,
+        "content": rule.content,
+        "purpose": rule.purpose,
     }
 
 
