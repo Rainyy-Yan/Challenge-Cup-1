@@ -20,6 +20,9 @@ from tools.qykw.domain import (
 )
 
 
+_MAX_DECIMAL_DIGITS = 18
+
+
 def normalize_event(
     event_name: str,
     payload: Mapping[str, object],
@@ -360,9 +363,13 @@ def _positive_int(value: object) -> int | None:
         and value
         and value.isascii()
         and value.isdecimal()
-        and int(value) > 0
+        and len(value) <= _MAX_DECIMAL_DIGITS
     ):
-        return int(value)
+        try:
+            parsed = int(value)
+        except (ValueError, OverflowError):
+            return None
+        return parsed if parsed > 0 else None
     return None
 
 

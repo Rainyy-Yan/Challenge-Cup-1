@@ -312,6 +312,20 @@ class TestCommentAndManualTriggers(unittest.TestCase):
                     )
                 )
 
+    def test_manual_event_rejects_overlong_ascii_decimal_pr_number(self) -> None:
+        self.assertIsNone(
+            normalize_event(
+                "workflow_dispatch",
+                {
+                    "inputs": {"pr_number": "9" * 5000, "command": "审查"},
+                    "sender": {"login": "maintainer"},
+                },
+                repository_id=7,
+                repository="owner/repository",
+                workflow_run_id=812,
+            )
+        )
+
 
 class TestTrustedPullBinding(unittest.TestCase):
     def test_build_run_context_uses_trusted_pull_ref_and_preserves_event(self) -> None:
