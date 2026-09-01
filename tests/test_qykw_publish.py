@@ -40,6 +40,11 @@ class FakeState:
         return self.item if self.item.context.pr_number == pr_number and self.item.context.run_id == run_id else None
 
 
+class MissingState:
+    def get(self, pr_number: int, run_id: str) -> RunRecord | None:
+        return None
+
+
 class FakeGateway:
     def __init__(self, *, fail_after: int | None = None) -> None:
         self.issue_comments: list[IssueComment] = [IssueComment(10, "qykw", "<!-- qykw-state:v1 {} -->", "now")]
@@ -174,6 +179,51 @@ class TestReviewPublisher(unittest.TestCase):
         self.assertIn("qykw-state:v1", gateway.summary)
         publisher.publish_review(run(), review())
         self.assertIn("qykw-state:v1", gateway.summary)
+
+    def test_status_requires_matching_store_record_and_uses_fetched_current_record(self) -> None:
+        stale = state_record()
+        current = replace(stale, stage=RunStage.COMPLETED, status=RunStatus.COMPLETED,
+            updated_at="2026-09-02T00:02:00Z")
+        gateway = FakeGateway()
+        ReviewPublisher(gateway, FakeState(current)).publish_status(stale)
+        self.assertIn("completed", gateway.summary)
+        for state in (
+            None,
+            MissingState(),
+            FakeState(replace(current, context=replace(run(), source_head_sha="c" * 40))),
+            FakeState(replace(current, context=replace(run(), target_base_sha="d" * 40))),
+            FakeState(replace(current, context=replace(run(), idempotency_key="other"))),
+            FakeState(replace(current, prompt_version="other")),
+        ):
+            with self.subTest(state=state):
+                blocked = FakeGateway()
+                ReviewPublisher(blocked, state).publish_status(stale)
+                self.assertEqual(blocked.calls, [])
+
+    def test_inline_path_keeps_safe_repository_path_exact_and_rejects_unsafe_before_writes(self) -> None:
+        gateway = FakeGateway()
+        exact = "src/a_b[1].py"
+        ReviewPublisher(gateway, FakeState()).publish_review(run(), review(finding(exact)))
+        self.assertEqual(gateway.inline_batches[0][0].path, exact)
+        for unsafe in ("../escape.py", "/absolute.py", "dir//empty.py", "dir\\windows.py", "dir/./dot.py", "dir/../up.py"):
+            with self.subTest(path=unsafe):
+                blocked = FakeGateway()
+                result = ReviewPublisher(blocked, FakeState()).publish_review(run(), review(finding(unsafe)))
+                self.assertEqual(result.status, RunStatus.FAILED)
+                self.assertEqual(blocked.calls, [])
+
+    def test_sanitizer_removes_all_uri_schemes_without_damaging_chinese_or_windows_paths(self) -> None:
+        gateway = FakeGateway()
+        unsafe = "ftp://x file:///x data:text/html,javascript ssh://x custom:thing //host java script:alert h t t p : //x [link](ssh://x) <FTP://x>"
+        noisy = Finding("src/a.py", 3, DiffSide.RIGHT, Severity.P1, unsafe,
+            "说明：保留；Windows C:\\work\\file.txt 与 C:/work/file.txt", "ok", "ok", "ok", "uri")
+        result = ReviewPublisher(gateway, FakeState()).publish_review(run(), review(noisy))
+        public = result.summary_body + "\n" + gateway.inline_batches[0][0].body
+        for forbidden in ("ftp:", "file:", "data:", "javascript", "ssh:", "custom:", "//host", "h t t p", "[link]"):
+            self.assertNotIn(forbidden, public.lower())
+        self.assertIn("说明：保留", public)
+        self.assertIn("C:\\work\\file.txt", public)
+        self.assertIn("C:/work/file.txt", public)
 
     def test_real_store_recovers_context_after_status_and_review_summary_updates(self) -> None:
         gateway = RoundTripGateway()

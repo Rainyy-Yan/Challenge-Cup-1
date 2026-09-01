@@ -27,9 +27,14 @@ _HTML = re.compile(r"<[^>]{0,512}>")
 _AUTOLINK = re.compile(r"<\s*(?:https?|mailto):[^>]{0,2048}>", re.IGNORECASE)
 _IMAGE = re.compile(r"!\[([^\]]{0,512})\]\([^)]{0,2048}\)")
 _LINK = re.compile(r"\[([^\]]{0,512})\]\([^)]{0,2048}\)")
-_URL = re.compile(r"(?:https?|mailto):[^\s<>]{1,2048}|\bwww\.[^\s<>]{1,2048}|https?%3a[^\s<>]{1,2048}", re.IGNORECASE)
+_URI_SCHEME = re.compile(r"\b(?![A-Za-z]:[\\/])[A-Za-z][A-Za-z0-9+.\-]{0,63}:\s*[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
+_OBFUSCATED_SCHEME = re.compile(r"\b(?:java\s*script|vb\s*script)\s*:\s*[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
+_SPACED_SCHEME = re.compile(r"\b(?:[A-Za-z]\s+){1,32}[A-Za-z]\s*:\s*[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
+_SCHEME_RELATIVE = re.compile(r"(?<![:\w])//[^\s<>\[\]()`]{1,2048}")
+_WWW = re.compile(r"\bwww\.[^\s<>\[\]()`]{1,2048}", re.IGNORECASE)
+_ENCODED_SCHEME = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,63}%3a[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_MARKDOWN = re.compile(r"([\\`*_{}\[\]<>#+|])")
+_MARKDOWN = re.compile(r"([`*_{}\[\]<>#+|])")
 _SEVERITY_ORDER = {Severity.P0: 0, Severity.P1: 1, Severity.P2: 2}
 
 
@@ -64,13 +69,13 @@ class ReviewPublisher:
         return self.gateway.create_issue_comment(run.pr_number, "qykw 已收到请求，正在处理。")
 
     def publish_status(self, record: RunRecord) -> None:
-        comment_id = record.summary_comment_id or self._state_comment_id(record.context)
-        body = f"qykw 运行状态：{record.status.value}；阶段：{record.stage.value}。\n\n{render_state_marker(record)}"
-        if comment_id is None:
-            self.gateway.create_issue_comment(record.context.pr_number, body)
-        else:
-            self.gateway.update_issue_comment(comment_id, body)
-        self._safe_log("status_published", record.context.pr_number)
+        current = self._current_record(record.context)
+        if current is None or current.prompt_version != record.prompt_version:
+            self._safe_log("status_state_unavailable", record.context.pr_number)
+            return
+        body = f"qykw 运行状态：{current.status.value}；阶段：{current.stage.value}。\n\n{render_state_marker(current)}"
+        self.gateway.update_issue_comment(current.summary_comment_id, body)  # type: ignore[arg-type]
+        self._safe_log("status_published", current.context.pr_number)
 
     def publish_review(self, run: RunContext, result: ReviewResult) -> PublishResult:
         current = self._current_record(run)
@@ -78,6 +83,9 @@ class ReviewPublisher:
         if current is None:
             self._safe_log("summary_state_unavailable", run.pr_number)
             return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("state_unavailable",))
+        if any(isinstance(item, Finding) and _api_path(item.path) is None for item in result.findings):
+            self._safe_log("unsafe_inline_path", run.pr_number)
+            return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("unsafe_inline_path",))
         try:
             summary_id = self._publish_summary(current, summary)
         except Exception:
@@ -153,7 +161,7 @@ def _summary_body(result: ReviewResult) -> str:
     else:
         lines.extend(("", "### 已验证问题"))
         for item in _limited_sorted(result.findings, _MAX_FINDINGS):
-            lines.append(f"- {item.severity.value} `{_safe_path(item.path)}`:{item.line}：{_safe_text(item.failure_path)}")
+            lines.append(f"- {item.severity.value} `{_display_path(item.path)}`:{item.line}：{_safe_text(item.failure_path)}")
     coverage = result.coverage
     lines.extend(("", "### 覆盖情况"))
     if _valid_coverage(coverage):
@@ -197,7 +205,10 @@ def _inline(run: RunContext, finding: Finding) -> InlineComment:
         f"影响：{_safe_text(finding.impact)}", f"证据：{_safe_text(finding.evidence)}",
         f"建议：{_safe_text(finding.suggestion)}", f"验证：{_safe_text(finding.verification)}",
         render_fingerprint_marker(run, finding)))
-    return InlineComment(_safe_path(finding.path), finding.line, finding.side, body, finding.fingerprint)
+    path = _api_path(finding.path)
+    if path is None:
+        raise ValueError("unsafe_inline_path")
+    return InlineComment(path, finding.line, finding.side, body, finding.fingerprint)
 
 
 def _limited_sorted(findings: Iterable[Finding], maximum: int) -> tuple[Finding, ...]:
@@ -256,15 +267,28 @@ def _safe_text(value: object) -> str:
     text = _IMAGE.sub(r"\1", text)
     text = _LINK.sub(r"\1", text)
     text = _HTML.sub("", text)
-    text = _URL.sub("", text)
+    text = _URI_SCHEME.sub("", text)
+    text = _OBFUSCATED_SCHEME.sub("", text)
+    text = _SPACED_SCHEME.sub("", text)
+    text = _SCHEME_RELATIVE.sub("", text)
+    text = _WWW.sub("", text)
+    text = _ENCODED_SCHEME.sub("", text)
     text = _CONTROL.sub(" ", text)
     text = " ".join(text.split()).replace("@", "＠")
     text = _MARKDOWN.sub(r"\\\1", text)
     return text[:_MAX_PUBLIC_TEXT] or "信息不可用"
 
 
-def _safe_path(value: object) -> str:
+def _display_path(value: object) -> str:
     text = _safe_text(value)
-    if text == "信息不可用" or text.startswith("/") or ".." in text.split("/"):
+    if _api_path(value) is None:
         return "未定位文件"
     return text[:512]
+
+
+def _api_path(value: object) -> str | None:
+    if (not isinstance(value, str) or not value or len(value) > 1024 or value.startswith("/")
+            or "\\" in value or any(part in ("", ".", "..") for part in value.split("/"))
+            or any(ord(char) < 32 for char in value)):
+        return None
+    return value
