@@ -7,7 +7,7 @@ from tools.qykw.domain import (
     CommandMode, CommandName, CommandRequest, CoverageReport, DiffSide, Finding,
     InlineComment, IssueComment, ReviewComment, ReviewResult, RunContext, RunRecord, RunStage, RunStatus, Severity,
 )
-from tools.qykw.publish import ReviewPublisher
+from tools.qykw.publish import ReviewPublisher, sanitize_public_text
 from tools.qykw.state import GitHubCommentStateStore
 
 
@@ -111,6 +111,24 @@ class RoundTripGateway:
 
 
 class TestReviewPublisher(unittest.TestCase):
+    def test_shared_public_sanitizer_removes_markup_uris_and_mentions(self) -> None:
+        rendered = sanitize_public_text(
+            "<img src=x> [label](https://evil.test) <https://evil.test> @team "
+            "ftp://evil.test and normal evidence：保留"
+        )
+        for forbidden in ("<img", "https:", "ftp:", "@team", "[label]"):
+            self.assertNotIn(forbidden, rendered.lower())
+        self.assertIn("label", rendered)
+        self.assertIn("normal evidence：保留", rendered)
+
+    def test_write_guard_blocks_every_public_review_write(self) -> None:
+        gateway = FakeGateway()
+        result = ReviewPublisher(gateway, FakeState()).publish_review(
+            run(), review(finding()), write_guard=lambda: False
+        )
+        self.assertEqual(result.status, RunStatus.FAILED)
+        self.assertEqual(gateway.calls, [])
+
     def test_summary_precedes_inline_comments_and_uses_comment_event(self) -> None:
         gateway = FakeGateway()
         result = ReviewPublisher(gateway, FakeState(), max_findings=5).publish_review(run(), review(finding(), finding("src/b.py", 9, fingerprint="f-2")))

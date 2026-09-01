@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import html
 import json
 import logging
@@ -72,16 +72,20 @@ class ReviewPublisher:
                 self._safe_log("ack_reaction_failed", run.pr_number)
         return self.gateway.create_issue_comment(run.pr_number, "qykw 已收到请求，正在处理。")
 
-    def publish_status(self, record: RunRecord) -> None:
+    def publish_status(self, record: RunRecord, *, write_guard: Callable[[], bool] | None = None) -> None:
         current = self._current_record(record.context)
         if current is None or current.prompt_version != record.prompt_version:
             self._safe_log("status_state_unavailable", record.context.pr_number)
+            return
+        if not _write_allowed(write_guard):
+            self._safe_log("status_write_blocked", record.context.pr_number)
             return
         body = f"qykw 运行状态：{current.status.value}；阶段：{current.stage.value}。\n\n{render_state_marker(current)}"
         self.gateway.update_issue_comment(current.summary_comment_id, body)  # type: ignore[arg-type]
         self._safe_log("status_published", current.context.pr_number)
 
-    def publish_review(self, run: RunContext, result: ReviewResult) -> PublishResult:
+    def publish_review(self, run: RunContext, result: ReviewResult, *,
+                       write_guard: Callable[[], bool] | None = None) -> PublishResult:
         current = self._current_record(run)
         summary = _summary_body(result)
         if current is None:
@@ -90,8 +94,11 @@ class ReviewPublisher:
         if any(isinstance(item, Finding) and _api_path(item.path) is None for item in result.findings):
             self._safe_log("unsafe_inline_path", run.pr_number)
             return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("unsafe_inline_path",))
+        if not _write_allowed(write_guard):
+            self._safe_log("summary_write_blocked", run.pr_number)
+            return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("write_blocked",))
         try:
-            summary_id = self._publish_summary(current, summary)
+            summary_id = self._publish_summary(current, summary, write_guard=write_guard)
         except Exception:
             self._safe_log("summary_publish_failed", run.pr_number)
             return PublishResult(RunStatus.FAILED, 0, summary, None, (), ("summary_publish_failed",))
@@ -100,18 +107,22 @@ class ReviewPublisher:
         pending = tuple(item for item in candidates if _fingerprint_key(run, item) not in existing)
         if not pending:
             return PublishResult(RunStatus.COMPLETED, summary_id, summary, None, (), ())
+        if not _write_allowed(write_guard):
+            return PublishResult(RunStatus.FAILED, summary_id, summary, None, (), ("write_blocked",))
         try:
             review_id = self.gateway.create_review(run.pr_number, head_sha=run.source_head_sha,
                 body="qykw 行评。", comments=tuple(_inline(run, item) for item in pending))
             return PublishResult(RunStatus.COMPLETED, summary_id, summary, review_id,
                 tuple(item.fingerprint for item in pending), ())
         except Exception:
-            return self._publish_individually(run, summary_id, summary, pending)
+            return self._publish_individually(run, summary_id, summary, pending, write_guard=write_guard)
 
-    def _publish_summary(self, record: RunRecord, body: str) -> int:
+    def _publish_summary(self, record: RunRecord, body: str, *, write_guard: Callable[[], bool] | None = None) -> int:
         comment_id = record.summary_comment_id
         if comment_id is None:
             raise ValueError("state_comment_unavailable")
+        if not _write_allowed(write_guard):
+            raise RuntimeError("write_blocked")
         public_body = body + "\n\n" + render_state_marker(record)
         self.gateway.update_issue_comment(comment_id, public_body)
         return comment_id
@@ -132,7 +143,8 @@ class ReviewPublisher:
         return None
 
     def _publish_individually(self, run: RunContext, summary_id: int, summary: str,
-                              pending: tuple[Finding, ...]) -> PublishResult:
+                              pending: tuple[Finding, ...], *,
+                              write_guard: Callable[[], bool] | None = None) -> PublishResult:
         published: list[str] = []
         warning = False
         review_id: int | None = None
@@ -141,6 +153,9 @@ class ReviewPublisher:
             key = _fingerprint_key(run, finding)
             if key in existing:
                 continue
+            if not _write_allowed(write_guard):
+                warning = True
+                break
             try:
                 review_id = self.gateway.create_review(run.pr_number, head_sha=run.source_head_sha,
                     body="qykw 行评。", comments=(_inline(run, finding),))
@@ -280,6 +295,21 @@ def _safe_text(value: object) -> str:
     text = " ".join(text.split()).replace("@", "＠")
     text = _MARKDOWN.sub(r"\\\1", text)
     return text[:_MAX_PUBLIC_TEXT] or "信息不可用"
+
+
+def sanitize_public_text(value: object) -> str:
+    """Render untrusted public fields through the one qykw sanitization boundary."""
+
+    return _safe_text(value)
+
+
+def _write_allowed(guard: Callable[[], bool] | None) -> bool:
+    if guard is None:
+        return True
+    try:
+        return guard() is True
+    except Exception:
+        return False
 
 
 def _display_path(value: object) -> str:

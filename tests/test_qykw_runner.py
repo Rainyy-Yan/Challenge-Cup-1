@@ -27,6 +27,21 @@ def config() -> object:
     return parse_qykw_config({"authorization": {"code_writers": ["owner"]}})
 
 
+def complete_run() -> dict[str, object]:
+    return {
+        "run_id": "QY-PR53-A", "idempotency_key": "comment:8:issue:77",
+        "repository_id": 8, "repository": "owner/repo", "pr_number": 53,
+        "event_name": "issue_comment", "event_action": "created",
+        "source_repository": "source/repo", "source_head_sha": HEAD,
+        "target_base_sha": BASE, "target_base_ref": "main", "actor_login": "alice",
+        "command": {"name": "审查", "argument": "", "mode": "read_only"},
+    }
+
+
+def artifact_for(phase: str, run: object, payload: object) -> dict[str, object]:
+    return {"version": 1, "phase": phase, "run": run, "payload": payload}
+
+
 class FakeGateway:
     def __init__(self, *, heads: tuple[str, ...] = (HEAD,), reaction_fails: bool = False,
                  permission: object | None = None, permissions: tuple[object, ...] | None = None) -> None:
@@ -36,6 +51,7 @@ class FakeGateway:
         self.permissions = list(permissions or ())
         self.reaction_calls: list[int] = []
         self.write_calls: list[str] = []
+        self.comments: list[str] = []
 
     def get_actor_permission(self, _: str):
         from tools.qykw.domain import RepositoryPermission
@@ -61,6 +77,11 @@ class FakeGateway:
         self.write_calls.append("snapshot")
         return PullSnapshot(53, "open", False, "source/repo", run.source_head_sha,
                             "owner/repo", BASE, "main", "title", "body", (), (), (), ())
+
+    def create_issue_comment(self, _: int, body: str) -> int:
+        self.write_calls.append("create_comment")
+        self.comments.append(body)
+        return len(self.comments)
 
 
 class FakeState:
@@ -116,6 +137,16 @@ class FakeEngine:
         return ReviewResult("ok", (), CoverageReport(0, 0, 0, 0, (), True), (), ())
 
 
+class FakeAdvisory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def handle(self, run: object, plan: object | None, record: object = None) -> object:
+        del run, plan, record
+        self.calls += 1
+        return type("Advice", (), {"title": "<b>title</b>", "body": "@team https://evil.test clean", "evidence": (), "limitations": ()})()
+
+
 class FakePublisher:
     def __init__(self, gateway: FakeGateway) -> None:
         self.gateway = gateway
@@ -135,11 +166,11 @@ class FakePublisher:
 
 class TestQykwRunner(unittest.TestCase):
     def build(self, *, heads: tuple[str, ...] = (HEAD,), reaction_fails: bool = False,
-              cancel_before_publish: bool = False) -> tuple[QykwRunner, FakeGateway, FakeState, FakePublisher]:
+              cancel_before_publish: bool = False, advisory: object | None = None) -> tuple[QykwRunner, FakeGateway, FakeState, FakePublisher]:
         gateway = FakeGateway(heads=heads, reaction_fails=reaction_fails)
         state = FakeState()
         publisher = FakePublisher(gateway)
-        runner = QykwRunner(config(), gateway, state, None,
+        runner = QykwRunner(config(), gateway, state, advisory,
                             FakeEngine(state, cancel_before_publish=cancel_before_publish), publisher,
                             context_builder=lambda snapshot, run: object(),
                             now=lambda: "2026-09-02T00:00:00Z")
@@ -209,48 +240,139 @@ class TestQykwRunner(unittest.TestCase):
         from tools.qykw.__main__ import main
         self.assertEqual(main(["--phase", "model-selected-phase"]), 2)
 
-    def test_cli_rejects_cross_run_artifact_before_phase_controller(self) -> None:
+    def test_cli_phase_chain_preserves_the_complete_immutable_run_binding(self) -> None:
+        from tools.qykw.__main__ import main
+
+        class Controller:
+            def authorize(self, artifact: dict[str, object]) -> dict[str, object]:
+                return artifact_for("authorize", artifact["run"], {"authorization": "accepted"})
+
+            def analyze(self, artifact: dict[str, object]) -> dict[str, object]:
+                return artifact_for("analyze", artifact["run"], {"analysis": {"result_ref": "sha256:abc"}})
+
+            def publish(self, artifact: dict[str, object]) -> dict[str, object]:
+                return artifact_for("publish", artifact["run"], {"published": True})
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            request = directory_path / "request.json"
+            authorize = directory_path / "authorize.json"
+            analyze = directory_path / "analyze.json"
+            publish = directory_path / "publish.json"
+            request.write_text(json.dumps(artifact_for("request", complete_run(), {"command": "审查"})), encoding="utf-8")
+            controller = Controller()
+            self.assertEqual(main(["--phase", "authorize", "--artifact", str(request), "--output", str(authorize)], controller=controller), 0)
+            self.assertEqual(main(["--phase", "analyze", "--artifact", str(authorize), "--output", str(analyze)], controller=controller), 0)
+            self.assertEqual(main(["--phase", "publish", "--artifact", str(analyze), "--output", str(publish)], controller=controller), 0)
+            final = json.loads(publish.read_text(encoding="utf-8"))
+        self.assertEqual(final["run"], complete_run())
+        self.assertEqual(final["payload"], {"published": True})
+
+    def test_cli_rejects_wrong_predecessor_and_controller_run_override(self) -> None:
+        from tools.qykw.__main__ import main
+
+        class Controller:
+            def publish(self, artifact: dict[str, object]) -> dict[str, object]:
+                changed = dict(artifact["run"])
+                changed["source_head_sha"] = "c" * 40
+                return artifact_for("publish", changed, {"published": True})
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.json"
+            target = Path(directory) / "target.json"
+            source.write_text(json.dumps(artifact_for("analyze", complete_run(), {"analysis": {"result_ref": "sha256:abc"}})), encoding="utf-8")
+            self.assertEqual(main(["--phase", "publish", "--artifact", str(source), "--output", str(target)], controller=Controller()), 2)
+            self.assertFalse(target.exists())
+
+    def test_cli_records_a_sanitized_failure_only_from_authorized_predecessor(self) -> None:
+        from tools.qykw.__main__ import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "input.json"
+            output_path = Path(directory) / "output.json"
+            input_path.write_text(json.dumps(artifact_for("analyze", complete_run(), {"analysis": {"result_ref": "sha256:abc"}})), encoding="utf-8")
+            result = main(["--phase", "record-failure", "--artifact", str(input_path),
+                           "--output", str(output_path), "--error-code", "provider_failed"])
+            payload = json.loads(output_path.read_text(encoding="utf-8")) if output_path.exists() else {}
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["payload"], {"error_code": "provider_failed"})
+
+    def test_control_phase_refuses_any_command_except_stop(self) -> None:
         from tools.qykw.__main__ import main
 
         class Controller:
             called = False
 
-            def authorize(self, artifact: object) -> object:
+            def control(self, artifact: dict[str, object]) -> dict[str, object]:
                 self.called = True
                 return artifact
 
         with tempfile.TemporaryDirectory() as directory:
-            input_path = Path(directory) / "input.json"
-            output_path = Path(directory) / "output.json"
-            input_path.write_text(json.dumps({
-                "version": 1, "kind": "qykw-run", "phase": "control",
-                "run": {"run_id": "QY-PR53-A", "idempotency_key": "key", "repository_id": 8,
-                        "repository": "owner/repo", "pr_number": 53, "head_sha": HEAD,
-                        "base_sha": BASE, "base_ref": "main"},
-            }), encoding="utf-8")
+            source = Path(directory) / "control.json"
+            target = Path(directory) / "result.json"
+            source.write_text(json.dumps(artifact_for("control", complete_run(), {"stop_comment_id": 77})), encoding="utf-8")
             controller = Controller()
-            result = main(["--phase", "authorize", "--artifact", str(input_path),
-                           "--output", str(output_path)], controller=controller)
+            result = main(["--phase", "control", "--artifact", str(source), "--output", str(target)], controller=controller)
         self.assertEqual(result, 2)
         self.assertFalse(controller.called)
 
-    def test_cli_records_a_sanitized_failure_artifact(self) -> None:
-        from tools.qykw.__main__ import main
+    def test_cancel_between_publication_recheck_and_publisher_prevents_write(self) -> None:
+        runner, gateway, state, publisher = self.build()
+        original = gateway.get_pull_ref
+        calls = 0
 
-        with tempfile.TemporaryDirectory() as directory:
-            input_path = Path(directory) / "input.json"
-            output_path = Path(directory) / "output.json"
-            input_path.write_text(json.dumps({
-                "version": 1, "kind": "qykw-run", "phase": "analyze",
-                "run": {"run_id": "QY-PR53-A", "idempotency_key": "key", "repository_id": 8,
-                        "repository": "owner/repo", "pr_number": 53, "head_sha": HEAD,
-                        "base_sha": BASE, "base_ref": "main"},
-            }), encoding="utf-8")
-            result = main(["--phase", "record-failure", "--artifact", str(input_path),
-                           "--output", str(output_path), "--error-code", "provider_failed"])
-            payload = json.loads(output_path.read_text(encoding="utf-8")) if output_path.exists() else {}
-        self.assertEqual(result, 0)
-        self.assertEqual(payload["failure"], {"code": "provider_failed"})
+        def cancel_after_recheck(pr_number: int) -> PullRef:
+            nonlocal calls
+            calls += 1
+            pull = original(pr_number)
+            if calls == 2:
+                state.canceled.add(next(iter(state.records)))
+            return pull
+
+        gateway.get_pull_ref = cancel_after_recheck  # type: ignore[method-assign]
+        outcome = runner.handle(event())
+        self.assertEqual(outcome.status, RunStatus.CANCELED)
+        self.assertEqual(publisher.calls, [])
+
+    def test_cancel_between_advisory_recheck_and_comment_prevents_write(self) -> None:
+        advisory = FakeAdvisory()
+        runner, gateway, state, _ = self.build(advisory=advisory)
+        original = gateway.get_pull_ref
+        calls = 0
+
+        def cancel_after_recheck(pr_number: int) -> PullRef:
+            nonlocal calls
+            calls += 1
+            pull = original(pr_number)
+            if calls == 2:
+                state.canceled.add(next(iter(state.records)))
+            return pull
+
+        gateway.get_pull_ref = cancel_after_recheck  # type: ignore[method-assign]
+        outcome = runner.handle(event(CommandName.ANALYZE))
+        self.assertEqual(outcome.status, RunStatus.CANCELED)
+        self.assertEqual(advisory.calls, 1)
+
+    def test_advisory_comment_uses_shared_safe_public_renderer(self) -> None:
+        advisory = FakeAdvisory()
+        runner, gateway, _, _ = self.build(advisory=advisory)
+        outcome = runner.handle(event(CommandName.ANALYZE))
+        self.assertEqual(outcome.status, RunStatus.COMPLETED)
+        body = gateway.comments[0]
+        for forbidden in ("<b>", "https:", "@team"):
+            self.assertNotIn(forbidden, body.lower())
+        self.assertIn("clean", body)
+
+    def test_deterministic_permission_drift_blocks_its_public_comment(self) -> None:
+        from tools.qykw.domain import RepositoryPermission
+
+        advisory = FakeAdvisory()
+        runner, gateway, _, _ = self.build(advisory=advisory)
+        gateway.permissions = [RepositoryPermission.WRITE, RepositoryPermission.NONE]
+        outcome = runner.handle(event(CommandName.HELP))
+        self.assertEqual(outcome.status, RunStatus.FAILED)
+        self.assertEqual(outcome.error_code, "authorization_drift")
+        self.assertEqual(gateway.comments, [])
 
 
 def replace_runner_state_path(runner: QykwRunner, state_path: Path) -> QykwRunner:

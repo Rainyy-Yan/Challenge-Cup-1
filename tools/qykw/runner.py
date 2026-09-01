@@ -25,7 +25,7 @@ from tools.qykw.domain import (
 )
 from tools.qykw.github import GitHubGateway
 from tools.qykw.policy import authorize_command
-from tools.qykw.publish import ReviewPublisher
+from tools.qykw.publish import ReviewPublisher, sanitize_public_text
 from tools.qykw.review import ReviewEngine
 from tools.qykw.state import RunStateStore
 from tools.qykw.triggers import build_run_context, decide_trigger
@@ -167,9 +167,14 @@ class QykwRunner:
         if self.advisory is not None:
             try:
                 result = self.advisory.handle(current.context, None, self.state.find_latest(current.context.pr_number))
-                body = self._safe_advisory_body(result)
-                if body:
-                    self.gateway.create_issue_comment(current.context.pr_number, body)
+                if self._cancelled(current):
+                    return self._cancel(current)
+                publication_problem = self._publication_problem(current)
+                if publication_problem is not None:
+                    return self._publication_failure(current, publication_problem)
+                if self._cancelled(current):
+                    return self._cancel(current)
+                self.gateway.create_issue_comment(current.context.pr_number, self._safe_advisory_body(result))
             except Exception:
                 return self._finish(current, RunStatus.FAILED, "deterministic_response_failed")
         return self._finish(current, RunStatus.COMPLETED, None)
@@ -194,6 +199,8 @@ class QykwRunner:
         publication_problem = self._publication_problem(record)
         if publication_problem is not None:
             return self._publication_failure(record, publication_problem)
+        if self._cancelled(record):
+            return self._cancel(record)
         try:
             self.gateway.create_issue_comment(record.context.pr_number, self._safe_advisory_body(result))
         except Exception:
@@ -229,8 +236,15 @@ class QykwRunner:
         publication_problem = self._publication_problem(record)
         if publication_problem is not None:
             return self._publication_failure(record, publication_problem)
+        if self._cancelled(record):
+            return self._cancel(record)
         try:
-            published = self.publisher.publish_review(record.context, result)  # type: ignore[union-attr]
+            if isinstance(self.publisher, ReviewPublisher):
+                published = self.publisher.publish_review(
+                    record.context, result, write_guard=lambda: self._publish_permitted(record)
+                )
+            else:
+                published = self.publisher.publish_review(record.context, result)  # type: ignore[union-attr]
         except Exception:
             return self._finish(record, RunStatus.FAILED, "publish_failed")
         if self._cancelled(record):
@@ -271,6 +285,9 @@ class QykwRunner:
                 and pull.target_base_ref == run.target_base_ref):
             return "stale_pull_ref"
         return None
+
+    def _publish_permitted(self, record: RunRecord) -> bool:
+        return not self._cancelled(record) and self._publication_problem(record) is None
 
     def _actor(self, event: EventContext) -> Actor | None:
         if not event.actor_login:
@@ -355,9 +372,15 @@ class QykwRunner:
     def _safe_advisory_body(result: object) -> str:
         title = getattr(result, "title", "qykw")
         body = getattr(result, "body", "暂时无法生成结果。")
-        if not isinstance(title, str) or not isinstance(body, str):
-            return "qykw\n\n暂时无法生成结果。"
-        return f"{title[:256]}\n\n{body[:4000]}"
+        evidence = getattr(result, "evidence", ())
+        limitations = getattr(result, "limitations", ())
+        lines = [sanitize_public_text(title), "", sanitize_public_text(body)]
+        for label, values in (("证据", evidence), ("限制", limitations)):
+            if isinstance(values, tuple):
+                safe_values = [sanitize_public_text(item) for item in values[:20]]
+                if safe_values:
+                    lines.extend(("", label + "：", *safe_values))
+        return "\n".join(lines)
 
     @staticmethod
     def _outcome(run_id: str, status: RunStatus, stage: RunStage, error: str | None) -> RunOutcome:

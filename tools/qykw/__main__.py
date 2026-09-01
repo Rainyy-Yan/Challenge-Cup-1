@@ -1,9 +1,4 @@
-"""Narrow, controller-owned entry point for qykw workflow phases.
-
-This module intentionally does not construct a gateway or inference provider.
-The Actions controller supplies the phase-specific service object, so a job
-cannot accidentally combine review-token and inference credentials.
-"""
+"""Strict artifact boundary for isolated qykw workflow phases."""
 
 from __future__ import annotations
 
@@ -15,31 +10,37 @@ import tempfile
 from typing import Sequence
 
 
-_PHASES = frozenset({"control", "authorize", "analyze", "publish", "record-failure"})
+_CLI_PHASES = frozenset({"control", "authorize", "analyze", "publish", "record-failure"})
+_ARTIFACT_PHASES = _CLI_PHASES | {"request"}
+_PREDECESSORS = {
+    "control": frozenset({"control"}),
+    "authorize": frozenset({"request"}),
+    "analyze": frozenset({"authorize"}),
+    "publish": frozenset({"analyze"}),
+    "record-failure": frozenset({"authorize", "analyze", "publish"}),
+}
 _MAX_ARTIFACT_BYTES = 64 * 1024
-_RUN_KEYS = frozenset({"run_id", "idempotency_key", "repository_id", "repository", "pr_number", "head_sha", "base_sha", "base_ref"})
-_ARTIFACT_KEYS = frozenset({"version", "kind", "phase", "run"})
-_FAILURE_ARTIFACT_KEYS = _ARTIFACT_KEYS | {"failure"}
+_ARTIFACT_KEYS = frozenset({"version", "phase", "run", "payload"})
+_RUN_KEYS = frozenset({
+    "run_id", "idempotency_key", "repository_id", "repository", "pr_number",
+    "event_name", "event_action", "source_repository", "source_head_sha",
+    "target_base_sha", "target_base_ref", "actor_login", "command",
+})
+_COMMAND_KEYS = frozenset({"name", "argument", "mode"})
 
 
 def main(argv: Sequence[str] | None = None, *, controller: object | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.qykw", allow_abbrev=False)
-    parser.add_argument("--phase", required=True, choices=sorted(_PHASES))
-    parser.add_argument("--artifact")
-    parser.add_argument("--output")
+    parser.add_argument("--phase", required=True, choices=sorted(_CLI_PHASES))
+    parser.add_argument("--artifact", required=True)
+    parser.add_argument("--output", required=True)
     parser.add_argument("--error-code")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
-    if args.phase != "record-failure" and (not args.artifact or not args.output):
-        return _error("artifact_and_output_required")
-    if args.phase == "record-failure" and (not args.artifact or not args.output or not args.error_code):
-        return _error("failure_artifact_output_and_code_required")
     try:
         artifact = _read_artifact(Path(args.artifact))
-        if artifact["phase"] != args.phase and not (args.phase == "record-failure" and artifact["phase"] in _PHASES):
-            raise ValueError("artifact_phase_mismatch")
         result = _run_phase(args.phase, artifact, controller, args.error_code)
         _write_artifact(Path(args.output), result)
     except (OSError, ValueError, TypeError) as error:
@@ -49,20 +50,30 @@ def main(argv: Sequence[str] | None = None, *, controller: object | None = None)
 
 def _run_phase(phase: str, artifact: dict[str, object], controller: object | None,
                error_code: str | None) -> dict[str, object]:
+    if artifact["phase"] not in _PREDECESSORS[phase]:
+        raise ValueError("artifact_phase_mismatch")
+    if phase == "control" and artifact["run"]["command"]["name"] != "停止":  # type: ignore[index]
+        raise ValueError("control_command_not_stop")
     if phase == "record-failure":
-        if not isinstance(error_code, str) or not error_code.isidentifier() or len(error_code) > 80:
+        if not _error_code(error_code):
             raise ValueError("invalid_error_code")
-        return {**artifact, "phase": phase, "failure": {"code": error_code}}
+        return _artifact("record-failure", artifact["run"], {"error_code": error_code})
     if controller is None:
         raise ValueError("phase_controller_required")
     method = getattr(controller, phase, None)
     if not callable(method):
         raise ValueError("phase_not_available")
     result = method(artifact)
-    if result is None:
-        raise ValueError("empty_phase_result")
     if not isinstance(result, dict):
         raise ValueError("invalid_phase_result")
+    _validate_artifact(result, expected_phase=phase)
+    if result["run"] != artifact["run"]:
+        raise ValueError("immutable_run_binding_changed")
+    return result
+
+
+def _artifact(phase: str, run: object, payload: object) -> dict[str, object]:
+    result = {"version": 1, "phase": phase, "run": run, "payload": payload}
     _validate_artifact(result, expected_phase=phase)
     return result
 
@@ -84,31 +95,61 @@ def _read_artifact(path: Path) -> dict[str, object]:
 
 
 def _validate_artifact(payload: object, *, expected_phase: str | None = None) -> None:
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or set(payload) != _ARTIFACT_KEYS:
         raise ValueError("invalid_artifact_schema")
     phase = payload.get("phase")
-    expected_keys = _FAILURE_ARTIFACT_KEYS if phase == "record-failure" else _ARTIFACT_KEYS
-    if set(payload) != expected_keys:
-        raise ValueError("invalid_artifact_schema")
-    if payload.get("version") != 1 or payload.get("kind") != "qykw-run":
-        raise ValueError("unsupported_artifact_version")
-    if phase not in _PHASES or (expected_phase is not None and phase != expected_phase):
+    if phase not in _ARTIFACT_PHASES or (expected_phase is not None and phase != expected_phase):
         raise ValueError("artifact_phase_mismatch")
-    run = payload.get("run")
+    if payload.get("version") != 1:
+        raise ValueError("unsupported_artifact_version")
+    _validate_run(payload.get("run"))
+    _validate_payload(phase, payload.get("payload"))
+
+
+def _validate_run(run: object) -> None:
     if not isinstance(run, dict) or set(run) != _RUN_KEYS:
         raise ValueError("invalid_run_binding")
-    strings = ("run_id", "idempotency_key", "repository", "head_sha", "base_sha", "base_ref")
-    if any(not isinstance(run.get(key), str) or not run[key] or len(run[key]) > 512 for key in strings):
+    strings = (
+        "run_id", "idempotency_key", "repository", "event_name", "event_action",
+        "source_repository", "source_head_sha", "target_base_sha", "target_base_ref", "actor_login",
+    )
+    if any(not _text(run.get(key), 512) for key in strings):
         raise ValueError("invalid_run_binding")
     if any(type(run.get(key)) is not int or run[key] <= 0 for key in ("repository_id", "pr_number")):
         raise ValueError("invalid_run_binding")
-    if phase == "record-failure":
-        failure = payload.get("failure")
-        if not isinstance(failure, dict) or set(failure) != {"code"}:
-            raise ValueError("invalid_failure_artifact")
-        code = failure.get("code")
-        if not isinstance(code, str) or not code.isidentifier() or len(code) > 80:
-            raise ValueError("invalid_failure_artifact")
+    command = run.get("command")
+    if not isinstance(command, dict) or set(command) != _COMMAND_KEYS:
+        raise ValueError("invalid_run_binding")
+    if not _text(command.get("name"), 64) or not _text(command.get("argument"), 4096, allow_empty=True) or not _text(command.get("mode"), 64):
+        raise ValueError("invalid_run_binding")
+
+
+def _validate_payload(phase: object, payload: object) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("invalid_phase_payload")
+    if phase == "request" and set(payload) == {"command"} and _text(payload.get("command"), 64):
+        return
+    if phase == "control" and set(payload) == {"stop_comment_id"} and type(payload.get("stop_comment_id")) is int and payload["stop_comment_id"] > 0:
+        return
+    if phase == "authorize" and payload == {"authorization": "accepted"}:
+        return
+    if phase == "analyze":
+        analysis = payload.get("analysis")
+        if set(payload) == {"analysis"} and isinstance(analysis, dict) and set(analysis) == {"result_ref"} and _text(analysis.get("result_ref"), 512):
+            return
+    if phase == "publish" and payload == {"published": True}:
+        return
+    if phase == "record-failure" and set(payload) == {"error_code"} and _error_code(payload.get("error_code")):
+        return
+    raise ValueError("invalid_phase_payload")
+
+
+def _text(value: object, maximum: int, *, allow_empty: bool = False) -> bool:
+    return isinstance(value, str) and len(value) <= maximum and (allow_empty or bool(value))
+
+
+def _error_code(value: object) -> bool:
+    return isinstance(value, str) and len(value) <= 80 and value.isidentifier()
 
 
 def _write_artifact(path: Path, payload: dict[str, object]) -> None:
