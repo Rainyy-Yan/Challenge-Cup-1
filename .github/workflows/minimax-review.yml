@@ -23,10 +23,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: minimax-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     if: >-
@@ -38,6 +34,11 @@ jobs:
       (github.event_name == 'pull_request_review_comment' &&
         github.event.comment.user.login != vars.MINIMAX_REVIEW_BOT_LOGIN &&
         contains(github.event.comment.body, format('@{0}', vars.MINIMAX_REVIEW_BOT_LOGIN)))
+    # Job-level concurrency is evaluated only for reviews that pass the guard
+    # above, so comments posted by qykw cannot cancel the active review.
+    concurrency:
+      group: minimax-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

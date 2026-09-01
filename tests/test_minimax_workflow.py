@@ -32,6 +32,17 @@ class TestMiniMaxWorkflow(unittest.TestCase):
         self.assertIn("TRIGGER_COMMENT_KIND:", workflow)
         self.assertIn("REVIEW_REQUEST:", workflow)
 
+    def test_bot_comments_do_not_cancel_the_active_review(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        jobs_index = workflow.index("jobs:")
+        review_index = workflow.index("  review:", jobs_index)
+        concurrency_index = workflow.index("    concurrency:", review_index)
+
+        self.assertGreater(concurrency_index, review_index)
+        self.assertIn("      cancel-in-progress: true", workflow)
+        self.assertNotIn("\nconcurrency:\n", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
