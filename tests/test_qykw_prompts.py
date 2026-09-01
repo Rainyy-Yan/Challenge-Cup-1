@@ -285,6 +285,57 @@ class TestQykwPromptBuilders(unittest.TestCase):
         self.assertIn("启元开物独立工程审查机器人 qykw", serialized)
         self.assertNotRegex(serialized, re.compile(r"MiniMax|minimax|OpenAI|GPT", re.IGNORECASE))
 
+    def test_prompt_coalesces_contiguous_commentable_lines_without_mutating_local_map(self) -> None:
+        lines = frozenset(
+            ChangedLine("src/large.py", line, DiffSide.RIGHT) for line in range(1, 10_001)
+        )
+        plan = replace(context_plan(), commentable_lines=lines)
+        data = build_analysis_request(run(), plan).payload["untrusted"]["context_plan"]
+        metadata = data["commentable_line_ranges"]
+
+        self.assertEqual(len(plan.commentable_lines), 10_000)
+        self.assertEqual(metadata["total_lines"], 10_000)
+        self.assertEqual(metadata["included_lines"], 10_000)
+        self.assertFalse(metadata["truncated"])
+        self.assertEqual(metadata["ranges"], [{"path": "src/large.py", "side": "RIGHT", "start_line": 1, "end_line": 10_000}])
+        self.assertNotIn("commentable_lines", data)
+        self.assertLess(len(json.dumps(metadata, ensure_ascii=False)), 2_000)
+        self.assertTrue(metadata["complete_map_local"])
+        self.assertIn("locally validated", metadata["model_location_policy"])
+
+    def test_prompt_bounds_sparse_line_metadata_but_local_validation_map_remains_complete(self) -> None:
+        lines = frozenset(
+            ChangedLine("src/sparse.py", line, DiffSide.RIGHT) for line in range(1, 20_001, 2)
+        )
+        plan = replace(context_plan(), commentable_lines=lines)
+        first = build_analysis_request(run(), plan).payload["untrusted"]["context_plan"]
+        second = build_analysis_request(run(), plan).payload["untrusted"]["context_plan"]
+        metadata = first["commentable_line_ranges"]
+
+        self.assertEqual(metadata, second["commentable_line_ranges"])
+        self.assertEqual(metadata["total_lines"], 10_000)
+        self.assertLess(metadata["included_lines"], 10_000)
+        self.assertTrue(metadata["truncated"])
+        self.assertEqual(metadata["truncated_lines"], 10_000 - metadata["included_lines"])
+        self.assertLessEqual(len(metadata["ranges"]), 128)
+        self.assertLess(len(json.dumps(metadata, ensure_ascii=False)), 16_000)
+        self.assertIn(ChangedLine("src/sparse.py", 19_999, DiffSide.RIGHT), plan.commentable_lines)
+        self.assertFalse(any(entry["start_line"] <= 19_999 <= entry["end_line"] for entry in metadata["ranges"]))
+
+    def test_prompt_bounds_coverage_omission_metadata_without_hiding_counts(self) -> None:
+        omissions = tuple(f"budget_truncated_unallocated:src/{index}.py:hunk=0:records=0-2" for index in range(10_000))
+        plan = replace(context_plan(), coverage=CoverageReport(1, 0, 10_000, 0, omissions, True))
+        coverage_data = build_analysis_request(run(), plan).payload["untrusted"]["context_plan"]["coverage"]
+        metadata = coverage_data["omission_metadata"]
+
+        self.assertEqual(metadata["total_entries"], 10_000)
+        self.assertLess(metadata["included_entries"], 10_000)
+        self.assertEqual(metadata["truncated_entries"], 10_000 - metadata["included_entries"])
+        self.assertTrue(metadata["truncated"])
+        self.assertLessEqual(len(metadata["entries"]), 128)
+        self.assertLess(len(json.dumps(metadata, ensure_ascii=False)), 16_000)
+        self.assertTrue(coverage_data["explains_every_file"])
+
 
 if __name__ == "__main__":
     unittest.main()

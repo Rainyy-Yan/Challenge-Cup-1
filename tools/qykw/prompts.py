@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 
 from tools.qykw.domain import (
     ContextChunk,
@@ -21,6 +22,8 @@ _IDENTITY = "启元开物独立工程审查机器人 qykw"
 _DEADLINE_SECONDS = 900
 _MAX_OUTPUT_TOKENS = 4096
 _TRUSTED_RULE_PATHS = frozenset({"AGENTS.md", ".github/qykw.toml"})
+_METADATA_MAX_ENTRIES = 128
+_METADATA_MAX_SERIALIZED_CHARS = 12_000
 
 _CONSTITUTION = (
     "Identity and permissions are fixed by the system constitution.",
@@ -363,14 +366,105 @@ def _plan_data(plan: ContextPlan) -> Mapping[str, object]:
             "reviewed_files": plan.coverage.reviewed_files,
             "total_hunks": plan.coverage.total_hunks,
             "reviewed_hunks": plan.coverage.reviewed_hunks,
-            "omissions": list(plan.coverage.omissions),
+            "omission_metadata": _bounded_entries(plan.coverage.omissions),
             "explains_every_file": plan.coverage.explains_every_file,
         },
-        "commentable_lines": [
-            {"path": line.path, "line": line.line, "side": line.side.value}
-            for line in sorted(plan.commentable_lines, key=lambda item: (item.path, item.line, item.side.value))
-        ],
+        "commentable_line_ranges": _commentable_line_metadata(plan),
         "max_chunk_tokens": plan.max_chunk_tokens,
+    }
+
+
+def _commentable_line_metadata(plan: ContextPlan) -> Mapping[str, object]:
+    """Bound provider metadata without changing the complete local validation map."""
+    risk_rank = {path: index for index, path in enumerate(plan.manifest.risk_order)}
+    grouped: dict[tuple[str, str], list[int]] = {}
+    for line in plan.commentable_lines:
+        grouped.setdefault((line.path, line.side.value), []).append(line.line)
+    ranges = [
+        {"path": path, "side": side, "start_line": start, "end_line": end}
+        for (path, side), lines in grouped.items()
+        for start, end in _line_ranges(lines)
+    ]
+    ranges.sort(key=lambda item: (risk_rank.get(str(item["path"]), len(risk_rank)), item["path"], item["side"], item["start_line"]))
+    included = _bounded_mapping_entries(ranges)
+    included_lines = sum(int(item["end_line"]) - int(item["start_line"]) + 1 for item in included)
+    total_lines = len(plan.commentable_lines)
+    return {
+        "ranges": included,
+        "total_lines": total_lines,
+        "included_lines": included_lines,
+        "truncated_lines": total_lines - included_lines,
+        "total_ranges": len(ranges),
+        "included_ranges": len(included),
+        "truncated_ranges": len(ranges) - len(included),
+        "truncated": len(included) != len(ranges),
+        "complete_map_local": True,
+        "model_location_policy": "The complete commentable map remains local; model locations are locally validated before publication.",
+        "metadata_budget": _metadata_budget(),
+    }
+
+
+def _line_ranges(lines: list[int]) -> tuple[tuple[int, int], ...]:
+    ordered = sorted(set(lines))
+    if not ordered:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    start = end = ordered[0]
+    for line in ordered[1:]:
+        if line == end + 1:
+            end = line
+            continue
+        ranges.append((start, end))
+        start = end = line
+    ranges.append((start, end))
+    return tuple(ranges)
+
+
+def _bounded_entries(entries: tuple[str, ...]) -> Mapping[str, object]:
+    included = _bounded_scalar_entries(entries)
+    return {
+        "entries": included,
+        "total_entries": len(entries),
+        "included_entries": len(included),
+        "truncated_entries": len(entries) - len(included),
+        "truncated": len(included) != len(entries),
+        "metadata_budget": _metadata_budget(),
+    }
+
+
+def _bounded_mapping_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    included: list[dict[str, object]] = []
+    used = 0
+    for entry in entries:
+        encoded = _metadata_size(entry)
+        if len(included) >= _METADATA_MAX_ENTRIES or used + encoded > _METADATA_MAX_SERIALIZED_CHARS:
+            break
+        included.append(entry)
+        used += encoded
+    return included
+
+
+def _bounded_scalar_entries(entries: tuple[str, ...]) -> list[str]:
+    included: list[str] = []
+    used = 0
+    for entry in entries:
+        encoded = _metadata_size(entry)
+        if len(included) >= _METADATA_MAX_ENTRIES or used + encoded > _METADATA_MAX_SERIALIZED_CHARS:
+            break
+        included.append(entry)
+        used += encoded
+    return included
+
+
+def _metadata_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _metadata_budget() -> Mapping[str, int]:
+    """The deterministic prompt-metadata cap, independent of context chunks."""
+    return {
+        "max_entries": _METADATA_MAX_ENTRIES,
+        "max_serialized_chars": _METADATA_MAX_SERIALIZED_CHARS,
     }
 
 

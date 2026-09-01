@@ -281,7 +281,9 @@ def build_context_plan(
                     unallocated_records.setdefault((path, record.hunk_index), set()).add(record.record_index)
 
     omissions.extend(
-        _truncation_summaries(manifest.risk_order, partial_records, unallocated_records)
+        _truncation_summaries(
+            manifest.risk_order, expected_records, partial_records, unallocated_records
+        )
     )
 
     # Rules and related files are trusted/read-only context, never PR manifest
@@ -657,6 +659,7 @@ def _run_id(snapshot: PullSnapshot) -> str:
 
 def _truncation_summaries(
     risk_order: tuple[str, ...],
+    expected_records: dict[tuple[str, int], set[int]],
     partial_records: dict[tuple[str, int], set[int]],
     unallocated_records: dict[tuple[str, int], set[int]],
 ) -> tuple[str, ...]:
@@ -668,18 +671,54 @@ def _truncation_summaries(
             for candidate_path, hunk_index in partial_records.keys() | unallocated_records.keys()
             if candidate_path == path
         })
-        for hunk_index in hunk_indexes:
+        position = 0
+        while position < len(hunk_indexes):
+            hunk_index = hunk_indexes[position]
             partial = partial_records.get((path, hunk_index), set())
+            unallocated = unallocated_records.get((path, hunk_index), set())
+            ranges = _contiguous_ranges(unallocated)
+            expected = expected_records.get((path, hunk_index), set())
+            if not partial and unallocated == expected and len(ranges) == 1:
+                start_hunk = end_hunk = hunk_index
+                record_range = ranges[0]
+                record_count = len(unallocated)
+                position += 1
+                while position < len(hunk_indexes):
+                    next_hunk = hunk_indexes[position]
+                    next_unallocated = unallocated_records.get((path, next_hunk), set())
+                    next_ranges = _contiguous_ranges(next_unallocated)
+                    if (
+                        next_hunk != end_hunk + 1
+                        or partial_records.get((path, next_hunk), set())
+                        or next_unallocated != expected_records.get((path, next_hunk), set())
+                        or next_ranges != (record_range,)
+                        or len(next_unallocated) != record_count
+                    ):
+                        break
+                    end_hunk = next_hunk
+                    position += 1
+                if end_hunk > start_hunk:
+                    summaries.append(
+                        f"budget_truncated_unallocated_hunks:{path}:hunks={start_hunk}-{end_hunk}:"
+                        f"records={record_range[0]}-{record_range[1]}:records_per_hunk={record_count}"
+                    )
+                else:
+                    summaries.append(
+                        f"budget_truncated_unallocated:{path}:hunk={hunk_index}:"
+                        f"records={record_range[0]}-{record_range[1]}"
+                    )
+                continue
             if partial:
                 # Allocation consumes the shared budget monotonically, so this
                 # set can contain only the final partially emitted record.
                 summaries.append(
                     f"budget_truncated_partial:{path}:hunk={hunk_index}:record={min(partial)}"
                 )
-            for start, end in _contiguous_ranges(unallocated_records.get((path, hunk_index), set())):
+            for start, end in ranges:
                 summaries.append(
                     f"budget_truncated_unallocated:{path}:hunk={hunk_index}:records={start}-{end}"
                 )
+            position += 1
     return tuple(summaries)
 
 

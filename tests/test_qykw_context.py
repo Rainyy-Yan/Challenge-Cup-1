@@ -348,6 +348,23 @@ class TestContextPlanning(unittest.TestCase):
         self.assertTrue(any(":b.py:hunk=0:" in item for item in summaries))
         self.assertLessEqual(len(summaries), 4)
 
+    def test_contiguous_fully_unallocated_hunks_are_coalesced(self) -> None:
+        hunk_count = 512
+        patch = "".join(f"@@ -{line} +{line} @@\n-old\n+new\n" for line in range(1, hunk_count + 1))
+        file = changed_file(
+            "src/tiny.py", patch=patch, base_content="old\n" * hunk_count,
+            head_content="new\n" * hunk_count,
+        )
+        plan = build_context_plan(
+            snapshot(file),
+            **budget(repository_limit=500, backend_context_window=1_000, max_chunk_ratio=1.0),
+        )
+        summaries = tuple(item for item in plan.coverage.omissions if item.startswith("budget_truncated_"))
+
+        self.assertTrue(any(item.startswith("budget_truncated_unallocated_hunks:src/tiny.py:hunks=") for item in summaries))
+        self.assertLessEqual(len(summaries), 3)
+        self.assertLess(len("\n".join(plan.coverage.omissions)), 1_000)
+
     def test_controller_run_ids_isolate_identical_snapshots_and_reject_unsafe_values(self) -> None:
         same_snapshot = snapshot(changed_file("same.py"))
         first = build_context_plan(same_snapshot, **budget(run_id="QY-PR53-FIRST"))
