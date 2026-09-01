@@ -13,7 +13,13 @@ from tools.qykw.domain import (
     RunContext,
     TriggerRef,
 )
-from tools.qykw.github import GitHubError, GitHubGateway, HttpGitHubGateway
+from tools.qykw.github import GitHubError, GitHubGateway, GitHubPullSnapshot, HttpGitHubGateway
+
+
+HEAD_SHA = "a" * 40
+BASE_SHA = "b" * 40
+HEAD_TREE_SHA = "c" * 40
+BASE_TREE_SHA = "d" * 40
 
 
 class FakeTransport:
@@ -45,7 +51,7 @@ def response(payload: object, *, status: int = 200, link: str | None = None) -> 
     return status, headers, payload
 
 
-def pull(*, head: str = "head-1", state: str = "open") -> dict[str, object]:
+def pull(*, head: str = HEAD_SHA, state: str = "open") -> dict[str, object]:
     return {
         "number": 53,
         "state": state,
@@ -53,7 +59,7 @@ def pull(*, head: str = "head-1", state: str = "open") -> dict[str, object]:
         "title": "Title",
         "body": "Body",
         "head": {"sha": head, "ref": "feature", "repo": {"full_name": "source/repo"}},
-        "base": {"sha": "base-1", "ref": "main", "repo": {"full_name": "owner/repo"}},
+        "base": {"sha": BASE_SHA, "ref": "main", "repo": {"full_name": "owner/repo"}},
     }
 
 
@@ -86,7 +92,7 @@ def gateway(routes: Mapping[str, object]) -> tuple[HttpGitHubGateway, FakeTransp
     )
 
 
-def run_context(*, head: str = "head-1") -> RunContext:
+def run_context(*, head: str = HEAD_SHA) -> RunContext:
     return RunContext(
         run_id="QY-PR53-X",
         idempotency_key="idempotency",
@@ -97,7 +103,7 @@ def run_context(*, head: str = "head-1") -> RunContext:
         event_action="opened",
         source_repository="source/repo",
         source_head_sha=head,
-        target_base_sha="base-1",
+        target_base_sha=BASE_SHA,
         target_base_ref="main",
         command=CommandRequest(CommandName.REVIEW, "", CommandMode.READ_ONLY),
         trigger_actor="xyh202131",
@@ -106,6 +112,9 @@ def run_context(*, head: str = "head-1") -> RunContext:
 
 class TestGitHubGateway(unittest.TestCase):
     def test_protocol_has_only_allowlisted_methods(self) -> None:
+        self.assertEqual(GitHubGateway.get_pull_snapshot.__annotations__["return"], "GitHubPullSnapshot")
+        self.assertEqual(HttpGitHubGateway.get_pull_snapshot.__annotations__["return"], "GitHubPullSnapshot")
+        self.assertTrue(hasattr(GitHubPullSnapshot, "omissions"))
         self.assertEqual(
             {name for name in GitHubGateway.__dict__ if not name.startswith("_")},
             {
@@ -168,7 +177,7 @@ class TestGitHubGateway(unittest.TestCase):
         with self.assertRaisesRegex(GitHubError, "bot_identity_mismatch"):
             gw.create_issue_comment(53, "hello")
         with self.assertRaisesRegex(GitHubError, "bot_identity_mismatch"):
-            gw.create_review(53, head_sha="head-1", body="review", comments=())
+            gw.create_review(53, head_sha=HEAD_SHA, body="review", comments=())
         self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
 
     def test_reaction_failure_is_non_blocking_warning_after_identity_check(self) -> None:
@@ -183,16 +192,16 @@ class TestGitHubGateway(unittest.TestCase):
 
     def test_get_pull_ref_rejects_closed_and_wrong_repository_payloads(self) -> None:
         api = "https://api.github.test/repos/owner/repo/pulls/53"
-        for payload in (pull(state="closed"), {**pull(), "base": {"sha": "base-1", "ref": "main", "repo": {"full_name": "other/repo"}}}):
+        for payload in (pull(state="closed"), {**pull(), "base": {"sha": BASE_SHA, "ref": "main", "repo": {"full_name": "other/repo"}}}):
             gw, _ = gateway({f"GET {api}": response(payload)})
             with self.assertRaisesRegex(GitHubError, "pull_(not_open|repository_mismatch)"):
                 gw.get_pull_ref(53)
 
     def test_snapshot_rejects_stale_run_context_before_collecting(self) -> None:
         api = "https://api.github.test/repos/owner/repo/pulls/53"
-        gw, transport = gateway({f"GET {api}": response(pull(head="head-2"))})
+        gw, transport = gateway({f"GET {api}": response(pull(head="e" * 40))})
         with self.assertRaisesRegex(GitHubError, "stale_pull_ref"):
-            gw.get_pull_snapshot(53, run=run_context(head="head-1"))
+            gw.get_pull_snapshot(53, run=run_context(head=HEAD_SHA))
         self.assertEqual(len(transport.calls), 1)
 
     def test_snapshot_requires_a_fixed_run_context_before_collecting(self) -> None:
@@ -211,19 +220,21 @@ class TestGitHubGateway(unittest.TestCase):
         routes = {
             f"GET {api}/pulls/53": response(pull()),
             f"GET {api}/pulls/53/files?per_page=100": response(files),
-            f"GET {api}/git/trees/base-1?recursive=1": response({"tree": [
+            f"GET {api}/git/commits/{BASE_SHA}": response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}),
+            f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}),
+            f"GET {api}/git/trees/{BASE_TREE_SHA}?recursive=1": response({"tree": [
                 {"path": "deleted.py", "mode": "100644", "type": "blob", "sha": "base-delete"},
                 {"path": "old.py", "mode": "100644", "type": "blob", "sha": "base-old"},
             ]}),
-            "GET https://api.github.test/repos/source/repo/git/trees/head-1?recursive=1": response({"tree": [
+            f"GET https://api.github.test/repos/source/repo/git/trees/{HEAD_TREE_SHA}?recursive=1": response({"tree": [
                 {"path": "new.py", "mode": "100755", "type": "blob", "sha": "head-new"},
             ]}),
-            f"GET {api}/contents/deleted.py?ref=base-1": response({"sha": "base-delete", "content": "b2xk", "encoding": "base64"}),
-            f"GET {api}/contents/old.py?ref=base-1": response({"sha": "base-old", "content": "b2xk", "encoding": "base64"}),
-            "GET https://api.github.test/repos/source/repo/contents/new.py?ref=head-1": response({"sha": "head-new", "content": "bmV3", "encoding": "base64"}),
-            f"GET {api}/contents/missing.py?ref=base-1": response({"message": "missing"}, status=404),
-            "GET https://api.github.test/repos/source/repo/contents/missing.py?ref=head-1": response({"message": "missing"}, status=404),
-            f"GET {api}/commits/head-1/check-runs?per_page=100": response({"check_runs": []}),
+            f"GET {api}/contents/deleted.py?ref={BASE_SHA}": response({"sha": "base-delete", "content": "b2xk", "encoding": "base64"}),
+            f"GET {api}/contents/old.py?ref={BASE_SHA}": response({"sha": "base-old", "content": "b2xk", "encoding": "base64"}),
+            f"GET https://api.github.test/repos/source/repo/contents/new.py?ref={HEAD_SHA}": response({"sha": "head-new", "content": "bmV3", "encoding": "base64"}),
+            f"GET {api}/contents/missing.py?ref={BASE_SHA}": response({"message": "missing"}, status=404),
+            f"GET https://api.github.test/repos/source/repo/contents/missing.py?ref={HEAD_SHA}": response({"message": "missing"}, status=404),
+            f"GET {api}/commits/{HEAD_SHA}/check-runs?per_page=100": response({"check_runs": []}),
             f"GET {api}/contents/AGENTS.md?ref=main": response({"message": "missing"}, status=404),
             f"GET {api}/contents/.github/qykw.toml?ref=main": response({"message": "missing"}, status=404),
         }
@@ -245,15 +256,41 @@ class TestGitHubGateway(unittest.TestCase):
         self.assertIn("head_mode_missing:missing.py", snapshot.omissions)
         self.assertIn("trusted_rule_missing:AGENTS.md", snapshot.omissions)
 
+    def test_added_file_has_only_fixed_head_content_and_mode(self) -> None:
+        api = "https://api.github.test/repos/owner/repo"
+        routes = {
+            f"GET {api}/pulls/53": response(pull()),
+            f"GET {api}/pulls/53/files?per_page=100": response([changed("added.py", status="added")]),
+            f"GET {api}/git/commits/{BASE_SHA}": response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}),
+            f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}),
+            f"GET {api}/git/trees/{BASE_TREE_SHA}?recursive=1": response({"tree": []}),
+            f"GET https://api.github.test/repos/source/repo/git/trees/{HEAD_TREE_SHA}?recursive=1": response({"tree": [{"path": "added.py", "mode": "100755", "type": "blob", "sha": "added-blob"}]}),
+            f"GET https://api.github.test/repos/source/repo/contents/added.py?ref={HEAD_SHA}": response({"sha": "added-blob", "content": "YWRkZWQ=", "encoding": "base64"}),
+            f"GET {api}/commits/{HEAD_SHA}/check-runs?per_page=100": response({"check_runs": []}),
+            f"GET {api}/contents/AGENTS.md?ref=main": response({"message": "missing"}, status=404),
+            f"GET {api}/contents/.github/qykw.toml?ref=main": response({"message": "missing"}, status=404),
+        }
+        gw, _ = gateway(routes)
+        snapshot = gw.get_pull_snapshot(53, run=run_context())
+        added = snapshot.changed_files[0]
+        self.assertIsNone(added.base_content)
+        self.assertIsNone(added.base_mode)
+        self.assertEqual(added.head_content, "added")
+        self.assertEqual(added.head_mode, "100755")
+        self.assertNotIn("base_content_missing:added.py", snapshot.omissions)
+        self.assertNotIn("base_mode_missing:added.py", snapshot.omissions)
+
     def test_consecutive_snapshots_keep_their_own_immutable_omissions(self) -> None:
         api = "https://api.github.test/repos/owner/repo"
         missing = response({"message": "missing"}, status=404)
         routes = {
             f"GET {api}/pulls/53": [response(pull()), response(pull())],
             f"GET {api}/pulls/53/files?per_page=100": [response([]), response([])],
-            f"GET {api}/git/trees/base-1?recursive=1": [response({"tree": []}), response({"tree": []})],
-            "GET https://api.github.test/repos/source/repo/git/trees/head-1?recursive=1": [response({"tree": []}), response({"tree": []})],
-            f"GET {api}/commits/head-1/check-runs?per_page=100": [response({"check_runs": []}), response({"check_runs": []})],
+            f"GET {api}/git/commits/{BASE_SHA}": [response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}}), response({"sha": BASE_SHA, "tree": {"sha": BASE_TREE_SHA}})],
+            f"GET https://api.github.test/repos/source/repo/git/commits/{HEAD_SHA}": [response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}}), response({"sha": HEAD_SHA, "tree": {"sha": HEAD_TREE_SHA}})],
+            f"GET {api}/git/trees/{BASE_TREE_SHA}?recursive=1": [response({"tree": []}), response({"tree": []})],
+            f"GET https://api.github.test/repos/source/repo/git/trees/{HEAD_TREE_SHA}?recursive=1": [response({"tree": []}), response({"tree": []})],
+            f"GET {api}/commits/{HEAD_SHA}/check-runs?per_page=100": [response({"check_runs": []}), response({"check_runs": []})],
             f"GET {api}/contents/AGENTS.md?ref=main": [missing, response({"sha": "a", "content": "cnVsZQ==", "encoding": "base64"})],
             f"GET {api}/contents/.github/qykw.toml?ref=main": [missing, missing],
         }
@@ -277,7 +314,7 @@ class TestGitHubGateway(unittest.TestCase):
 
     def test_typed_file_selection_rejects_mismatched_context_before_content_read(self) -> None:
         api = "https://api.github.test/repos/owner/repo/pulls/53"
-        gw, transport = gateway({f"GET {api}": response(pull(head="head-2"))})
+        gw, transport = gateway({f"GET {api}": response(pull(head="e" * 40))})
         with self.assertRaisesRegex(GitHubError, "stale_pull_ref"):
             gw.get_file_for_run(run_context(), "safe.py", DiffSide.RIGHT)
         self.assertEqual(len(transport.calls), 1)
@@ -291,21 +328,21 @@ class TestGitHubGateway(unittest.TestCase):
         })
         review_id = gw.create_review(
             53,
-            head_sha="head-1",
+            head_sha=HEAD_SHA,
             body="body",
             comments=(InlineComment("deleted.py", 7, DiffSide.LEFT, "note", "f"),),
         )
         self.assertEqual(review_id, 9)
         body = json.loads(transport.calls[-1][2].decode("utf-8"))  # type: ignore[union-attr]
-        self.assertEqual(body["commit_id"], "head-1")
+        self.assertEqual(body["commit_id"], HEAD_SHA)
         self.assertEqual(body["comments"][0]["side"], "LEFT")
         self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
 
     def test_review_stale_head_does_not_write_or_authenticate(self) -> None:
         api = "https://api.github.test/repos/owner/repo"
-        gw, transport = gateway({f"GET {api}/pulls/53": response(pull(head="head-2"))})
+        gw, transport = gateway({f"GET {api}/pulls/53": response(pull(head="e" * 40))})
         with self.assertRaisesRegex(GitHubError, "stale_pull_ref"):
-            gw.create_review(53, head_sha="head-1", body="body", comments=())
+            gw.create_review(53, head_sha=HEAD_SHA, body="body", comments=())
         self.assertEqual([method for method, _, _ in transport.calls], ["GET"])
 
     def test_tokens_are_not_in_error_text_or_repr(self) -> None:

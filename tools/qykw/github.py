@@ -48,7 +48,9 @@ class GitHubGateway(Protocol):
 
     def get_pull_ref(self, pr_number: int) -> PullRef: ...
 
-    def get_pull_snapshot(self, pr_number: int, *, run: RunContext) -> PullSnapshot: ...
+    def get_pull_snapshot(
+        self, pr_number: int, *, run: RunContext
+    ) -> GitHubPullSnapshot: ...
 
     def get_head_sha(self, pr_number: int) -> str: ...
 
@@ -133,7 +135,9 @@ class HttpGitHubGateway:
         payload = self._read_json(self._repo_path(f"pulls/{_pr_number(pr_number)}"))
         return self._parse_pull_ref(payload, pr_number)
 
-    def get_pull_snapshot(self, pr_number: int, *, run: RunContext) -> PullSnapshot:
+    def get_pull_snapshot(
+        self, pr_number: int, *, run: RunContext
+    ) -> GitHubPullSnapshot:
         if not isinstance(run, RunContext):
             raise GitHubError("invalid_run_context")
         pull_payload = self._read_json(self._repo_path(f"pulls/{_pr_number(pr_number)}"))
@@ -253,7 +257,7 @@ class HttpGitHubGateway:
         return tuple(self._changed_file(item) for item in self._list_changed_file_payloads(pr_number))
 
     def list_check_runs(self, head_sha: str) -> tuple[CheckRun, ...]:
-        _validate_ref(head_sha)
+        _validate_git_sha(head_sha)
         url = self._repo_path(f"commits/{quote(head_sha, safe='')}/check-runs?per_page=100")
         payloads = self._paginate_list(url, list_key="check_runs")
         return tuple(
@@ -330,7 +334,7 @@ class HttpGitHubGateway:
         body: str,
         comments: tuple[InlineComment, ...],
     ) -> int:
-        _validate_ref(head_sha)
+        _validate_git_sha(head_sha)
         serialized_comments = []
         for comment in comments:
             serialized_comments.append(
@@ -374,9 +378,9 @@ class HttpGitHubGateway:
         source_head_ref = _string(head.get("ref"), "invalid_pull")
         target_base_sha = _string(base.get("sha"), "invalid_pull")
         target_base_ref = _string(base.get("ref"), "invalid_pull")
-        _validate_ref(source_head_sha)
+        _validate_git_sha(source_head_sha)
         _validate_ref(source_head_ref)
-        _validate_ref(target_base_sha)
+        _validate_git_sha(target_base_sha)
         _validate_ref(target_base_ref)
         return PullRef(
             number=expected_number,
@@ -480,11 +484,12 @@ class HttpGitHubGateway:
         self, repository: str, ref: str, label: str
     ) -> tuple[Mapping[str, tuple[str, str]], list[str]]:
         _validate_repository(repository)
-        _validate_ref(ref)
+        _validate_git_sha(ref)
+        tree_sha = self._get_commit_tree_sha(repository, ref)
         payload = _mapping(
             self._read_json(
                 self._repo_path(
-                    f"git/trees/{quote(ref, safe='')}?recursive=1", repository=repository
+                    f"git/trees/{quote(tree_sha, safe='')}?recursive=1", repository=repository
                 )
             ),
             "invalid_tree",
@@ -506,6 +511,26 @@ class HttpGitHubGateway:
             )
         omissions = [f"{label}_tree_truncated"] if payload.get("truncated") is True else []
         return tree, omissions
+
+    def _get_commit_tree_sha(self, repository: str, commit_sha: str) -> str:
+        payload = _mapping(
+            self._read_json(
+                self._repo_path(
+                    f"git/commits/{quote(commit_sha, safe='')}", repository=repository
+                )
+            ),
+            "invalid_git_commit",
+        )
+        returned_sha = _string(payload.get("sha"), "invalid_git_commit")
+        _validate_git_sha(returned_sha)
+        if returned_sha != commit_sha:
+            raise GitHubError("git_commit_mismatch")
+        tree_sha = _string(
+            _mapping(payload.get("tree"), "invalid_git_commit").get("sha"),
+            "invalid_git_commit",
+        )
+        _validate_git_sha(tree_sha)
+        return tree_sha
 
     def _get_file_at_ref(
         self, path: str, ref: str, *, repository: str, purpose: str
@@ -653,8 +678,10 @@ class HttpGitHubGateway:
             # internally from a PullRef; validate that they remain repo paths.
             if len(parts) < 4 or parts[2] not in {"contents", "git"}:
                 raise GitHubError("unsafe_url")
-            if parts[2] == "git" and (len(parts) != 5 or parts[3] != "trees"):
-                raise GitHubError("unsafe_url")
+            if parts[2] == "git":
+                if len(parts) != 5 or parts[3] not in {"commits", "trees"}:
+                    raise GitHubError("unsafe_url")
+                _validate_git_sha(parts[4])
             _validate_repository(f"{parts[0]}/{parts[1]}")
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
@@ -682,6 +709,11 @@ def _validate_repository(value: str) -> None:
 def _validate_ref(value: str) -> None:
     if not isinstance(value, str) or not value or len(value) > 256 or ".." in value or any(char.isspace() or ord(char) < 32 for char in value):
         raise GitHubError("invalid_ref")
+
+
+def _validate_git_sha(value: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise GitHubError("invalid_git_sha")
 
 
 def _validate_login(value: str) -> None:
