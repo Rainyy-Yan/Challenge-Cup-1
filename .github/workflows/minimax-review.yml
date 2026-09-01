@@ -1,4 +1,4 @@
-name: MiniMax code review
+name: qykw review
 
 on:
   pull_request_target:

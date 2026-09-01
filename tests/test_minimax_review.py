@@ -14,7 +14,7 @@ class TestReviewConfig(unittest.TestCase):
         env = {
             "GITHUB_TOKEN": "github-token",
             "MINIMAX_API_KEY": "minimax-key",
-            "MINIMAX_REVIEW_BOT_LOGIN": "qiyuankaiwu-code-reviewer[bot]",
+            "MINIMAX_REVIEW_BOT_LOGIN": "qykw[bot]",
             "GITHUB_REPOSITORY": "owner/repo",
             "PR_NUMBER": "12",
         }
@@ -26,7 +26,7 @@ class TestReviewConfig(unittest.TestCase):
         self.assertEqual(config.pr_number, 12)
         self.assertEqual(
             config.bot_login,
-            "qiyuankaiwu-code-reviewer[bot]",
+            "qykw[bot]",
         )
 
     def test_missing_secret_is_rejected_without_echoing_values(self) -> None:
@@ -94,11 +94,12 @@ class TestReviewOutput(unittest.TestCase):
         with self.assertRaisesRegex(minimax_review.ReviewError, "no review content"):
             minimax_review.extract_review_content({"choices": []})
 
-    def test_comment_has_stable_marker_and_model(self) -> None:
+    def test_comment_omits_redundant_heading(self) -> None:
         comment = minimax_review.render_comment("## Summary\nSafe", "MiniMax-M3")
 
         self.assertTrue(comment.startswith("<!-- minimax-code-review -->"))
-        self.assertIn("MiniMax code review", comment)
+        self.assertNotIn("## MiniMax code review", comment)
+        self.assertIn("## Summary\nSafe", comment)
         self.assertIn("Model: `MiniMax-M3`", comment)
 
     def test_only_the_configured_app_comment_is_updated(self) -> None:
@@ -120,7 +121,7 @@ class TestReviewOutput(unittest.TestCase):
             },
             {
                 "id": 40,
-                "user": {"login": "qiyuankaiwu-code-reviewer[bot]"},
+                "user": {"login": "qykw[bot]"},
                 "body": "<!-- minimax-code-review --> app review",
             },
         ]
@@ -128,7 +129,7 @@ class TestReviewOutput(unittest.TestCase):
         self.assertEqual(
             minimax_review.find_bot_comment_id(
                 comments,
-                bot_login="qiyuankaiwu-code-reviewer[bot]",
+                bot_login="qykw[bot]",
             ),
             40,
         )
@@ -139,7 +140,7 @@ class TestReviewOutput(unittest.TestCase):
             minimax_api_key="minimax-key",
             repository="owner/repo",
             pr_number=12,
-            bot_login="qiyuankaiwu-code-reviewer[bot]",
+            bot_login="qykw[bot]",
         )
         events: list[str] = []
 
@@ -192,7 +193,7 @@ class TestReviewOutput(unittest.TestCase):
             minimax_api_key="minimax-key",
             repository="owner/repo",
             pr_number=12,
-            bot_login="qiyuankaiwu-code-reviewer[bot]",
+            bot_login="qykw[bot]",
         )
         events: list[str] = []
 

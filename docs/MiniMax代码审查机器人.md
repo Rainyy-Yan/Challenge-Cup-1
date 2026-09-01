@@ -1,6 +1,6 @@
-# MiniMax 代码审查机器人
+# qykw 代码审查机器人
 
-机器人在 PR 创建、重新打开、转为 Ready 或推送新提交时运行，并由 `qiyuankaiwu-code-reviewer[bot]` 发布或更新一条中文审查评论。它只读取 PR 差异，不检出或执行待审分支代码。
+机器人在 PR 创建、重新打开、转为 Ready 或推送新提交时运行，并由 `qykw[bot]` 发布或更新一条中文审查评论。它只读取 PR 差异，不检出或执行待审分支代码。
 
 运行开始后，同一条评论会先显示 `😄 正在审查，请稍候…`，完成后替换为正式结果；若审查失败，则替换为失败提示并引导查看 Actions 日志。
 
@@ -18,9 +18,9 @@ gh secret set MINIMAX_REVIEW_APP_PRIVATE_KEY --repo xyh202131/Challenge-Cup
 - `MINIMAX_BASE_URL`：默认 `https://api.minimaxi.com/v1`
 - `MINIMAX_MODEL`：默认 `MiniMax-M3`
 - `MINIMAX_REVIEW_APP_CLIENT_ID`：GitHub App Client ID
-- `MINIMAX_REVIEW_BOT_LOGIN`：`qiyuankaiwu-code-reviewer[bot]`
+- `MINIMAX_REVIEW_BOT_LOGIN`：`qykw[bot]`
 
-可在 Actions 页面手动运行 `MiniMax code review`，输入 PR 编号进行复查。
+可在 Actions 页面手动运行 `qykw review`，输入 PR 编号进行复查。
 
 ## 安全与成本边界
 

@@ -146,7 +146,6 @@ def render_comment(review: str, model: str) -> str:
     """Render a stable comment body that can be updated on later pushes."""
     return (
         f"{BOT_MARKER}\n"
-        "## MiniMax code review\n\n"
         f"{review.strip()}\n\n"
         "---\n"
         f"Model: `{model}` · Automated review; verify findings before merging."
