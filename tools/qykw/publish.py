@@ -27,12 +27,16 @@ _HTML = re.compile(r"<[^>]{0,512}>")
 _AUTOLINK = re.compile(r"<\s*(?:https?|mailto):[^>]{0,2048}>", re.IGNORECASE)
 _IMAGE = re.compile(r"!\[([^\]]{0,512})\]\([^)]{0,2048}\)")
 _LINK = re.compile(r"\[([^\]]{0,512})\]\([^)]{0,2048}\)")
-_URI_SCHEME = re.compile(r"\b(?![A-Za-z]:[\\/])[A-Za-z][A-Za-z0-9+.\-]{0,63}:\s*[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
-_OBFUSCATED_SCHEME = re.compile(r"\b(?:java\s*script|vb\s*script)\s*:\s*[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
-_SPACED_SCHEME = re.compile(r"\b(?:[A-Za-z]\s+){1,32}[A-Za-z]\s*:\s*[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
-_SCHEME_RELATIVE = re.compile(r"(?<![:\w])//[^\s<>\[\]()`]{1,2048}")
+_URI_SCHEME = re.compile(r"\b(?![A-Za-z]:[\\/])[A-Za-z][A-Za-z0-9+.\-]{0,63}:(?!\s)[^\s<>\[\]()`]{1,2048}", re.IGNORECASE)
+_DANGEROUS_OBFUSCATED_SCHEME = re.compile(
+    r"\b(?:j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t|v\s*b\s*s\s*c\s*r\s*i\s*p\s*t|"
+    r"d\s*a\s*t\s*a|f\s*i\s*l\s*e|m\s*a\s*i\s*l\s*t\s*o|h\s*t\s*t\s*p\s*s?|f\s*t\s*p|s\s*s\s*h)\s*:\s*[^\s<>\[\]()`]{1,2048}",
+    re.IGNORECASE,
+)
+_EXTERNAL_HOST = r"(?:localhost|(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9A-Fa-f:.]+\])"
+_SCHEME_RELATIVE = re.compile(r"(?<![:\w])//(?=" + _EXTERNAL_HOST + r"(?::\d+)?(?:[/?#]|\s|$))[^\s<>\[\]()`]{1,2048}")
 _WWW = re.compile(r"\bwww\.[^\s<>\[\]()`]{1,2048}", re.IGNORECASE)
-_ENCODED_SCHEME = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,63}%3a[^\s<>\[\]()`]{0,2048}", re.IGNORECASE)
+_ENCODED_SCHEME = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,63}%3a(?!\s)[^\s<>\[\]()`]{1,2048}", re.IGNORECASE)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _MARKDOWN = re.compile(r"([`*_{}\[\]<>#+|])")
 _SEVERITY_ORDER = {Severity.P0: 0, Severity.P1: 1, Severity.P2: 2}
@@ -268,8 +272,7 @@ def _safe_text(value: object) -> str:
     text = _LINK.sub(r"\1", text)
     text = _HTML.sub("", text)
     text = _URI_SCHEME.sub("", text)
-    text = _OBFUSCATED_SCHEME.sub("", text)
-    text = _SPACED_SCHEME.sub("", text)
+    text = _DANGEROUS_OBFUSCATED_SCHEME.sub("", text)
     text = _SCHEME_RELATIVE.sub("", text)
     text = _WWW.sub("", text)
     text = _ENCODED_SCHEME.sub("", text)

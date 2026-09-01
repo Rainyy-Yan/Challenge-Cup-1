@@ -214,16 +214,34 @@ class TestReviewPublisher(unittest.TestCase):
 
     def test_sanitizer_removes_all_uri_schemes_without_damaging_chinese_or_windows_paths(self) -> None:
         gateway = FakeGateway()
-        unsafe = "ftp://x file:///x data:text/html,javascript ssh://x custom:thing //host java script:alert h t t p : //x [link](ssh://x) <FTP://x>"
+        unsafe = "ftp://x file:///x data:text/html,javascript ssh://x custom:thing //host.example java script:alert h t t p : //x [link](ssh://x) <FTP://x>"
         noisy = Finding("src/a.py", 3, DiffSide.RIGHT, Severity.P1, unsafe,
             "说明：保留；Windows C:\\work\\file.txt 与 C:/work/file.txt", "ok", "ok", "ok", "uri")
         result = ReviewPublisher(gateway, FakeState()).publish_review(run(), review(noisy))
         public = result.summary_body + "\n" + gateway.inline_batches[0][0].body
-        for forbidden in ("ftp:", "file:", "data:", "javascript", "ssh:", "custom:", "//host", "h t t p", "[link]"):
+        for forbidden in ("ftp:", "file:", "data:", "javascript", "ssh:", "custom:", "//host.example", "h t t p", "[link]"):
             self.assertNotIn(forbidden, public.lower())
         self.assertIn("说明：保留", public)
         self.assertIn("C:\\work\\file.txt", public)
         self.assertIn("C:/work/file.txt", public)
+
+    def test_sanitizer_preserves_normal_labels_and_source_comments(self) -> None:
+        cases = (
+            ("Failure: timeout", "Failure: timeout"),
+            ("Version: 1", "Version: 1"),
+            ("证据：正常", "证据：正常"),
+            ("x //comment", "x //comment"),
+            ("// TODO keep", "// TODO keep"),
+            ("C:\\work\\file.txt and C:/work/file.txt", "C:\\work\\file.txt"),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                gateway = FakeGateway()
+                normal = Finding("src/a.py", 3, DiffSide.RIGHT, Severity.P1,
+                    source, "impact", "evidence", "suggestion", "verify", "normal")
+                result = ReviewPublisher(gateway, FakeState()).publish_review(run(), review(normal))
+                public = result.summary_body + "\n" + gateway.inline_batches[0][0].body
+                self.assertIn(expected, public)
 
     def test_real_store_recovers_context_after_status_and_review_summary_updates(self) -> None:
         gateway = RoundTripGateway()
