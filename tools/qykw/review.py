@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 import hashlib
 
 from tools.qykw.domain import (
-    ChangedLine, ContextPlan, CoverageReport, DiffSide, Finding, FindingCandidate,
+    ChangedLine, ContextChunk, ContextPlan, CoverageReport, DiffSide, Finding, FindingCandidate,
     PullSnapshot, ReviewResult, RunContext, Severity,
 )
 from tools.qykw.prompts import build_review_request, build_triage_request, build_validation_request
@@ -17,6 +18,12 @@ _MAX_CANDIDATES = 100
 _MAX_TEXT = 2_000
 _MAX_FINDINGS = 100
 _SEVERITY_ORDER = {Severity.P0: 0, Severity.P1: 1, Severity.P2: 2}
+
+
+@dataclass(frozen=True)
+class _SourcedCandidate:
+    candidate: FindingCandidate
+    chunk_id: str
 
 
 class ReviewEngine:
@@ -32,15 +39,21 @@ class ReviewEngine:
         if not _same_review_identity(run, snapshot, plan):
             raise ValueError("review_identity_mismatch")
         try:
-            candidates = list(self._candidates(build_triage_request(run, plan.manifest)))
+            _validate_plan_chunks(run, plan)
+            self._triage(build_triage_request(run, plan.manifest), plan)
+            candidates: list[_SourcedCandidate] = []
             for chunk in plan.chunks:
-                candidates.extend(self._candidates(build_review_request(run, chunk)))
-            validation = self._validation(build_validation_request(run, tuple(candidates)))
+                candidates.extend(self._review_candidates(build_review_request(run, chunk, plan=plan), chunk))
+            validation = self._validation(build_validation_request(
+                run,
+                tuple(item.candidate for item in candidates),
+                candidate_sources=tuple(item.chunk_id for item in candidates),
+            ))
             if validation is None:
                 return _failure(plan.coverage)
             conclusion, retained, notes, limitations = validation
             allowed = _validation_intersection(candidates, retained)
-            findings = validate_findings(allowed, commentable_lines=plan.commentable_lines,
+            findings = validate_findings((item.candidate for item in allowed), commentable_lines=plan.commentable_lines,
                                          max_findings=self.max_findings, manifest_order=plan.manifest.risk_order)
             return ReviewResult(
                 conclusion,
@@ -52,12 +65,20 @@ class ReviewEngine:
         except Exception:
             return _failure(plan.coverage)
 
-    def _candidates(self, request: object) -> tuple[FindingCandidate, ...]:
+    def _triage(self, request: object, plan: ContextPlan) -> tuple[str, ...]:
         validate_provider_capabilities(self.provider, request)  # type: ignore[arg-type]
         response = self.provider.complete(request)  # type: ignore[arg-type]
-        parsed = _parse_candidate_envelope(response.value)
+        priorities = parse_triage_response(response.value, plan.manifest.paths)
+        if priorities is None:
+            raise ValueError("invalid_triage_response")
+        return priorities
+
+    def _review_candidates(self, request: object, chunk: object) -> tuple[_SourcedCandidate, ...]:
+        validate_provider_capabilities(self.provider, request)  # type: ignore[arg-type]
+        response = self.provider.complete(request)  # type: ignore[arg-type]
+        parsed = _parse_review_candidate_envelope(response.value, chunk)
         if parsed is None:
-            raise ValueError("invalid_candidate_response")
+            raise ValueError("invalid_review_response")
         return parsed
 
     def _validation(self, request: object) -> tuple[str, tuple[FindingCandidate, ...], tuple[str, ...], tuple[str, ...]] | None:
@@ -72,6 +93,20 @@ def parse_candidates(value: object) -> tuple[FindingCandidate, ...]:
     return () if parsed is None else parsed
 
 
+def parse_triage_response(value: object, manifest_paths: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Accept only bounded manifest priorities; triage cannot create findings."""
+    if not isinstance(value, Mapping) or set(value) != {"priorities"}:
+        return None
+    priorities = value.get("priorities")
+    if not isinstance(priorities, list) or len(priorities) > len(manifest_paths):
+        return None
+    if any(not isinstance(path, str) or path not in manifest_paths for path in priorities):
+        return None
+    if len(set(priorities)) != len(priorities):
+        return None
+    return tuple(priorities)
+
+
 def _parse_candidate_envelope(value: object) -> tuple[FindingCandidate, ...] | None:
     if not isinstance(value, Mapping) or set(value) != {"candidates"}:
         return None
@@ -80,6 +115,28 @@ def _parse_candidate_envelope(value: object) -> tuple[FindingCandidate, ...] | N
         return None
     parsed = tuple(_parse_candidate(item) for item in raw)
     return parsed if all(item is not None for item in parsed) else None  # type: ignore[return-value]
+
+
+def _parse_review_candidate_envelope(value: object, chunk: object) -> tuple[_SourcedCandidate, ...] | None:
+    if not isinstance(chunk, ContextChunk):
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"candidates"}:
+        return None
+    raw = value.get("candidates")
+    if not isinstance(raw, list) or len(raw) > _MAX_CANDIDATES:
+        return None
+    parsed: list[_SourcedCandidate] = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != _CANDIDATE_FIELDS | {"source_chunk_id"}:
+            return None
+        source_chunk_id = item.get("source_chunk_id")
+        if not isinstance(source_chunk_id, str) or source_chunk_id != chunk.chunk_id:
+            return None
+        candidate = _parse_candidate({key: item[key] for key in _CANDIDATE_FIELDS})
+        if candidate is None or candidate.path not in chunk.paths:
+            return None
+        parsed.append(_SourcedCandidate(candidate, source_chunk_id))
+    return tuple(parsed)
 
 
 def parse_validation_response(value: object) -> tuple[str, tuple[FindingCandidate, ...], tuple[str, ...], tuple[str, ...]] | None:
@@ -145,13 +202,13 @@ def _text_list(value: object) -> tuple[str, ...] | None:
 
 def _same_review_identity(run: RunContext, snapshot: PullSnapshot, plan: ContextPlan) -> bool:
     return (snapshot.number == run.pr_number == plan.pr_number and snapshot.target_repository == run.repository == plan.repository
-            and snapshot.source_head_sha == run.source_head_sha == plan.source_head_sha and plan.run_id == run.run_id
+            and snapshot.source_head_sha == run.source_head_sha == plan.source_head_sha and _plan_id_matches(run, plan)
             and snapshot.target_base_sha == run.target_base_sha and snapshot.target_base_ref == run.target_base_ref
             and snapshot.source_repository == run.source_repository)
 
 
-def _validation_intersection(candidates: Iterable[FindingCandidate], retained: Iterable[FindingCandidate]) -> tuple[FindingCandidate, ...]:
-    candidate_keys = {_candidate_key(item): item for item in candidates}
+def _validation_intersection(candidates: Iterable[_SourcedCandidate], retained: Iterable[FindingCandidate]) -> tuple[_SourcedCandidate, ...]:
+    candidate_keys = {_candidate_key(item.candidate): item for item in candidates}
     return tuple(candidate_keys[key] for key in (_candidate_key(item) for item in retained) if key in candidate_keys)
 
 
@@ -187,3 +244,25 @@ def _normalized(value: str) -> str:
 
 def _failure(coverage: CoverageReport) -> ReviewResult:
     return ReviewResult("审查未完成", (), coverage, ("结构化审查结果不可用。",), ("本次未发布未经验证的发现。",))
+
+
+def _validate_plan_chunks(run: RunContext, plan: ContextPlan) -> None:
+    if not _plan_id_matches(run, plan) or len({chunk.chunk_id for chunk in plan.chunks}) != len(plan.chunks):
+        raise ValueError("invalid_plan_chunk_binding")
+    prefix = (
+        f"P run={run.run_id} rid={run.repository_id} repo={run.repository} pr={run.pr_number} "
+        f"bs={run.target_base_sha} br={run.target_base_ref} hs={run.source_head_sha} "
+    )
+    for chunk in plan.chunks:
+        if (not chunk.chunk_id.startswith(f"{plan.run_id}|chunk=") or not chunk.paths
+                or any(path not in plan.manifest.paths for path in chunk.paths)
+                or not chunk.text.startswith(prefix)):
+            raise ValueError("invalid_plan_chunk_binding")
+
+
+def _plan_id_matches(run: RunContext, plan: ContextPlan) -> bool:
+    expected = (
+        f"run_id={run.run_id}|repository_id={run.repository_id}|repository={run.repository}|pr={run.pr_number}"
+        f"|base_sha={run.target_base_sha}|base_ref={run.target_base_ref}|head_sha={run.source_head_sha}"
+    )
+    return plan.run_id in {run.run_id, expected}

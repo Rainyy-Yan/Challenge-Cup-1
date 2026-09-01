@@ -195,18 +195,51 @@ class TestQykwPromptBuilders(unittest.TestCase):
             "verification",
         }
         for build, result_field in (
-            (lambda: build_triage_request(run(), manifest()), "candidates"),
             (lambda: build_review_request(run(), context_chunk()), "candidates"),
             (lambda: build_validation_request(run(), candidates()), "findings"),
         ):
             with self.subTest(schema_name=build().schema_name):
                 request = build()
                 item_schema = finding_item_schema(request, result_field)
-                self.assertEqual(set(item_schema["required"]), expected_fields)
+                expected = expected_fields | ({"source_chunk_id"} if result_field == "candidates" else set())
+                self.assertEqual(set(item_schema["required"]), expected)
                 self.assertEqual(
                     item_schema["properties"]["side"]["enum"], ["LEFT", "RIGHT"]
                 )
                 assert_strict_objects(self, request.schema)
+
+    def test_review_chunk_idempotency_is_per_chunk_and_replay_stable(self) -> None:
+        first = ContextChunk("chunk-one", ("src/app.py",), "first", 1)
+        second = ContextChunk("chunk-two", ("src/app.py",), "second", 1)
+        first_request = build_review_request(run(), first)
+        self.assertEqual(first_request.idempotency_key, build_review_request(run(), first).idempotency_key)
+        self.assertNotEqual(first_request.idempotency_key, build_review_request(run(), second).idempotency_key)
+        self.assertEqual(first_request.payload["untrusted"]["context"]["chunk_id"], "chunk-one")
+
+    def test_review_builder_rejects_chunk_not_bound_to_the_current_plan(self) -> None:
+        foreign = ContextChunk("foreign-chunk", ("src/app.py",), "foreign", 1)
+        with self.assertRaises(PromptError):
+            build_review_request(run(), foreign, plan=context_plan())
+
+    def test_review_builder_rejects_embedded_provenance_mismatch(self) -> None:
+        forged = ContextChunk("chunk-1", ("src/app.py",), "P run=other repo=other\ncode", 1)
+        forged_plan = replace(context_plan(), chunks=(forged,))
+        with self.assertRaises(PromptError):
+            build_review_request(run(), forged, plan=forged_plan)
+
+    def test_triage_schema_has_only_manifest_priorities_not_line_findings(self) -> None:
+        request = build_triage_request(run(), manifest())
+        self.assertEqual(set(request.schema["properties"]), {"priorities"})
+        item = request.schema["properties"]["priorities"]["items"]
+        self.assertEqual(set(item), {"type", "minLength"})
+        self.assertNotIn("candidates", request.schema["properties"])
+
+    def test_validation_batch_id_is_stable_for_replay_and_changes_with_candidates(self) -> None:
+        same = build_validation_request(run(), candidates())
+        self.assertEqual(same.idempotency_key, build_validation_request(run(), candidates()).idempotency_key)
+        changed = (replace(candidates()[0], evidence="different fixed evidence"),)
+        self.assertNotEqual(same.idempotency_key, build_validation_request(run(), changed).idempotency_key)
+        self.assertIn("batch_id", same.payload["untrusted"])
 
     def test_every_builder_propagates_only_typed_trusted_rules(self) -> None:
         builders = (

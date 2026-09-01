@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 
 from tools.qykw.context import estimate_tokens
@@ -95,7 +96,7 @@ def build_triage_request(
         run,
         request_kind="triage",
         stage=RunStage.ANALYZING,
-        schema=_candidate_schema("triage"),
+        schema=_triage_schema(),
         task="Prioritize concrete review risks from the supplied file manifest.",
         trusted=_trusted_section(run, trusted_rules),
         untrusted={"manifest": _manifest_data(manifest)},
@@ -106,17 +107,23 @@ def build_review_request(
     run: RunContext,
     chunk: ContextChunk,
     trusted_rules: tuple[RepositoryFile, ...] = (),
+    *,
+    plan: ContextPlan | None = None,
 ) -> InferenceRequest:
     """Build a deep-review request for one untrusted context chunk."""
+
+    if plan is not None:
+        _validate_review_chunk_binding(run, plan, chunk)
 
     return _request(
         run,
         request_kind="review",
         stage=RunStage.ANALYZING,
-        schema=_candidate_schema("review"),
+        schema=_review_candidate_schema(),
         task="Find only concrete, evidence-backed issues in this context chunk.",
         trusted=_trusted_section(run, trusted_rules),
         untrusted={"context": _chunk_data(chunk)},
+        idempotency_suffix=_stable_id("chunk", chunk.chunk_id),
     )
 
 
@@ -124,8 +131,13 @@ def build_validation_request(
     run: RunContext,
     candidates: tuple[FindingCandidate, ...],
     trusted_rules: tuple[RepositoryFile, ...] = (),
+    *,
+    candidate_sources: tuple[str, ...] | None = None,
 ) -> InferenceRequest:
     """Build a targeted counterexample and finding-validation request."""
+
+    sources = _candidate_sources(candidates, candidate_sources)
+    batch_id = _stable_id("batch", _serialized_candidate_batch(candidates, sources))
 
     return _request(
         run,
@@ -134,7 +146,11 @@ def build_validation_request(
         schema=_validation_schema(),
         task="Validate candidates with concrete counterexamples and retain only sound findings.",
         trusted=_trusted_section(run, trusted_rules),
-        untrusted={"candidates": [_candidate_data(candidate) for candidate in candidates]},
+        untrusted={
+            "batch_id": batch_id,
+            "candidates": [_candidate_data(candidate, source_chunk_id=source) for candidate, source in zip(candidates, sources)],
+        },
+        idempotency_suffix=batch_id,
     )
 
 
@@ -166,6 +182,7 @@ def _request(
     trusted: Mapping[str, object],
     untrusted: Mapping[str, object],
     input_budget_tokens: int | None = None,
+    idempotency_suffix: str | None = None,
 ) -> InferenceRequest:
     """Create the common, fixed envelope for one versioned request kind."""
 
@@ -176,7 +193,7 @@ def _request(
         reasoning_profile="maximum",
         deadline_seconds=_DEADLINE_SECONDS,
         max_output_tokens=_MAX_OUTPUT_TOKENS,
-        idempotency_key=f"{run.idempotency_key}:{request_kind}",
+        idempotency_key=f"{run.idempotency_key}:{request_kind}" + (f":{idempotency_suffix}" if idempotency_suffix else ""),
         schema_name=f"{PROMPT_VERSION}-{request_kind}",
         schema=schema,
         payload={
@@ -236,6 +253,18 @@ def _candidate_schema(kind: str) -> Mapping[str, object]:
     return _schema(kind, {"candidates": _finding_array()})
 
 
+def _triage_schema() -> Mapping[str, object]:
+    """Triage can prioritize manifest entries but can never emit line findings."""
+
+    return _schema("triage", {"priorities": {"type": "array", "items": {"type": "string", "minLength": 1}}})
+
+
+def _review_candidate_schema() -> Mapping[str, object]:
+    """Deep-review candidates must prove their source context chunk."""
+
+    return _schema("review", {"candidates": _finding_array(include_source_chunk=True)})
+
+
 def _validation_schema() -> Mapping[str, object]:
     """Return the strict output schema for reviewed findings."""
 
@@ -286,36 +315,41 @@ def _schema(kind: str, properties: Mapping[str, object]) -> Mapping[str, object]
     }
 
 
-def _finding_array() -> Mapping[str, object]:
+def _finding_array(*, include_source_chunk: bool = False) -> Mapping[str, object]:
     """Return a strict array whose entries bind each finding to a diff line."""
 
+    required = [
+        "path",
+        "line",
+        "side",
+        "severity",
+        "failure_path",
+        "impact",
+        "evidence",
+        "suggestion",
+        "verification",
+    ]
+    properties: dict[str, object] = {
+        "path": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+        "side": {"type": "string", "enum": ["LEFT", "RIGHT"]},
+        "severity": {"type": "string", "enum": ["P0", "P1", "P2"]},
+        "failure_path": {"type": "string", "minLength": 1},
+        "impact": {"type": "string", "minLength": 1},
+        "evidence": {"type": "string", "minLength": 1},
+        "suggestion": {"type": "string", "minLength": 1},
+        "verification": {"type": "string", "minLength": 1},
+    }
+    if include_source_chunk:
+        required.append("source_chunk_id")
+        properties["source_chunk_id"] = {"type": "string", "minLength": 1}
     return {
         "type": "array",
         "items": {
             "type": "object",
             "additionalProperties": False,
-            "required": [
-                "path",
-                "line",
-                "side",
-                "severity",
-                "failure_path",
-                "impact",
-                "evidence",
-                "suggestion",
-                "verification",
-            ],
-            "properties": {
-                "path": {"type": "string", "minLength": 1},
-                "line": {"type": "integer", "minimum": 1},
-                "side": {"type": "string", "enum": ["LEFT", "RIGHT"]},
-                "severity": {"type": "string", "enum": ["P0", "P1", "P2"]},
-                "failure_path": {"type": "string", "minLength": 1},
-                "impact": {"type": "string", "minLength": 1},
-                "evidence": {"type": "string", "minLength": 1},
-                "suggestion": {"type": "string", "minLength": 1},
-                "verification": {"type": "string", "minLength": 1},
-            },
+            "required": required,
+            "properties": properties,
         },
     }
 
@@ -594,10 +628,10 @@ def _serialized_tokens(value: object) -> int:
     return estimate_tokens(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
-def _candidate_data(candidate: FindingCandidate) -> Mapping[str, object]:
+def _candidate_data(candidate: FindingCandidate, *, source_chunk_id: str | None = None) -> Mapping[str, object]:
     """Encode a candidate as untrusted data for adversarial validation."""
 
-    return {
+    value: dict[str, object] = {
         "path": candidate.path,
         "line": candidate.line,
         "side": candidate.side.value,
@@ -608,3 +642,37 @@ def _candidate_data(candidate: FindingCandidate) -> Mapping[str, object]:
         "suggestion": candidate.suggestion,
         "verification": candidate.verification,
     }
+    if source_chunk_id is not None:
+        value["source_chunk_id"] = source_chunk_id
+    return value
+
+
+def _candidate_sources(candidates: tuple[FindingCandidate, ...], sources: tuple[str, ...] | None) -> tuple[str, ...]:
+    if sources is None:
+        return tuple("unbound" for _ in candidates)
+    if len(sources) != len(candidates) or any(not isinstance(item, str) or not item for item in sources):
+        raise PromptError("invalid_candidate_sources")
+    return sources
+
+
+def _serialized_candidate_batch(candidates: tuple[FindingCandidate, ...], sources: tuple[str, ...]) -> str:
+    return json.dumps([_candidate_data(candidate, source_chunk_id=source) for candidate, source in zip(candidates, sources)], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _stable_id(prefix: str, value: str) -> str:
+    return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _validate_review_chunk_binding(run: RunContext, plan: ContextPlan, chunk: ContextChunk) -> None:
+    expected_plan = (
+        f"run_id={run.run_id}|repository_id={run.repository_id}|repository={run.repository}|pr={run.pr_number}"
+        f"|base_sha={run.target_base_sha}|base_ref={run.target_base_ref}|head_sha={run.source_head_sha}"
+    )
+    provenance_prefix = (
+        f"P run={run.run_id} rid={run.repository_id} repo={run.repository} pr={run.pr_number} "
+        f"bs={run.target_base_sha} br={run.target_base_ref} hs={run.source_head_sha} "
+    )
+    if (plan.repository != run.repository or plan.pr_number != run.pr_number
+            or plan.source_head_sha != run.source_head_sha or plan.run_id not in {run.run_id, expected_plan}
+            or chunk not in plan.chunks or not chunk.text.startswith(provenance_prefix)):
+        raise PromptError("review_chunk_provenance_mismatch")

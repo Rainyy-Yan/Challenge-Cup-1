@@ -21,8 +21,10 @@ def snapshot() -> PullSnapshot:
 
 def plan() -> ContextPlan:
     coverage = CoverageReport(2, 2, 2, 2, (), True)
-    return ContextPlan("owner/repo", 7, "h" * 40, "QY-PR7-A1B2", FileManifest(("src/a.py", "src/b.py"), ("src/b.py", "src/a.py")),
-        (ContextChunk("c-a", ("src/a.py",), "context-a", 2), ContextChunk("c-b", ("src/b.py",), "context-b", 2)), coverage,
+    identity = f"run_id={run().run_id}|repository_id=7|repository=owner/repo|pr=7|base_sha={'b' * 40}|base_ref=main|head_sha={'h' * 40}"
+    prefix = f"P run={run().run_id} rid=7 repo=owner/repo pr=7 bs={'b' * 40} br=main hs={'h' * 40}"
+    return ContextPlan("owner/repo", 7, "h" * 40, identity, FileManifest(("src/a.py", "src/b.py"), ("src/b.py", "src/a.py")),
+        (ContextChunk(f"{identity}|chunk=1", ("src/a.py",), f"{prefix} path=src/a.py\ncontext-a", 2), ContextChunk(f"{identity}|chunk=2", ("src/b.py",), f"{prefix} path=src/b.py\ncontext-b", 2)), coverage,
         frozenset({ChangedLine("src/a.py", 3, DiffSide.RIGHT), ChangedLine("src/a.py", 2, DiffSide.LEFT), ChangedLine("src/b.py", 9, DiffSide.RIGHT)}), 1000, 20_000)
 
 
@@ -37,6 +39,10 @@ def candidate_value(item: FindingCandidate) -> dict[str, object]:
     return {"path": item.path, "line": item.line, "side": item.side.value, "severity": item.severity.value,
             "failure_path": item.failure_path, "impact": item.impact, "evidence": item.evidence,
             "suggestion": item.suggestion, "verification": item.verification}
+
+
+def review_candidate_value(item: FindingCandidate, chunk_id: str) -> dict[str, object]:
+    return dict(candidate_value(item), source_chunk_id=chunk_id)
 
 
 class RecordingProvider:
@@ -91,7 +97,8 @@ class TestReviewEngine(unittest.TestCase):
         accepted = candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
             failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test"))
         provider = RecordingProvider([
-            {"candidates": []}, {"candidates": [rejected]}, {"candidates": [accepted]},
+            {"priorities": []}, {"candidates": [review_candidate_value(candidate(), plan().chunks[0].chunk_id)]}, {"candidates": [review_candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
+            failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test"), plan().chunks[1].chunk_id)]},
             {"conclusion": "validated", "findings": [accepted], "validation_notes": ["counterexample checked"], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
@@ -103,7 +110,7 @@ class TestReviewEngine(unittest.TestCase):
 
     def test_engine_fails_closed_for_raw_empty_and_cross_run_context(self) -> None:
         from tools.qykw.review import ReviewEngine
-        for values in (({"candidates": []}, "raw"), ({"candidates": []}, {"candidates": []}, {"candidates": []}, {"conclusion": "x", "findings": [], "validation_notes": [], "limitations": [], "extra": 1})):
+        for values in (({"priorities": []}, "raw"), ({"priorities": []}, {"candidates": []}, {"candidates": []}, {"conclusion": "x", "findings": [], "validation_notes": [], "limitations": [], "extra": 1})):
             with self.subTest(values=values):
                 result = ReviewEngine(RecordingProvider(list(values)), max_findings=20).review(run(), snapshot(), plan())
                 self.assertEqual(result.findings, ())
@@ -122,12 +129,47 @@ class TestReviewEngine(unittest.TestCase):
     def test_success_has_deterministic_validation_and_limitation_notes(self) -> None:
         from tools.qykw.review import ReviewEngine
         provider = RecordingProvider([
-            {"candidates": []}, {"candidates": []}, {"candidates": []},
+            {"priorities": []}, {"candidates": []}, {"candidates": []},
             {"conclusion": "未发现", "findings": [], "validation_notes": [], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
         self.assertTrue(result.validation_notes)
         self.assertTrue(result.limitations)
+
+    def test_triage_candidate_shape_cannot_reach_validation_or_publication(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        guessed = candidate_value(candidate())
+        provider = RecordingProvider([{"candidates": [guessed]}, {"candidates": []}, {"candidates": []},
+                                      {"conclusion": "validated", "findings": [guessed], "validation_notes": [], "limitations": []}])
+        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertEqual(result.conclusion, "审查未完成")
+        self.assertEqual(result.findings, ())
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_only_bound_deep_candidates_reach_validation_and_publication(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        deep = candidate(path="src/b.py", line=9, severity=Severity.P1,
+            failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test")
+        bound = review_candidate_value(deep, plan().chunks[1].chunk_id)
+        provider = RecordingProvider([
+            {"priorities": ["src/a.py"]}, {"candidates": []}, {"candidates": [bound]},
+            {"conclusion": "validated", "findings": [candidate_value(deep)], "validation_notes": [], "limitations": []},
+        ])
+        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        validation_input = provider.calls[-1].payload["untrusted"]["candidates"]
+        self.assertEqual([item["source_chunk_id"] for item in validation_input], [plan().chunks[1].chunk_id])
+        self.assertEqual([(item.path, item.line) for item in result.findings], [("src/b.py", 9)])
+
+    def test_candidate_for_another_chunk_is_rejected_before_validation(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        guessed = review_candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
+            failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test"), plan().chunks[0].chunk_id)
+        provider = RecordingProvider([{"priorities": []}, {"candidates": [guessed]}, {"candidates": []},
+                                      {"conclusion": "validated", "findings": [], "validation_notes": [], "limitations": []}])
+        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(result.conclusion, "审查未完成")
+        self.assertEqual(result.findings, ())
 
 
 if __name__ == "__main__":

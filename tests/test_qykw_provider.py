@@ -192,11 +192,32 @@ def good_response(value: dict[str, object] | None = None) -> TransportResponse:
         json.dumps(
             {
                 "id": "safe-request-id",
-                "output": {"value": value or {"candidates": []}},
+                "output": {"value": value or empty_response_value()},
                 "usage": {"input_tokens": 10, "output_tokens": 3},
             }
         ).encode(),
     )
+
+
+def empty_response_value() -> object:
+    return _empty_schema_value(request().schema)
+
+
+def _empty_schema_value(schema: object) -> object:
+    """Produce the smallest valid result for the current strict request schema."""
+    assert isinstance(schema, dict)
+    if schema["type"] == "object":
+        return {
+            name: _empty_schema_value(schema["properties"][name])
+            for name in schema["required"]
+        }
+    if schema["type"] == "array":
+        return []
+    if schema["type"] == "string":
+        return "x" * max(1, schema.get("minLength", 0))
+    if schema["type"] == "integer":
+        return schema.get("minimum", 0)
+    raise AssertionError("unsupported test schema")
 
 
 def secure_provider(
@@ -301,7 +322,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
                 with self.assertRaisesRegex(ProviderError, "endpoint_(not_allowed|invalid)"):
                     secure_provider(RecordingTransport([good_response()]), base_url=url).complete(request())
         canonical = secure_provider(RecordingTransport([good_response()]), base_url="https://allowed.example./v1").complete(request())
-        self.assertEqual(canonical.value, {"candidates": []})
+        self.assertEqual(canonical.value, empty_response_value())
 
     def test_capabilities_are_checked_before_dns_or_transport(self) -> None:
         transport = RecordingTransport([good_response()])
@@ -342,7 +363,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
                 transport = RecordingTransport([failure, good_response()])
                 sleeps: list[float] = []
                 response = secure_provider(transport, sleep=sleeps.append).complete(request())
-                self.assertEqual(response.value, {"candidates": []})
+                self.assertEqual(response.value, empty_response_value())
                 self.assertEqual(transport.calls, 2)
                 self.assertEqual(sleeps, [0.1])
 
@@ -370,7 +391,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
             sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
         ).complete(replace(request(), deadline_seconds=1))
 
-        self.assertEqual(result.value, {"candidates": []})
+        self.assertEqual(result.value, empty_response_value())
         self.assertEqual([item.timeout_seconds for item in transport.requests], [1.0, 0.5])
 
     def test_stalled_resolver_is_deadline_bounded_without_transport(self) -> None:
@@ -552,7 +573,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         malformed = TransportResponse(
             200,
             {"content-type": "application/json"},
-            json.dumps({"id": "one", "output": {"value": {"candidates": []}}, "extra": 1}).encode(),
+            json.dumps({"id": "one", "output": {"value": empty_response_value()}, "extra": 1}).encode(),
         )
         with self.assertRaisesRegex(ProviderError, "invalid_response"):
             secure_provider(RecordingTransport([malformed])).complete(request())
@@ -570,7 +591,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         ):
             with self.subTest(usage=usage):
                 body = json.dumps(
-                    {"id": "safe-request-id", "output": {"value": {"candidates": []}}, "usage": usage}
+                    {"id": "safe-request-id", "output": {"value": empty_response_value()}, "usage": usage}
                 ).encode()
                 response = TransportResponse(200, {"content-type": "application/json"}, body)
                 with self.assertRaisesRegex(ProviderError, "invalid_response"):
