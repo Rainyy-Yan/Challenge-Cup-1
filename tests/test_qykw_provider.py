@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -216,7 +217,7 @@ def secure_provider(
         max_output_tokens=8_000,
         timeout_seconds=timeout_seconds,
         transport=transport,
-        dns_resolver=dns or (lambda _host, _port: ("93.184.216.34",)),
+        dns_resolver=dns or (lambda _host, _port, _remaining: ("93.184.216.34",)),
         clock=clock or (lambda: 0.0),
         sleep=sleep or (lambda _seconds: None),
     )
@@ -246,9 +247,9 @@ class TestResponsesInferenceProvider(unittest.TestCase):
 
     def test_rejects_private_literal_and_private_dns_before_transport(self) -> None:
         cases = (
-            ("https://127.0.0.1/v1", lambda _h, _p: ("127.0.0.1",)),
-            ("https://allowed.example/v1", lambda _h, _p: ("10.0.0.2",)),
-            ("https://allowed.example/v1", lambda _h, _p: ("::1",)),
+            ("https://127.0.0.1/v1", lambda _h, _p, _r: ("127.0.0.1",)),
+            ("https://allowed.example/v1", lambda _h, _p, _r: ("10.0.0.2",)),
+            ("https://allowed.example/v1", lambda _h, _p, _r: ("::1",)),
         )
         for url, dns in cases:
             with self.subTest(url=url):
@@ -269,7 +270,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
             with self.subTest(resolved=resolved):
                 transport = RecordingTransport([good_response()])
                 with self.assertRaisesRegex(ProviderError, "endpoint_blocked"):
-                    secure_provider(transport, dns=lambda _host, _port: (resolved,)).complete(request())
+                    secure_provider(transport, dns=lambda _host, _port, _remaining: (resolved,)).complete(request())
                 self.assertEqual(transport.calls, 0)
 
     def test_malformed_schema_is_rejected_before_resolver_or_transport(self) -> None:
@@ -277,7 +278,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         dns_calls: list[object] = []
         provider = secure_provider(
             transport,
-            dns=lambda host, port: (dns_calls.append((host, port)) or ("93.184.216.34",)),
+            dns=lambda host, port, _remaining: (dns_calls.append((host, port)) or ("93.184.216.34",)),
         )
         for schema in (
             {"type": "object", "properties": {}, "required": []},
@@ -304,7 +305,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         dns_calls: list[object] = []
         provider = secure_provider(
             transport,
-            dns=lambda host, port: (dns_calls.append((host, port)) or ("93.184.216.34",)),
+            dns=lambda host, port, _remaining: (dns_calls.append((host, port)) or ("93.184.216.34",)),
         )
 
         with self.assertRaises(InferenceError):
@@ -368,6 +369,49 @@ class TestResponsesInferenceProvider(unittest.TestCase):
 
         self.assertEqual(result.value, {"candidates": []})
         self.assertEqual([item.timeout_seconds for item in transport.requests], [1.0, 0.5])
+
+    def test_stalled_resolver_is_deadline_bounded_without_transport(self) -> None:
+        def stalled_resolver(_host: str, _port: int, _remaining: float) -> tuple[str, ...]:
+            time.sleep(10)
+            return ("93.184.216.34",)
+
+        transport = RecordingTransport([good_response()])
+        started = time.monotonic()
+        with self.assertRaisesRegex(ProviderError, "deadline_exceeded"):
+            secure_provider(
+                transport,
+                dns=stalled_resolver,
+                clock=time.monotonic,
+            ).complete(replace(request(), deadline_seconds=0.05))
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(transport.calls, 0)
+
+    def test_resolver_receives_decreasing_remaining_deadline_on_retry(self) -> None:
+        now = [0.0]
+        budgets: list[float] = []
+
+        class RetryingTransport:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def send(self, _transport_request: object) -> TransportResponse:
+                self.calls += 1
+                if self.calls == 1:
+                    now[0] = 0.4
+                    raise TransportFailure(TransportFailureKind.TLS_HANDSHAKE)
+                return good_response()
+
+        def resolver(_host: str, _port: int, remaining: float) -> tuple[str, ...]:
+            budgets.append(remaining)
+            return ("93.184.216.34",)
+
+        secure_provider(
+            RetryingTransport(),
+            dns=resolver,
+            clock=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        ).complete(replace(request(), deadline_seconds=1))
+        self.assertEqual(budgets, [1.0, 0.5])
 
     def test_expired_deadline_does_not_start_a_retry(self) -> None:
         now = [0.0]
