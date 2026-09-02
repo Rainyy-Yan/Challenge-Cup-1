@@ -103,11 +103,13 @@ class _LandmarkParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.ids = []
+        self.elements = {}
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
         if values.get("id"):
             self.ids.append(values["id"])
+            self.elements[values["id"]] = (tag, values)
 
 
 class TestOnlineFrontend(unittest.TestCase):
@@ -126,6 +128,18 @@ class TestOnlineFrontend(unittest.TestCase):
 
         self.assertIn("function sourceWithLink", controller)
         self.assertIn("sourceWithLink(kb.source)", controller)
+
+    def test_async_alert_and_evidence_disclosure_have_accessible_defaults(self):
+        parser = _LandmarkParser()
+        parser.feed(Path("web/index.html").read_text(encoding="utf-8"))
+
+        alert_tag, alert_attrs = parser.elements["uiAlert"]
+        evidence_tag, evidence_attrs = parser.elements["evidencePanel"]
+        self.assertEqual(alert_tag, "div")
+        self.assertEqual(alert_attrs.get("role"), "alert")
+        self.assertEqual(evidence_tag, "details")
+        self.assertIn("hidden", evidence_attrs)
+        self.assertNotIn("open", evidence_attrs)
 
 
 if __name__ == "__main__":
