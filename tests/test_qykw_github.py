@@ -330,6 +330,30 @@ class TestGitHubGateway(unittest.TestCase):
         with self.assertRaisesRegex(GitHubError, "unsafe_path"):
             gw.get_file_for_run(run_context(), "../AGENTS.md", DiffSide.RIGHT)
 
+    def test_contents_api_base64_accepts_github_line_wrapping_only(self) -> None:
+        api = "https://api.github.test/repos/owner/repo"
+        for encoded in ("Y29u\ndGVu\ndA==\n", "Y29u\r\ndGVu\r\ndA==\r\n"):
+            with self.subTest(encoded=repr(encoded)):
+                gw, _ = gateway({
+                    f"GET {api}/contents/AGENTS.md?ref=main": response({
+                        "sha": "a", "content": encoded, "encoding": "base64",
+                    }),
+                    f"GET {api}/contents/.github/qykw.toml?ref=main": response(
+                        {"message": "missing"}, status=404
+                    ),
+                })
+                self.assertEqual(gw.get_default_branch_rules()[0].content, "content")
+
+        for encoded in ("Y29u dGVudA==", "Y29u\tdGVudA==", "Y29u%dGVudA=="):
+            with self.subTest(invalid=repr(encoded)):
+                gw, _ = gateway({
+                    f"GET {api}/contents/AGENTS.md?ref=main": response({
+                        "sha": "a", "content": encoded, "encoding": "base64",
+                    }),
+                })
+                with self.assertRaisesRegex(GitHubError, "invalid_repository_file"):
+                    gw.get_default_branch_rules()
+
     def test_typed_file_selection_rejects_mismatched_context_before_content_read(self) -> None:
         api = "https://api.github.test/repos/owner/repo/pulls/53"
         gw, transport = gateway({f"GET {api}": response(pull(head="e" * 40))})

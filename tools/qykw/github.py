@@ -555,8 +555,9 @@ class HttpGitHubGateway:
         if _string(value.get("encoding"), "invalid_repository_file") != "base64":
             raise GitHubError("invalid_repository_file")
         try:
-            content = base64.b64decode(encoded.encode("ascii"), validate=True).decode("utf-8")
-        except (UnicodeDecodeError, ValueError) as error:
+            compact = encoded.replace("\r", "").replace("\n", "")
+            content = base64.b64decode(compact.encode("ascii"), validate=True).decode("utf-8")
+        except (UnicodeError, ValueError) as error:
             raise GitHubError("invalid_repository_file") from error
         return RepositoryFile(
             path=path,
