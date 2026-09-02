@@ -317,9 +317,31 @@ class TestQykwPromptBuilders(unittest.TestCase):
     def test_public_identity_contains_only_qykw(self) -> None:
         request = build_triage_request(run(), manifest())
         serialized = json.dumps(request.payload, ensure_ascii=False)
+        forbidden_identity_pattern = re.compile(
+            "|".join(("Mini" + "Max", "Open" + "AI", "G" + "PT")),
+            re.IGNORECASE,
+        )
 
         self.assertIn("启元开物独立工程审查机器人 qykw", serialized)
-        self.assertNotRegex(serialized, re.compile(r"MiniMax|minimax|OpenAI|GPT", re.IGNORECASE))
+        for forbidden_identity in (
+            "Mini" + "Max",
+            "mini" + "max",
+            "MINI" + "MAX",
+            "MiNi" + "MaX",
+            "Open" + "AI",
+            "open" + "ai",
+            "G" + "PT",
+            "g" + "pt",
+        ):
+            with self.subTest(forbidden_identity=forbidden_identity):
+                self.assertRegex(forbidden_identity, forbidden_identity_pattern)
+        for independent_identity in (
+            "启元开物独立工程审查机器人 qykw",
+            "QYKW independent engineering review",
+        ):
+            with self.subTest(independent_identity=independent_identity):
+                self.assertNotRegex(independent_identity, forbidden_identity_pattern)
+        self.assertNotRegex(serialized, forbidden_identity_pattern)
 
     def test_prompt_coalesces_contiguous_commentable_lines_without_mutating_local_map(self) -> None:
         lines = frozenset(
