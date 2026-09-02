@@ -11,13 +11,20 @@ from datetime import datetime
 from pathlib import Path
 from statistics import NormalDist
 
+from config import (
+    FORMAL_KAPPA_MIN,
+    TARGET_ADAPT,
+    TARGET_COVERAGE,
+    TARGET_HALLUCINATION,
+)
+
 
 HALLUCINATION_LABELS = {"yes", "no", "unassessable"}
 ADAPTATION_LABELS = {"correct", "incorrect", "unassessable"}
-HALLUCINATION_THRESHOLD = 0.05
-ADAPTATION_THRESHOLD = 0.85
-COVERAGE_THRESHOLD = 0.90
-KAPPA_THRESHOLD = 0.60
+HALLUCINATION_THRESHOLD = TARGET_HALLUCINATION
+ADAPTATION_THRESHOLD = TARGET_ADAPT
+COVERAGE_THRESHOLD = TARGET_COVERAGE
+KAPPA_THRESHOLD = FORMAL_KAPPA_MIN
 
 
 def _quality_gates(
@@ -565,8 +572,10 @@ def validate_truth(data: dict) -> list[str]:
             (adaptations, ADAPTATION_LABELS, "adaptation"),
         ):
             kappa = _kappa_from_records(records, reviewer_ids, allowed)["value"]
-            if kappa is None or kappa < 0.60:
-                errors.append(f"{metric} kappa is below 0.60 or undefined")
+            if kappa is None or kappa < KAPPA_THRESHOLD:
+                errors.append(
+                    f"{metric} kappa is below {KAPPA_THRESHOLD:.2f} or undefined"
+                )
     return errors
 
 

@@ -580,6 +580,41 @@ class TestTruthValidation(unittest.TestCase):
 
 
 class TestScorecard(unittest.TestCase):
+    def test_scorecard_thresholds_come_from_config(self):
+        script = """
+import json
+import config
+config.TARGET_HALLUCINATION = 0.123
+config.TARGET_ADAPT = 0.789
+config.TARGET_COVERAGE = 0.654
+config.FORMAL_KAPPA_MIN = 0.432
+from evalkit import formal_scorecard
+card = formal_scorecard._not_assessable_scorecard({}, [])
+print(json.dumps({
+    "hallucination": card["hallucination_rate"]["threshold"],
+    "adaptation": card["adaptation_accuracy"]["threshold"],
+    "coverage": card["coverage"]["threshold"],
+    "kappa": card["data_quality"]["thresholds"]["minimum_kappa"],
+}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "hallucination": 0.123,
+                "adaptation": 0.789,
+                "coverage": 0.654,
+                "kappa": 0.432,
+            },
+        )
+
     def test_complete_truth_that_meets_every_conservative_gate_passes(self):
         scorecard = build_scorecard(passing_truth())
 
