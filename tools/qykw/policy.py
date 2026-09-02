@@ -142,10 +142,27 @@ _PLACEHOLDER_WORDS = frozenset(
         "fake",
         "sample",
         "changeme",
+        "change",
+        "me",
+        "before",
+        "use",
         "your",
         "redacted",
         "xxx",
+        "token",
+        "value",
+        "api",
+        "key",
+        "here",
+        "password",
+        "auth",
+        "secret",
+        "for",
     }
+)
+_PLACEHOLDER_TEMPLATE = re.compile(
+    r"[a-z0-9]+(?:[-_./: ]+[a-z0-9]+)*",
+    re.IGNORECASE,
 )
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
@@ -698,35 +715,23 @@ def _contains_high_confidence_secret(content: str) -> bool:
         return True
     for match in _SECRET_ASSIGNMENT.finditer(content):
         value = match.group("quoted") or match.group("unquoted")
-        if _looks_like_secret_value(value):
+        if not _is_placeholder_secret_value(value):
             return True
     for match in _BEARER_VALUE.finditer(content):
-        if _looks_like_secret_value(match.group("value")):
+        if not _is_placeholder_secret_value(match.group("value")):
             return True
     for match in _NETRC_PASSWORD.finditer(content):
         value = match.group("machine_value") or match.group("line_value")
-        if _looks_like_secret_value(value, minimum_length=8):
+        if not _is_placeholder_secret_value(value):
             return True
     return False
 
 
-def _looks_like_secret_value(value: str, *, minimum_length: int = 16) -> bool:
-    if _KNOWN_SECRET.search(value):
-        return True
-    normalized = value.casefold()
-    words = frozenset(re.findall(r"[a-z0-9]+", normalized))
-    compact = re.sub(r"[^a-z0-9]", "", normalized)
-    if words & _PLACEHOLDER_WORDS or "changeme" in compact:
+def _is_placeholder_secret_value(value: str) -> bool:
+    if _PLACEHOLDER_TEMPLATE.fullmatch(value) is None:
         return False
-    if len(value) < minimum_length or len(set(normalized)) < 8:
-        return False
-    character_classes = (
-        any(character.islower() for character in value),
-        any(character.isupper() for character in value),
-        any(character.isdigit() for character in value),
-        any(not character.isalnum() for character in value),
-    )
-    return sum(character_classes) >= 2
+    words = re.findall(r"[a-z0-9]+", value.casefold())
+    return bool(words) and all(word in _PLACEHOLDER_WORDS for word in words)
 
 
 def _validate_text(value: str, *, allow_empty: bool) -> int:

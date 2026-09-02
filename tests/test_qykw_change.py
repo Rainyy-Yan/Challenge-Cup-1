@@ -727,6 +727,40 @@ class TestPatchGeneration(unittest.TestCase):
                     )
                 self.assertEqual(provider.calls, 0)
 
+    def test_placeholder_words_do_not_exempt_non_template_credentials(self) -> None:
+        credentials = (
+            ('password="aaaaaaaaaaaaaaaa"\n', "settings.py"),
+            ('token="example-RealProdKey-A1b2C3d4"\n', "settings.py"),
+            ('password="test-ActualProduction-A1b2C3d4"\n', "settings.py"),
+            ("Authorization: Bearer aaaaaaaaaaaaaaaa\n", "header.txt"),
+            (
+                "machine api.example login bot password aaaaaaaa\n",
+                "connection.txt",
+            ),
+        )
+        for content, path in credentials:
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+                    self.generate(
+                        snapshot_value=snapshot(source),
+                        subject=policy(
+                            source_tree=tree_index(
+                                SourceTreeEntry(
+                                    path,
+                                    "100644",
+                                    "blob",
+                                    git_blob_sha(content.encode()),
+                                )
+                            )
+                        ),
+                        provider=provider,
+                    )
+                self.assertEqual(provider.calls, 0)
+
     def test_source_selection_truncates_stably_with_path_only_omissions(self) -> None:
         files = tuple(
             changed_file(f"file-{index:03}.py", content=f"value={index}\n")
