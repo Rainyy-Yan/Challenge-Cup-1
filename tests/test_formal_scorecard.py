@@ -60,6 +60,13 @@ def valid_truth() -> dict:
         },
         "provenance": {"repository_sha": "a" * 40},
         "reviewers": ["reviewer-one", "reviewer-two"],
+        "review_protocol": {
+            "human_reviewer_roster": [
+                {"id": "reviewer-one", "attested_human": True},
+                {"id": "reviewer-two", "attested_human": True},
+                {"id": "adjudicator", "attested_human": True},
+            ],
+        },
         "claims": claims,
         "adaptations": adaptations,
         "coverage_universe": [
@@ -152,23 +159,54 @@ class TestTruthValidation(unittest.TestCase):
             ["reviewers must contain exactly two distinct non-empty identities"],
         )
 
-    def test_rejects_machine_owned_reviewer_identity(self):
+    def test_rejects_reviewer_missing_from_human_roster(self):
         truth = valid_truth()
-        truth["reviewers"] = ["machine", "reviewer-two"]
+        truth["review_protocol"]["human_reviewer_roster"][0]["id"] = "someone-else"
         self.assertEqual(
             validate_truth(truth),
-            ["reviewer identities must not be machine-owned"],
+            ["reviewer reviewer-one is not declared in human_reviewer_roster"],
         )
 
-    def test_rejects_structured_machine_reviewer_tokens(self):
-        for identity in ("agent-1", "GPT_Reviewer", "agent1", "GPTReviewer"):
+    def test_declared_human_ids_may_contain_machine_like_substrings(self):
+        for identity in ("Gail", "mail-reviewer", "ecosystem-expert", "reagent-specialist"):
             with self.subTest(identity=identity):
                 truth = valid_truth()
                 truth["reviewers"] = [identity, "reviewer-two"]
-                self.assertEqual(
-                    validate_truth(truth),
-                    ["reviewer identities must not be machine-owned"],
-                )
+                truth["review_protocol"]["human_reviewer_roster"][0]["id"] = identity
+                for records in (truth["claims"], truth["adaptations"]):
+                    for record in records:
+                        record["labels"][identity] = record["labels"].pop("reviewer-one")
+                self.assertEqual(validate_truth(truth), [])
+
+    def test_rejects_false_human_attestation(self):
+        truth = valid_truth()
+        truth["review_protocol"]["human_reviewer_roster"][0]["attested_human"] = False
+        self.assertEqual(
+            validate_truth(truth),
+            ["human_reviewer_roster entry reviewer-one must set attested_human to true"],
+        )
+
+    def test_rejects_normalized_duplicate_human_roster_ids(self):
+        truth = valid_truth()
+        truth["review_protocol"]["human_reviewer_roster"].append(
+            {"id": " Reviewer-One ", "attested_human": True}
+        )
+        self.assertEqual(
+            validate_truth(truth),
+            ["duplicate human_reviewer_roster id: Reviewer-One"],
+        )
+
+    def test_rejects_adjudicator_missing_from_human_roster(self):
+        truth = valid_truth()
+        truth["claims"][0]["labels"]["reviewer-two"] = "no"
+        truth["claims"][0]["adjudicated_by"] = "unregistered-adjudicator"
+        self.assertEqual(
+            validate_truth(truth),
+            [
+                "claim claim-000 adjudicator unregistered-adjudicator is not declared "
+                "in human_reviewer_roster"
+            ],
+        )
 
     def test_rejects_exposed_system_conclusion(self):
         truth = valid_truth()

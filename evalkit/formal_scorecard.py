@@ -11,19 +11,6 @@ from statistics import NormalDist
 
 HALLUCINATION_LABELS = {"yes", "no", "unassessable"}
 ADAPTATION_LABELS = {"correct", "incorrect", "unassessable"}
-MACHINE_OWNED_IDENTITIES = {
-    "agent",
-    "ai",
-    "auto",
-    "bot",
-    "chatgpt",
-    "codex",
-    "gpt",
-    "llm",
-    "machine",
-    "model",
-    "system",
-}
 
 
 def wilson_interval(
@@ -120,12 +107,51 @@ def _normalise_identity(identity: object) -> str | None:
     return normalised or None
 
 
-def _is_machine_owned(identity: object) -> bool:
-    normalised = _normalise_identity(identity)
-    if normalised is None:
-        return False
-    canonical = re.sub(r"[^a-z0-9]+", "", normalised)
-    return any(fragment in canonical for fragment in MACHINE_OWNED_IDENTITIES)
+def _human_reviewer_roster(data: dict, errors: list[str]) -> set[str] | None:
+    """Validate identity attestations without claiming to prove real-world identity.
+
+    Roster truth is an external-evidence obligation. This function validates only
+    the explicit declaration contract supplied in the frozen truth data.
+    """
+    review_protocol = data.get("review_protocol")
+    roster = (
+        review_protocol.get("human_reviewer_roster")
+        if isinstance(review_protocol, dict)
+        else None
+    )
+    if not isinstance(roster, list):
+        errors.append("review_protocol.human_reviewer_roster must be a list")
+        return None
+
+    roster_errors_before = len(errors)
+    identities: set[str] = set()
+    for index, entry in enumerate(roster):
+        if not isinstance(entry, dict):
+            errors.append(f"human_reviewer_roster entry {index} must be an object")
+            continue
+        raw_identity = entry.get("id")
+        identity = _normalise_identity(raw_identity)
+        display_id = (
+            raw_identity.strip() if isinstance(raw_identity, str) else str(index)
+        )
+        if identity is None:
+            errors.append(f"human_reviewer_roster entry {index} needs a non-empty id")
+        elif identity in identities:
+            errors.append(f"duplicate human_reviewer_roster id: {display_id}")
+        else:
+            identities.add(identity)
+        if entry.get("attested_human") is not True:
+            errors.append(
+                f"human_reviewer_roster entry {display_id} must set attested_human to true"
+            )
+
+    if len(identities) < 3:
+        errors.append(
+            "human_reviewer_roster must contain at least 3 distinct non-empty identities"
+        )
+    if len(errors) != roster_errors_before:
+        return None
+    return identities
 
 
 def _canonical_case_id(case_id: object) -> str | None:
@@ -208,6 +234,7 @@ def _validate_records(
     key: str,
     allowed: set[str],
     reviewers: list[str] | None,
+    human_roster: set[str] | None,
     case_profiles: dict[str, str],
     errors: list[str],
 ) -> list[dict]:
@@ -268,6 +295,15 @@ def _validate_records(
         adjudicator = _normalise_identity(record.get("adjudicated_by"))
         if adjudicator_present and adjudicator is None:
             errors.append(f"{singular} {display_id} adjudicator must be a non-empty identity")
+        elif (
+            adjudicator is not None
+            and human_roster is not None
+            and adjudicator not in human_roster
+        ):
+            errors.append(
+                f"{singular} {display_id} adjudicator {record['adjudicated_by'].strip()} "
+                "is not declared in human_reviewer_roster"
+            )
         if values[0] == values[1]:
             if final_label != values[0]:
                 errors.append(f"{singular} {display_id} final_label must equal the common reviewer label")
@@ -277,8 +313,6 @@ def _validate_records(
                     errors.append(f"{singular} {display_id} has unresolved reviewer disagreement")
             elif adjudicator in reviewers:
                 errors.append(f"{singular} {display_id} adjudicator must be distinct from both reviewers")
-            elif _is_machine_owned(record.get("adjudicated_by")):
-                errors.append(f"{singular} {display_id} adjudicator must not be machine-owned")
     return accepted
 
 
@@ -307,6 +341,7 @@ def validate_truth(data: dict) -> list[str]:
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         errors.append("provenance.repository_sha must be a 40-character lowercase hexadecimal SHA")
 
+    human_roster = _human_reviewer_roster(data, errors)
     raw_reviewers = data.get("reviewers")
     reviewers = (
         [_normalise_identity(reviewer) for reviewer in raw_reviewers]
@@ -321,11 +356,15 @@ def validate_truth(data: dict) -> list[str]:
     if not reviewers_valid:
         errors.append("reviewers must contain exactly two distinct non-empty identities")
         reviewer_ids: list[str] | None = None
-    elif any(_is_machine_owned(reviewer) for reviewer in raw_reviewers):
-        errors.append("reviewer identities must not be machine-owned")
-        reviewer_ids = None
     else:
         reviewer_ids = [reviewer for reviewer in reviewers if reviewer is not None]
+        if human_roster is not None:
+            for raw_reviewer, reviewer in zip(raw_reviewers, reviewer_ids):
+                if reviewer not in human_roster:
+                    errors.append(
+                        f"reviewer {raw_reviewer.strip()} is not declared in "
+                        "human_reviewer_roster"
+                    )
 
     dataset = data.get("dataset")
     cases = dataset.get("cases") if isinstance(dataset, dict) else None
@@ -376,10 +415,22 @@ def validate_truth(data: dict) -> list[str]:
         case_profiles[canonical_case_id] = canonical_profile_id
 
     claims = _validate_records(
-        data, "claims", HALLUCINATION_LABELS, reviewer_ids, case_profiles, errors
+        data,
+        "claims",
+        HALLUCINATION_LABELS,
+        reviewer_ids,
+        human_roster,
+        case_profiles,
+        errors,
     )
     adaptations = _validate_records(
-        data, "adaptations", ADAPTATION_LABELS, reviewer_ids, case_profiles, errors
+        data,
+        "adaptations",
+        ADAPTATION_LABELS,
+        reviewer_ids,
+        human_roster,
+        case_profiles,
+        errors,
     )
     for key, records in (("claims", claims), ("adaptations", adaptations)):
         distinct_case_ids = {
@@ -463,7 +514,7 @@ def validate_truth(data: dict) -> list[str]:
 
 
 def build_scorecard(data: dict) -> dict:
-    """Build deterministic measurements from adjudicated, human-owned labels."""
+    """Build deterministic measurements from adjudicated, human-attested labels."""
     errors = validate_truth(data)
     if errors:
         raise ValueError("invalid formal truth: " + "; ".join(errors))
