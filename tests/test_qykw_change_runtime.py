@@ -115,6 +115,36 @@ def run_record() -> RunRecord:
     )
 
 
+def published_artifact() -> dict[str, object]:
+    from tools.qykw.__main__ import _change_artifact
+
+    payloads = {
+        "authorize-change": {"status": "accepted", "data": {"request": {}}},
+        "prepare-change": {
+            "status": "prepared",
+            "data": {"request": {}, "manifest": {}},
+        },
+        "verify-change": {
+            "status": "verified",
+            "data": {"request": {}, "manifest": {}, "attestation": {}},
+        },
+        "publish-change": {"status": "completed", "data": {"publication": {}}},
+    }
+    predecessor = None
+    for phase in payloads:
+        predecessor = _change_artifact(
+            phase,
+            run_payload(),
+            payloads[phase],
+            workflow_run_id=44,
+            controller_sha=CONTROLLER_SHA,
+            verification_profile="full",
+            predecessor=predecessor,
+        )
+    assert predecessor is not None
+    return predecessor
+
+
 class TestProductionChangeFactory(unittest.TestCase):
     def runtime(self, phase: str, *, runner_temp: Path | None = None) -> TrustedPhaseRuntime:
         return TrustedPhaseRuntime(
@@ -228,6 +258,7 @@ class TestProductionChangeFactory(unittest.TestCase):
         context = object()
         with (
             patch.object(change_runtime, "_run_context", return_value=context),
+            patch.object(change_runtime, "_validate_context_environment"),
             patch.object(change_runtime, "_record_terminal") as record,
         ):
             result = service.record_change_result(artifact, runtime)
@@ -235,6 +266,50 @@ class TestProductionChangeFactory(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["data"]["outcome"]["failed_phase"], "verify-change")
         record.assert_called_once_with(context, "failed", "verify-change", {})
+
+    def test_record_rejects_each_rehashed_run_identity_override(self) -> None:
+        from tools.qykw import change_runtime
+        from tools.qykw.__main__ import _validate_run
+        from tools.qykw.change_phases import (
+            _artifact_digest,
+            _context_digest,
+            validate_change_artifact,
+        )
+
+        runtime = self.runtime("record-change-result")
+        service = change_runtime._RecordServices(
+            environment={"GITHUB_REPOSITORY": "owner/repo"}
+        )
+        mutations = {
+            "run_id": "QY-PR7-TAMPERED",
+            "idempotency_key": "issue_comment:88",
+            "repository": "other/repo",
+            "repository_id": 9,
+            "pr_number": 8,
+            "event_name": "pull_request_review_comment",
+            "event_action": "edited",
+            "actor_login": "attacker",
+            "trigger_comment_id": 88,
+            "trigger_comment_kind": "review",
+            "command": {"name": "实现", "argument": "repair", "mode": "change"},
+        }
+        for field, value in mutations.items():
+            forged = copy.deepcopy(published_artifact())
+            forged["run"][field] = value
+            forged["context_digest"] = _context_digest(forged["run"], _validate_run)
+            forged["digest"] = _artifact_digest(forged)
+            validate_change_artifact(
+                forged,
+                expected_phase="publish-change",
+                validate_run=_validate_run,
+            )
+            with (
+                self.subTest(run_field=field),
+                patch.object(change_runtime, "_event_context", return_value=event_context()),
+                patch.object(change_runtime, "_record_terminal"),
+                self.assertRaisesRegex(ValueError, "invalid_change_request"),
+            ):
+                service.record_change_result(forged, runtime)
 
     def test_request_codec_rejects_repository_override_from_artifact(self) -> None:
         from tools.qykw import change_runtime

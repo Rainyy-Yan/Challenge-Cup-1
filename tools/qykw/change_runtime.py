@@ -337,6 +337,7 @@ class _RecordServices:
         self, artifact: dict[str, object], runtime: TrustedPhaseRuntime
     ) -> dict[str, object]:
         context = _run_context(artifact)
+        _validate_context_environment(context, self._environment)
         job_results = runtime.job_results
         if job_results is None:
             raise ValueError("invalid_job_results")
