@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,12 +111,13 @@ def validate_index(data: dict[str, Any], root: Path = ROOT) -> list[str]:
         missing = sorted(REQUIRED_ENTRY_FIELDS - entry.keys())
         if missing:
             errors.append(f"{prefix} missing fields: {', '.join(missing)}")
-            continue
 
-        evidence_id = entry["id"]
-        gate = entry["gate"]
-        path_text = entry["path"]
-        status = entry["status"]
+        evidence_id = entry.get("id")
+        gate = entry.get("gate")
+        category = entry.get("category")
+        path_text = entry.get("path")
+        status = entry.get("status")
+        visibility = entry.get("visibility")
         if not isinstance(evidence_id, str) or not EVIDENCE_ID.fullmatch(evidence_id):
             errors.append(f"{prefix}.id has an invalid evidence ID")
         elif evidence_id in seen_ids:
@@ -128,12 +131,12 @@ def validate_index(data: dict[str, Any], root: Path = ROOT) -> list[str]:
             covered_gates.add(gate)
             if isinstance(evidence_id, str) and not evidence_id.startswith(f"EV-{gate}-"):
                 errors.append(f"{prefix}.id does not match gate {gate}")
-        if not isinstance(entry["category"], str) or entry["category"] not in CATEGORIES:
+        if not isinstance(category, str) or category not in CATEGORIES:
             errors.append(f"{prefix}.category is not recognized")
-        if not isinstance(status, str) or status not in STATUSES:
+        valid_status = isinstance(status, str) and status in STATUSES
+        if not valid_status:
             errors.append(f"{prefix}.status is not recognized")
-        if (not isinstance(entry["visibility"], str)
-                or entry["visibility"] not in VISIBILITIES):
+        if not isinstance(visibility, str) or visibility not in VISIBILITIES:
             errors.append(f"{prefix}.visibility is not recognized")
 
         if not isinstance(path_text, str) or not _valid_repository_path(path_text):
@@ -144,18 +147,20 @@ def validate_index(data: dict[str, Any], root: Path = ROOT) -> list[str]:
             seen_paths.add(path_text)
             if any(AMBIGUOUS_NAME.search(part) for part in PurePosixPath(path_text).parts):
                 errors.append(f"{prefix}.path uses an ambiguous version name")
-            if status != "planned" and not (root / Path(*PurePosixPath(path_text).parts)).is_file():
+            if (valid_status and status != "planned"
+                    and not (root / Path(*PurePosixPath(path_text).parts)).is_file()):
                 errors.append(f"{prefix}.path does not exist: {path_text}")
 
-        related_issues = entry["related_issues"]
+        related_issues = entry.get("related_issues")
         if (not isinstance(related_issues, list) or not related_issues
                 or any(type(number) is not int or number <= 0
                        for number in related_issues)):
             errors.append(f"{prefix}.related_issues must contain positive issue numbers")
         for field in ("title", "owner", "source", "limitations"):
-            if not isinstance(entry[field], str) or not entry[field].strip():
+            value = entry.get(field)
+            if not isinstance(value, str) or not value.strip():
                 errors.append(f"{prefix}.{field} must be a non-empty string")
-        commit = entry["repo_commit"]
+        commit = entry.get("repo_commit")
         if commit is not None and (not isinstance(commit, str) or not COMMIT_SHA.fullmatch(commit)):
             errors.append(f"{prefix}.repo_commit must be null or a 40-character SHA")
         if isinstance(status, str) and status in {"candidate", "approved"} and commit is None:
@@ -174,11 +179,19 @@ def validate_index(data: dict[str, Any], root: Path = ROOT) -> list[str]:
 
 
 def _escape_cell(value: object) -> str:
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    text = str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    text = html.escape(text, quote=False).replace("`", "&#96;")
+    for marker in ("\\", "*", "_", "[", "]", "|"):
+        text = text.replace(marker, f"\\{marker}")
+    return text
 
 
 def render_markdown(data: dict[str, Any]) -> str:
     """Render a deterministic human-readable index from canonical JSON."""
+    errors = validate_index(data, ROOT)
+    if errors:
+        raise ValueError("invalid evidence index: " + "; ".join(errors))
+
     lines = [
         "# G0–G4 交付证据索引",
         "",
@@ -197,7 +210,7 @@ def render_markdown(data: dict[str, Any]) -> str:
         if entry["status"] == "planned":
             path_cell = f"`{_escape_cell(path_text)}`"
         else:
-            path_cell = f"[{_escape_cell(path_text)}](../../{path_text})"
+            path_cell = f"[{_escape_cell(path_text)}](../../{quote(path_text, safe='/')})"
         issues = "、".join(
             f"[#{number}](https://github.com/qiyuankaiwu/Challenge-Cup/issues/{number})"
             for number in entry["related_issues"]

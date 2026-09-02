@@ -22,6 +22,23 @@ class TestEvidenceIndex(unittest.TestCase):
             render_markdown(load_index()),
         )
 
+    def test_rendered_markdown_contains_every_entry_and_gate(self):
+        data = load_index()
+        rendered = render_markdown(data)
+        evidence_rows = [
+            line for line in rendered.splitlines() if line.startswith("| EV-")
+        ]
+
+        self.assertEqual(len(data["entries"]), len(evidence_rows))
+        for entry in data["entries"]:
+            self.assertTrue(
+                any(
+                    row.startswith(f"| {entry['id']} | {entry['gate']} |")
+                    for row in evidence_rows
+                ),
+                entry["id"],
+            )
+
     def test_duplicate_paths_are_rejected(self):
         data = copy.deepcopy(load_index())
         data["entries"][1]["path"] = data["entries"][0]["path"]
@@ -94,6 +111,51 @@ class TestEvidenceIndex(unittest.TestCase):
                 data["entries"][-1]["repo_commit"] = None
                 errors = validate_index(data, ROOT)
                 self.assertTrue(any("repo_commit is required" in error for error in errors))
+
+    def test_render_rejects_invalid_entries_with_value_error(self):
+        invalid_values = {"category": "unknown", "status": "unknown"}
+        for field, value in invalid_values.items():
+            with self.subTest(field=field):
+                data = copy.deepcopy(load_index())
+                data["entries"][0][field] = value
+                with self.assertRaisesRegex(ValueError, rf"\.{field}"):
+                    render_markdown(data)
+
+    def test_missing_fields_do_not_hide_duplicate_ids_or_paths(self):
+        data = copy.deepcopy(load_index())
+        data["entries"][1]["id"] = data["entries"][0]["id"]
+        data["entries"][1]["path"] = data["entries"][0]["path"]
+        del data["entries"][1]["owner"]
+
+        errors = validate_index(data, ROOT)
+
+        self.assertTrue(any("missing fields: owner" in error for error in errors))
+        self.assertTrue(any("duplicate evidence ID" in error for error in errors))
+        self.assertTrue(any("duplicate evidence path" in error for error in errors))
+
+    def test_invalid_status_does_not_trigger_path_existence_check(self):
+        data = copy.deepcopy(load_index())
+        data["entries"][-1]["status"] = []
+        data["entries"][-1]["path"] = "delivery/evidence/not-created.md"
+
+        errors = validate_index(data, ROOT)
+
+        self.assertTrue(any(".status is not recognized" in error for error in errors))
+        self.assertFalse(any(".path does not exist" in error for error in errors))
+
+    def test_markdown_cells_escape_formatting_and_html(self):
+        data = copy.deepcopy(load_index())
+        entry = data["entries"][-1]
+        entry["title"] = "<script>*bold* [link] | `code`"
+        entry["path"] = "delivery/evidence/report`draft`.md"
+
+        rendered = render_markdown(data)
+
+        self.assertIn(
+            "&lt;script&gt;\\*bold\\* \\[link\\] \\| &#96;code&#96;",
+            rendered,
+        )
+        self.assertIn("report&#96;draft&#96;.md", rendered)
 
 
 if __name__ == "__main__":
