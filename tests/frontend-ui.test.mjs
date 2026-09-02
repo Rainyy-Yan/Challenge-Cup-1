@@ -120,3 +120,44 @@ test('intake and material failures announce errors through the alert region', as
   assert.equal(elements['#uiAlert'].hidden, false);
   assert.match(elements['#uiAlert'].textContent, /请先选择要提交的资料/);
 });
+
+test('gap chart exposes each learner mastery score as visible text', () => {
+  const gapChartModel = requiredApp('gapChartModel');
+  const drawGaps = requiredApp('drawGaps');
+  const item = gapChartModel({
+    diagnosis: {gaps: ['KP-01'], mastery: [{kp: 'KP-01', name: '安全规程', score: 0.5, correct: 2, asked: 4}]},
+  })[0];
+  assert.equal(item.scoreLabel, '掌握度 50.0%');
+
+  const svg = {innerHTML: '', nodes: [], append(...nodes) { this.nodes.push(...nodes); }, appendChild(node) { this.nodes.push(node); }};
+  appSandbox.document = {
+    querySelector: selector => selector === '#chartGaps' ? svg : undefined,
+    createElementNS: () => ({setAttribute() {}, textContent: ''}),
+  };
+  requiredApp('setSession')({diagnosis: {gaps: ['KP-01'], mastery: [{kp: 'KP-01', name: '安全规程', score: 0.5, correct: 2, asked: 4}]}});
+  drawGaps();
+  assert.ok(svg.nodes.some(node => node.textContent === '掌握度 50.0% · 2/4'));
+});
+
+test('submitFb refreshes the rendered resource count after feedback returns new resources', async () => {
+  const submitFb = requiredApp('submitFb');
+  const setSession = requiredApp('setSession');
+  const element = () => ({hidden: true, textContent: '', innerHTML: '', disabled: false, value: 'KP-01', focus() {}, append() {}, appendChild() {}, insertAdjacentHTML() {}});
+  const elements = {
+    '#submitFb': element(), '#verdict': element(), '#decisionPanel': element(), '#workflowProgress': element(),
+    '#timeline': element(), '#rcount': element(), '#resources': element(), '#learningPath': element(),
+    '#fbKp': element(), '#quiz': element(), '#chartFit': element(), '#chartPath': element(), '#uiAlert': element(),
+  };
+  appSandbox.document = {
+    querySelector: selector => elements[selector],
+    querySelectorAll: selector => selector === '.feedback-question' ? [{dataset: {pick: '1', answer: '1'}}] : [],
+    createElementNS: () => ({setAttribute() {}, textContent: '', appendChild() {}}),
+  };
+  const before = {session_id: 'S-1', events: [], resources: [], diagnosis: {mastery: [], gaps: []}, path: ['KP-01'], path_names: ['安全规程'], kp_index: {'KP-01': {name: '安全规程'}}};
+  const after = {...before, resources: [{kp: 'KP-01', kind: 'guide', title: '新增资料', difficulty: 2, claims: [], body: '内容'}], decision: {action: 'advance', reason: '已掌握'}};
+  setSession(before);
+  appSandbox.fetch = async () => ({ok: true, json: async () => after});
+
+  await submitFb();
+  assert.equal(elements['#rcount'].textContent, 1);
+});
