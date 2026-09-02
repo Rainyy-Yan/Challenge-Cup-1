@@ -58,6 +58,7 @@ _MAX_TREE_REQUESTS = 20_000
 _MAX_PAGES = 100
 _MAX_PATH_BYTES = 1_024
 _MAX_WRITE_TEXT_BYTES = 64 * 1024
+_DEFINITELY_REJECTED_WRITE_STATUSES = frozenset({400, 401, 403, 404, 409, 422})
 
 
 class ChangeGitHubError(RuntimeError):
@@ -202,7 +203,7 @@ class _Client:
             if write:
                 disposition = (
                     PublicationWriteDisposition.DEFINITELY_NOT_SENT
-                    if 400 <= status < 500
+                    if status in _DEFINITELY_REJECTED_WRITE_STATUSES
                     else PublicationWriteDisposition.MAY_HAVE_BEEN_ACCEPTED
                 )
                 raise PublicationWriteError("github_write_rejected", disposition)
@@ -935,7 +936,10 @@ def _commit_tree(payload: object, expected_commit: str) -> str:
         raise ChangeGitHubError("commit_sha_mismatch")
     commit = _mapping(value.get("commit"), "invalid_commit_response")
     tree = _mapping(commit.get("tree"), "invalid_commit_response")
-    return _oid(tree.get("sha"), "invalid_commit_response")
+    tree_sha = _oid(tree.get("sha"), "invalid_commit_response")
+    if len(tree_sha) != len(actual):
+        raise ChangeGitHubError("invalid_commit_response")
+    return tree_sha
 
 
 def _pull_data(payload: object, repository: str) -> dict[str, object]:

@@ -481,6 +481,34 @@ class TestTrustedSourceTreeProvider(unittest.TestCase):
         self.assertEqual(caught.exception.code, "github_read_failed")
         self.assertNotIn("response-body-sentinel", str(caught.exception))
 
+    def test_commit_and_root_tree_oid_algorithms_must_match(self) -> None:
+        for commit_sha, root_tree_sha in (
+            ("a" * 40, "b" * 64),
+            ("a" * 64, "b" * 40),
+        ):
+            with self.subTest(
+                commit_length=len(commit_sha), tree_length=len(root_tree_sha)
+            ):
+                transport = QueueTransport()
+                transport.add(
+                    "GET",
+                    f"{API}/repos/{REPOSITORY}/commits/{commit_sha}",
+                    commit_payload(commit_sha, root_tree_sha),
+                )
+                provider = HttpTrustedSourceTreeProvider(
+                    api_url=API,
+                    repository=REPOSITORY,
+                    source_head_sha=commit_sha,
+                    token=TOKEN,
+                    transport=transport,
+                )
+
+                with self.assertRaises(ChangeGitHubError) as caught:
+                    provider.get_complete_tree(REPOSITORY, commit_sha)
+
+                self.assertEqual(caught.exception.code, "invalid_commit_response")
+                transport.assert_drained()
+
 
 class TestPublicationGateway(unittest.TestCase):
     def gateway(self, transport: QueueTransport) -> HttpChangeGitHubGateway:
@@ -757,6 +785,68 @@ class TestPublicationGateway(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "github_write_rejected")
                 self.assertIs(caught.exception.disposition, disposition)
                 self.assertNotIn("secret body", str(caught.exception))
+
+    def test_write_rejection_allowlist_is_conservative_across_write_targets(self) -> None:
+        definite_statuses = (400, 401, 403, 404, 409, 422)
+        uncertain_statuses = (405, 408, 421, 425, 429, 451, 500)
+        status_cases = tuple(
+            (status, PublicationWriteDisposition.DEFINITELY_NOT_SENT)
+            for status in definite_statuses
+        ) + tuple(
+            (status, PublicationWriteDisposition.MAY_HAVE_BEEN_ACCEPTED)
+            for status in uncertain_statuses
+        )
+        targets = (
+            (
+                "create_ref",
+                f"{API}/repos/{REPOSITORY}/git/refs",
+                lambda transport: self.gateway(transport).create_ref(
+                    repository=REPOSITORY,
+                    branch_name=BRANCH,
+                    commit_sha=HEAD,
+                ),
+            ),
+            (
+                "create_pull_request",
+                f"{API}/repos/{REPOSITORY}/pulls",
+                lambda transport: self.gateway(
+                    transport
+                ).create_draft_pull_request(
+                    repository=REPOSITORY,
+                    head=BRANCH,
+                    base="main",
+                    title="Title",
+                    body="Body",
+                ),
+            ),
+            (
+                "comment",
+                f"{API}/repos/{REPOSITORY}/issues/7/comments",
+                lambda transport: subject._Client(API, TOKEN, transport).write(
+                    f"{API}/repos/{REPOSITORY}/issues/7/comments",
+                    {"body": "review summary"},
+                ),
+            ),
+        )
+        for name, url, call in targets:
+            for status, disposition in status_cases:
+                with self.subTest(target=name, status=status):
+                    transport = QueueTransport()
+                    transport.add(
+                        "POST",
+                        url,
+                        {"message": "response-body-sentinel"},
+                        status=status,
+                    )
+
+                    with self.assertRaises(PublicationWriteError) as caught:
+                        call(transport)
+
+                    self.assertEqual(caught.exception.code, "github_write_rejected")
+                    self.assertIs(caught.exception.disposition, disposition)
+                    self.assertNotIn("response-body-sentinel", str(caught.exception))
+                    self.assertEqual(len(transport.calls), 1)
+                    transport.assert_drained()
 
     def test_local_constructor_and_argument_validation_precedes_transport(self) -> None:
         constructors = (
