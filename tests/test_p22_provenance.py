@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
+import config
 import server
+from core.retrieval import Retriever
 from orchestrator import Orchestrator, load_profile
 
 
@@ -27,6 +30,28 @@ class TestProvenancePayload(unittest.TestCase):
         self.assertIn("定位：", source["source"])
         self.assertIn("verified", source)
         self.assertIn("source_note", source)
+
+    def test_session_source_set_matches_manifest(self) -> None:
+        payload = server.session_payload(self.session_id)
+        manifest = json.loads(
+            (config.DATA / "demo_source_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            set(payload["kb"]), {record["id"] for record in manifest["records"]}
+        )
+
+    def test_source_excluded_from_demo_is_not_exposed_as_verified(self) -> None:
+        excluded = next(
+            chunk for chunk in Retriever.from_jsonl(config.KB_PATH).chunks
+            if chunk.id == "KB-015"
+        )
+        self.assertTrue(excluded.verified)
+        self.assertFalse(excluded.demo_eligible)
+        self.orchestrator.retriever.chunks.append(excluded)
+
+        payload = server.session_payload(self.session_id)
+
+        self.assertNotIn(excluded.id, payload["kb"])
 
 
 if __name__ == "__main__":

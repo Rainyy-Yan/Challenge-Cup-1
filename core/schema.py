@@ -47,6 +47,17 @@ class Chunk:
     # 但不得让它进入在线服务、离线快照或答辩展示。
     demo_eligible: bool = True
 
+    @property
+    def publicly_verified(self) -> bool:
+        """Return the verification state that is safe to expose in a Demo.
+
+        ``verified`` preserves the historical human-review record on the raw
+        knowledge-base item. A source that has since become unavailable must
+        not be presented as currently verifiable, even if that raw record is
+        still retained for internal review.
+        """
+        return self.verified and self.demo_eligible
+
 
 @dataclass
 class Mastery:

@@ -5,49 +5,52 @@
       "id": "Q-001",
       "kp": "KP-01",
       "level": 1,
-      "stem": "六自由度串联机器人中决定末端姿态的是哪三个关节轴",
+      "stem": "典型六轴机器人中主要改变工具姿态的是",
       "options": [
-        "J2至J4",
-        "J3至J5",
-        "J4至J6",
-        "J1至J3"
+        "安全回路",
+        "后三个关节",
+        "润滑系统",
+        "围栏门锁"
       ],
-      "answer": 2,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-001"
     },
     {
       "id": "Q-002",
       "kp": "KP-01",
       "level": 2,
-      "stem": "控制柜中负责处理急停与安全门信号的是",
+      "stem": "根据所列控制器资料，控制器的主要作用是",
       "options": [
-        "主控计算机板",
-        "再生电阻",
-        "伺服驱动单元",
-        "安全回路板"
+        "只保存培训记录与班次数据",
+        "执行程序并向各关节电机发送控制命令",
+        "仅提供机械臂润滑服务",
+        "控制围栏外照明系统"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-002"
     },
     {
       "id": "Q-003",
       "kp": "KP-02",
       "level": 1,
-      "stem": "示教器三位使能开关在哪种状态下伺服可以上电",
+      "stem": "ABB 所列三位使能装置用于手动移动时，哪种状态不会停止机器人运动",
       "options": [
         "中间位",
-        "任意状态",
-        "完全松开",
-        "用力按死"
+        "自动运行状态",
+        "围栏门打开状态",
+        "程序暂停状态"
       ],
       "answer": 0,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-003"
     },
     {
       "id": "Q-004",
       "kp": "KP-02",
       "level": 2,
-      "stem": "T1手动低速模式下末端移动速度上限是",
+      "stem": "所列 ABB 机型在手动模式下的最高速度是",
       "options": [
         "500毫米每秒",
         "100毫米每秒",
@@ -55,49 +58,53 @@
         "250毫米每秒"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-004"
     },
     {
       "id": "Q-005",
       "kp": "KP-03",
       "level": 2,
-      "stem": "需要将机器人从奇异点或限位处脱困时应选用",
+      "stem": "以工具中心点（TCP）和工具姿态为参照的是",
       "options": [
-        "工件坐标系",
-        "关节坐标系",
-        "直角坐标系",
+        "安全回路",
+        "负载参数",
+        "报警代码",
         "工具坐标系"
       ],
-      "answer": 1,
-      "level_source": "bank"
+      "answer": 3,
+      "level_source": "bank",
+      "source_id": "KB-005"
     },
     {
       "id": "Q-006",
       "kp": "KP-03",
       "level": 2,
-      "stem": "工具坐标系的原点位于",
+      "stem": "根据所列 ABB 资料，工具坐标系的核心参照包括",
       "options": [
-        "工件原点",
-        "工具中心点TCP",
-        "机器人基座中心",
-        "法兰中心"
+        "工具中心点和工具姿态",
+        "工件原点和加工余量",
+        "机器人基座和围栏",
+        "控制柜和示教器"
       ],
-      "answer": 1,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-005"
     },
     {
       "id": "Q-007",
       "kp": "KP-04",
       "level": 3,
-      "stem": "TCP四点标定法中四个姿态之间的夹角一般要求",
+      "stem": "使用 TCP 四点法时，四次记录应如何设置",
       "options": [
-        "不小于5度",
-        "不小于30度",
-        "越小越好",
-        "必须相等"
+        "在同一目标点记录四个不同姿态",
+        "只记录控制柜的型号",
+        "只修改围栏的高度",
+        "只更换示教器电池"
       ],
-      "answer": 1,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-006"
     },
     {
       "id": "Q-008",
@@ -111,119 +118,129 @@
         "无要求"
       ],
       "answer": 1,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "TCP 统一毫米验收阈值无当前一手来源支撑，待按机型资料重写。"
     },
     {
       "id": "Q-009",
       "kp": "KP-05",
       "level": 3,
-      "stem": "工件坐标系三点法标定的第三点应位于",
+      "stem": "用三点建立用户坐标系时，三点应满足",
       "options": [
-        "任意位置",
-        "XY平面第一象限内",
-        "Z轴上",
-        "工件对角"
+        "不能共线",
+        "必须位于同一条直线",
+        "必须与世界原点重合",
+        "必须等距分布"
       ],
-      "answer": 1,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-008"
     },
     {
       "id": "Q-010",
       "kp": "KP-06",
       "level": 2,
-      "stem": "焊接工艺段应优先选用的运动指令是",
+      "stem": "在 Yaskawa INFORM 中，需要保持工具端直线轨迹时应选用",
       "options": [
         "MOVL",
-        "任意",
-        "MOVJ",
-        "MOVC"
+        "DOUT",
+        "WAIT",
+        "CALL"
       ],
       "answer": 0,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-009"
     },
     {
       "id": "Q-011",
       "kp": "KP-06",
       "level": 3,
-      "stem": "MOVC圆弧插补至少需要几个示教点确定一段圆弧",
+      "stem": "在 Yaskawa INFORM 中，用于圆弧运动的指令是",
       "options": [
-        "两个",
-        "四个",
-        "五个",
-        "三个"
+        "DOUT",
+        "WAIT",
+        "MOVC",
+        "CALL"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-009"
     },
     {
       "id": "Q-012",
       "kp": "KP-07",
       "level": 3,
-      "stem": "关于转弯区CNT数值的说法正确的是",
+      "stem": "在 ABB RAPID 中，zonedata 用于规定",
       "options": [
-        "数值不影响节拍",
-        "只能取0或100",
-        "数值越大转弯半径越大",
-        "数值越大轨迹越贴近示教点"
+        "转向下一位置前需接近编程位置的程度",
+        "控制柜供电电压的设定范围",
+        "示教器显示画面的亮度等级",
+        "现场培训课程的排课顺序"
       ],
-      "answer": 2,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-011"
     },
     {
       "id": "Q-013",
       "kp": "KP-08",
       "level": 3,
-      "stem": "主程序进入工艺循环前应先完成",
+      "stem": "在 Yaskawa INFORM 中，调用子程序作业的形式是",
       "options": [
-        "提高运行速度",
-        "清除报警历史",
-        "关闭安全回路",
-        "调用初始化子程序"
+        "CALL JOB:name",
+        "MOVE POS:name",
+        "LOAD FILE:name",
+        "RESET ALARM:name"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-012"
     },
     {
       "id": "Q-014",
       "kp": "KP-09",
       "level": 4,
-      "stem": "机器人与外围设备之间缺少握手互锁最可能导致",
+      "stem": "Yaskawa INFORM 可用于处理哪类连接交互",
       "options": [
-        "伺服过热",
-        "抢动作造成碰撞",
-        "程序无法编译",
-        "节拍变慢"
+        "与 PLC 或外围设备的 I/O 握手",
+        "机器人本体的机械加工与装配",
+        "减速机的拆卸维护与注脂",
+        "围栏的土建设计与验收"
       ],
-      "answer": 1,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-013"
     },
     {
       "id": "Q-015",
       "kp": "KP-09",
       "level": 4,
-      "stem": "更换控制柜后IO映射关系需要",
+      "stem": "Yaskawa INFORM 示例中的 DOUT OT#(n) ON/OFF 用于",
       "options": [
-        "自动继承",
-        "无需处理",
-        "重新导入配置",
-        "由PLC下发"
+        "设置数字输出",
+        "清除报警缓存",
+        "建立用户坐标系",
+        "执行零点校对"
       ],
-      "answer": 2,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-013"
     },
     {
       "id": "Q-016",
       "kp": "KP-10",
       "level": 3,
-      "stem": "报警SRVO-005对应的故障是",
+      "stem": "FANUC Robot MyPortal 页面列出的、与报警查询直接相关的功能是",
       "options": [
-        "急停被按下",
-        "伺服过载",
-        "编码器电池电压低",
-        "机器人超程"
+        "Alarm Code Lookup",
+        "Robot Parts Search",
+        "Service Log Review",
+        "Controller Data Reset"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 0,
+      "level_source": "bank",
+      "source_id": "KB-017"
     },
     {
       "id": "Q-017",
@@ -237,7 +254,9 @@
         "直接复位报警"
       ],
       "answer": 0,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "依赖已从正式 Demo 排除的 SRVO-062 资料，待取得可访问的机型手册后重写。"
     },
     {
       "id": "Q-018",
@@ -245,27 +264,29 @@
       "level": 4,
       "stem": "零点校对完成后必须执行",
       "options": [
-        "负载重设",
-        "位置确认",
-        "润滑加注",
-        "程序备份"
+        "更换工具",
+        "验证精度",
+        "清理围栏",
+        "重装软件"
       ],
       "answer": 1,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-019"
     },
     {
       "id": "Q-019",
       "kp": "KP-12",
       "level": 2,
-      "stem": "加注减速机润滑脂时的关键要求是",
+      "stem": "按所列 Yaskawa GP12 维护程序加注润滑脂前，应",
       "options": [
         "加注量越多越好",
-        "封闭排脂口加注",
-        "断电冷态加注",
-        "打开排脂口加注"
+        "未拆下排脂塞加注",
+        "跳过排脂口检查",
+        "拆下排脂塞"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-020"
     },
     {
       "id": "Q-020",
@@ -279,245 +300,264 @@
         "不低于2.0米"
       ],
       "answer": 0,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "围栏固定高度数值无当前一手来源支撑，待按适用法规和现场风险评估重写。"
     },
     {
       "id": "Q-021",
       "kp": "KP-13",
       "level": 2,
-      "stem": "两人以上进入围栏示教作业时必须",
+      "stem": "示教模式下进入机器人工作包络的人员应为",
       "options": [
-        "切换到自动模式",
-        "各自独立操作",
-        "指定监护人守在急停处",
-        "关闭安全门开关"
+        "任意在场的参观人员",
+        "经过授权和培训的程序员",
+        "未受训的临时人员",
+        "只负责保洁的人员"
       ],
-      "answer": 2,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-023"
     },
     {
       "id": "Q-022",
       "kp": "KP-14",
       "level": 4,
-      "stem": "更换夹具后未重新设定负载参数最可能出现",
+      "stem": "ABB RAPID 的碰撞检测在何种情况下可能触发",
       "options": [
-        "碰撞检测误报警",
-        "零点丢失",
-        "IO失效",
-        "程序丢失"
+        "操作员更换了工服",
+        "示教器屏幕亮度改变",
+        "工具或有效载荷数据不正确",
+        "生产班次发生切换"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-024"
     },
     {
       "id": "Q-023",
       "kp": "KP-14",
       "level": 4,
-      "stem": "软限位修改后生效的条件是",
+      "stem": "工具或有效载荷数据未知时，ABB RAPID 可使用",
       "options": [
-        "立即生效",
-        "重新标定TCP",
-        "重新上电伺服",
-        "重启控制器"
+        "报警历史清除功能",
+        "安全门旁路功能",
+        "自动标定围栏功能",
+        "负载辨识功能"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-024"
     },
     {
       "id": "Q-024",
       "kp": "KP-15",
       "level": 5,
-      "stem": "以下哪项不属于节拍优化的常用手段",
+      "stem": "Yaskawa INFORM 的基础运动指令组合是",
       "options": [
-        "合并冗余路径点",
-        "空行程改用MOVJ",
-        "非工艺段放大转弯区",
-        "提高T1模式速度上限"
+        "DOUT、WAIT、CALL",
+        "MOVJ、MOVL、MOVC",
+        "TCP、WOBJ、TOOL",
+        "STOP、RESET、POWER"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-026"
     },
     {
       "id": "Q-025",
       "kp": "KP-01",
       "level": 3,
-      "stem": "六自由度串联机器人的J1至J3三个关节轴主要决定",
+      "stem": "典型六轴机器人中，前三个关节主要改变",
       "options": [
-        "负载能力",
-        "末端位置",
-        "末端姿态",
-        "重复定位精度"
+        "润滑脂型号",
+        "围栏门锁",
+        "工具位置",
+        "培训时长"
       ],
-      "answer": 1,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-001"
     },
     {
       "id": "Q-026",
       "kp": "KP-02",
       "level": 3,
-      "stem": "T2手动高速模式对操作者的要求是",
+      "stem": "所列 ABB 机型在手动模式下的操作方式是",
       "options": [
-        "无特殊要求",
-        "须断开安全回路",
-        "必须由持有资质的人员操作",
-        "仅限两人同时操作"
+        "可由任意网页远程操作",
+        "可从手机应用直接操作",
+        "必须切断控制柜电源操作",
+        "只能通过示教器操作"
       ],
-      "answer": 2,
-      "level_source": "bank"
+      "answer": 3,
+      "level_source": "bank",
+      "source_id": "KB-004"
     },
     {
       "id": "Q-027",
       "kp": "KP-03",
       "level": 3,
-      "stem": "沿基坐标系X、Y、Z轴做直线示教时应选用",
+      "stem": "ABB 手册指出，为获得更好的精度，工具坐标系应",
       "options": [
-        "工件坐标系",
-        "关节坐标系",
-        "直角坐标系",
-        "工具坐标系"
+        "依靠不同品牌的默认模板",
+        "尽可能正确地定义",
+        "只按生产节拍设定",
+        "不需要与 TCP 相关"
       ],
-      "answer": 2,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-005"
     },
     {
       "id": "Q-028",
       "kp": "KP-04",
       "level": 4,
-      "stem": "TCP标定时四个姿态过于接近会导致",
+      "stem": "ABB 技术手册建议 TCP 四点法使用不同方向，目的是",
       "options": [
-        "零点丢失",
-        "伺服过载",
-        "标定方程病态",
-        "标定速度变慢"
+        "取消后续精度验证",
+        "替代现场质量要求",
+        "获得更可靠的统计结果",
+        "让四次记录完全相同"
       ],
       "answer": 2,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-006"
     },
     {
       "id": "Q-029",
       "kp": "KP-04",
       "level": 4,
-      "stem": "验证TCP标定精度的正确做法是",
+      "stem": "完成 TCP 标定后，正确的后续动作是",
       "options": [
-        "绕TCP做姿态旋转看尖端漂移",
-        "沿直线运动看速度",
-        "重启控制器",
-        "检查各轴电流"
+        "更改润滑维护周期",
+        "清除历史报警记录",
+        "删除工件坐标系",
+        "验证其准确性"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 3,
+      "level_source": "bank",
+      "source_id": "KB-007"
     },
     {
       "id": "Q-030",
       "kp": "KP-05",
       "level": 3,
-      "stem": "工件整体平移后，程序中的路径点需要",
+      "stem": "Yaskawa 建立用户坐标系时出现 THREE STEPS SAME LINE 报警，应",
       "options": [
-        "重新做TCP标定",
-        "仅重新标定工件坐标系",
-        "修改运动指令类型",
-        "逐点重新示教"
+        "强制忽略报警继续运行",
+        "用不共线的三点重新示教",
+        "把三点改为完全重合",
+        "跳过坐标系建立步骤"
       ],
       "answer": 1,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-008"
     },
     {
       "id": "Q-031",
       "kp": "KP-05",
       "level": 4,
-      "stem": "工件坐标系三点法中Z轴的生成依据是",
+      "stem": "三点建立用户坐标系时，以下哪种情况会导致所列报警",
       "options": [
-        "右手定则",
-        "控制器默认",
-        "左手定则",
-        "示教顺序"
+        "选择其他工件名称",
+        "调整示教器屏幕亮度",
+        "三点共线",
+        "更换控制柜风扇"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-008"
     },
     {
       "id": "Q-032",
       "kp": "KP-06",
       "level": 3,
-      "stem": "MOVC连续使用时，后一条圆弧的起点是",
+      "stem": "在 Yaskawa INFORM 中，用于关节插补点到点运动的指令是",
       "options": [
-        "前一条的终点",
-        "前一条的中间点",
-        "重新示教的点",
-        "机器人HOME点"
+        "DOUT",
+        "WAIT",
+        "CALL",
+        "MOVJ"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 3,
+      "level_source": "bank",
+      "source_id": "KB-009"
     },
     {
       "id": "Q-033",
       "kp": "KP-07",
       "level": 3,
-      "stem": "要求位置精度最高但节拍最慢的定位等级是",
+      "stem": "在 ABB RAPID 的预定义 zonedata 中，表示停点的是",
       "options": [
-        "ZONE50",
-        "CNT100",
-        "任意",
-        "FINE"
+        "flyby",
+        "fine",
+        "MOVJ",
+        "DOUT"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-011"
     },
     {
       "id": "Q-034",
       "kp": "KP-07",
       "level": 4,
-      "stem": "使用较大转弯区数值的代价是",
+      "stem": "在 ABB RAPID 中，飞越点的运动特征是",
       "options": [
-        "实际路径偏离示教点",
-        "节拍变慢",
-        "伺服温升",
-        "程序变长"
+        "自动删除全部编程位置",
+        "自动关闭安全回路",
+        "在到达编程位置前改变运动方向",
+        "只能用于控制柜设置"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-011"
     },
     {
       "id": "Q-035",
       "kp": "KP-08",
       "level": 3,
-      "stem": "初始化子程序通常不包含以下哪项",
+      "stem": "Yaskawa INFORM 的一行指令由什么组成",
       "options": [
-        "信号清零",
-        "确认机器人在HOME位",
-        "夹具复位",
-        "执行焊接工艺"
+        "图纸和照片",
+        "工件和夹具",
+        "报警和润滑脂",
+        "关键字和参数"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-012"
     },
     {
       "id": "Q-036",
       "kp": "KP-08",
       "level": 4,
-      "stem": "子程序调用层数一般不超过",
+      "stem": "以下哪项属于 Yaskawa INFORM 的流程控制",
       "options": [
-        "8层",
-        "4层",
-        "16层",
-        "无限制"
+        "MOVL",
+        "CALL",
+        "DOUT",
+        "TCP"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-012"
     },
     {
       "id": "Q-037",
       "kp": "KP-09",
       "level": 4,
-      "stem": "数字输出DO的作用是",
+      "stem": "Yaskawa INFORM 示例中，WAIT IN#(n)=ON 的作用是",
       "options": [
-        "驱动外部执行元件",
-        "记录报警历史",
-        "存储程序",
-        "接收设备状态"
+        "校对编码器零位",
+        "执行圆弧运动",
+        "等待数字输入条件满足",
+        "计算工具负载"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-013"
     },
     {
       "id": "Q-038",
@@ -531,7 +571,9 @@
         "SRVO-005报警"
       ],
       "answer": 2,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "依赖已从正式 Demo 排除的示教器急停资料，待取得可访问的机型手册后重写。"
     },
     {
       "id": "Q-039",
@@ -545,21 +587,24 @@
         "切断总电源"
       ],
       "answer": 2,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "超程报警处置步骤缺少当前可定位的一手依据，不能作为正式测评题。"
     },
     {
       "id": "Q-040",
       "kp": "KP-11",
       "level": 4,
-      "stem": "个别轴零点丢失时应采用",
+      "stem": "FANUC 所述快速零点校对只在何种前提满足时才适用",
       "options": [
-        "更换编码器",
-        "恢复出厂设置",
-        "全轴同时校对",
-        "单轴校对"
+        "任意报警出现后",
+        "无需核对机器人状态",
+        "安全门保持打开时",
+        "机器人未移动等前提满足"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-019"
     },
     {
       "id": "Q-041",
@@ -573,35 +618,39 @@
         "更换后再断电"
       ],
       "answer": 0,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "依赖已从正式 Demo 排除的编码器电池资料，待取得可访问的机型手册后重写。"
     },
     {
       "id": "Q-042",
       "kp": "KP-12",
       "level": 2,
-      "stem": "减速机润滑脂的常规更换周期是",
+      "stem": "润滑脂的种类、加注量和周期应依据",
       "options": [
-        "无固定周期",
-        "运行两万小时或五年",
-        "运行五千小时或两年",
-        "运行一万小时或三年"
+        "统一的跨品牌小时数",
+        "具体机型手册",
+        "随机抽取的经验值",
+        "与机型无关的固定表"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 1,
+      "level_source": "bank",
+      "source_id": "KB-020"
     },
     {
       "id": "Q-043",
       "kp": "KP-12",
       "level": 3,
-      "stem": "日常点检不包含以下哪项",
+      "stem": "日常点检和周期性维护应遵循",
       "options": [
-        "确认急停功能有效",
-        "清理控制柜防尘网",
-        "检查各轴异响",
-        "重新标定工件坐标系"
+        "单一通用的固定频率",
+        "只依据个人经验的随意安排",
+        "制造商的预防性维护计划",
+        "不记录的口头安排"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-021"
     },
     {
       "id": "Q-044",
@@ -615,49 +664,54 @@
         "不小于0.5米"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "demo_eligible": false,
+      "demo_exclusion_reason": "围栏固定距离数值无当前一手来源支撑，待按适用法规和现场风险评估重写。"
     },
     {
       "id": "Q-045",
       "kp": "KP-14",
       "level": 5,
-      "stem": "碰撞检测的判定依据是",
+      "stem": "ABB RAPID 的碰撞检测触发后，机器人会",
       "options": [
-        "编码器计数偏差",
-        "控制柜温度",
-        "外部接近开关信号",
-        "伺服电流实测值与模型预测值之差"
+        "自动忽略碰撞",
+        "持续加速运行",
+        "尽快停止",
+        "立即删除程序"
       ],
-      "answer": 3,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-024"
     },
     {
       "id": "Q-046",
       "kp": "KP-15",
       "level": 5,
-      "stem": "节拍优化后必须执行的验证步骤是",
+      "stem": "Yaskawa INFORM 中，MOVL 表示",
       "options": [
-        "单步试运行验证轨迹不干涉",
-        "重新标定TCP",
-        "更换润滑脂",
-        "重启控制器"
+        "设置数字输出功能",
+        "调用子程序作业",
+        "工具端直线运动",
+        "等待数字输入条件"
       ],
-      "answer": 0,
-      "level_source": "bank"
+      "answer": 2,
+      "level_source": "bank",
+      "source_id": "KB-026"
     },
     {
       "id": "Q-047",
       "kp": "KP-15",
       "level": 5,
-      "stem": "把与运动无关的IO操作放到运动指令并行段的目的是",
+      "stem": "Yaskawa INFORM 中，MOVJ 被说明为",
       "options": [
-        "提高安全性",
-        "降低伺服温升",
-        "减少程序行数",
-        "缩短节拍"
+        "等待数字输入条件",
+        "设置数字输出功能",
+        "调用子程序作业",
+        "较快的关节插补点到点运动"
       ],
       "answer": 3,
-      "level_source": "bank"
+      "level_source": "bank",
+      "source_id": "KB-026"
     }
   ]
 }

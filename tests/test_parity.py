@@ -166,7 +166,10 @@ class TestParity(unittest.TestCase):
     def test_adaptive_selection_order_matches(self):
         """同一份背景、同一串对错，两边选出的题号序列必须完全一样。"""
         from core.cat import AdaptiveSession
-        items = json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+        from core.demo_items import formal_demo_items
+        items = formal_demo_items(
+            json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+        )
         kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
         bg = {"education": "高职", "hands_on_hours": 480}
         pattern = [True, False, True, True, False, False, True, True,

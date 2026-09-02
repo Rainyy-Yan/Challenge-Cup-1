@@ -128,6 +128,23 @@ body{
 .claim.bad{border-left-color:var(--block)}
 .claim.bad .src{color:var(--block)}
 details > summary{cursor:pointer; font-size:12px; color:var(--muted); margin-top:8px}
+.resource-body{margin-top:9px; border:1px solid var(--rule-soft); background:#FAFBFC}
+.resource-body > summary{padding:8px 10px; color:var(--ink); font-weight:700}
+.resource-content{padding:2px 11px 10px; font-size:13px; line-height:1.65}
+.resource-content h3{font-size:14px; margin:8px 0 4px}
+.resource-content h4{font-size:12.5px; margin:11px 0 4px; color:var(--dispatch)}
+.resource-content p{margin:5px 0}
+.resource-content .rpoint{padding-left:10px; border-left:2px solid var(--dispatch)}
+.resource-content .rbullet{padding-left:14px; position:relative}
+.resource-content .rbullet::before{content:'•'; position:absolute; left:2px; color:var(--pass)}
+.resource-content .rsource{font-family:var(--mono); font-size:10.5px; color:var(--pass)}
+.resource-quiz{margin:4px 0 0; padding-left:20px}
+.resource-quiz li{margin:9px 0; padding-left:2px}
+.resource-quiz .qmeta{font-family:var(--mono); font-size:10.5px; color:var(--muted)}
+.resource-quiz details{margin-top:5px}
+.resource-quiz details summary{font-size:11px}
+.resource-quiz .qanswer{font-size:12px; margin:4px 0 0; color:var(--muted)}
+.source-note{font-size:11px; color:var(--muted); margin-top:3px}
 
 /* ---------- 图表 ---------- */
 .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; margin-top:16px}
@@ -136,48 +153,189 @@ svg{display:block; width:100%; height:auto}
 .klabel{font-size:11px; fill:var(--ink)}
 
 /* ---------- 反馈 ---------- */
-.quiz{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0}
-.tog{
+.quiz{margin:10px 0}
+.feedback-question{border-top:1px solid var(--rule-soft); padding:10px 0}
+.feedback-question:first-child{border-top:0}
+.feedback-meta{font-family:var(--mono); font-size:10.5px; color:var(--muted)}
+.feedback-stem{margin:5px 0 8px; font-size:13px; line-height:1.55}
+.answer-row{display:flex; gap:8px; flex-wrap:wrap}
+.answer{
   font:inherit; font-family:var(--mono); font-size:12px; cursor:pointer; padding:6px 12px;
   border:1px solid var(--rule); background:var(--surface); border-radius:2px;
 }
-.tog[data-on="1"]{border-color:var(--pass); color:var(--pass); font-weight:700}
-.tog[data-on="0"]{border-color:var(--block); color:var(--block); font-weight:700}
+.answer[data-on="1"]{border-color:var(--dispatch); color:var(--dispatch); font-weight:700}
+.feedback-explain{font-size:11.5px; color:var(--muted); margin:6px 0 0}
 .verdict{
   margin-top:10px; padding:10px 12px; border-left:3px solid var(--dispatch);
   background:#F2F5F8; font-size:13px;
 }
 .empty{color:var(--muted); padding:22px 14px; text-align:center; font-size:13px}
 select{font:inherit; padding:6px 8px; border:1px solid var(--rule); border-radius:2px; background:var(--surface)}
+.field{display:block; margin-top:11px; font-size:12px; color:var(--muted)}
+.field > span{display:block; margin-bottom:4px; color:var(--ink); font-weight:700}
+.field textarea,.field input[type="text"]{
+  display:block; width:100%; min-height:82px; resize:vertical; padding:8px; font:inherit;
+  color:var(--ink); border:1px solid var(--rule); border-radius:2px; background:var(--surface);
+}
+.field input[type="file"]{display:block; width:100%; font:inherit; color:var(--muted)}
+.check{display:flex; align-items:flex-start; gap:7px; margin:11px 0; font-size:12px; color:var(--muted); line-height:1.5}
+.check input{margin-top:3px; flex:none}
+.notice{margin-top:11px; padding:9px 10px; border-left:3px solid var(--dispatch); background:#F2F5F8; font-size:12px; line-height:1.55}
+.notice.ok{border-left-color:var(--pass); background:#F1F6F3}
+.intake-fields{display:grid; grid-template-columns:1fr 1fr; gap:5px 12px; margin-top:9px; font-size:12px}
+.intake-fields span{color:var(--muted)}
+.interview-question{font-size:14px; line-height:1.6; margin:6px 0 10px}
+.interview-meta{font-family:var(--mono); font-size:10.5px; color:var(--muted)}
+.interview-options{display:grid; gap:7px}
+.interview-option{
+  text-align:left; font:inherit; color:var(--ink); cursor:pointer; padding:8px 10px;
+  border:1px solid var(--rule); border-radius:2px; background:var(--surface);
+}
+.interview-option:hover{border-color:var(--dispatch); background:#F2F5F8}
+
+/* ---------- 竞赛展示层：先讲可信价值，再进入工作台 ---------- */
+:root{
+  --panel:#F5F7FF; --surface:#FFFFFF; --ink:#17233B; --muted:#62708A;
+  --rule:#DDE4F2; --rule-soft:#EDF1F8; --pass:#16805E; --revise:#C97816;
+  --block:#C64552; --dispatch:#5367E8;
+}
+body{background:linear-gradient(180deg,#F7F8FF 0,#F2F6FD 42%,#F7F9FD 100%);}
+a{color:inherit}
+.app-nav{
+  position:sticky; top:0; z-index:30; display:flex; align-items:center; gap:22px;
+  min-height:68px; padding:12px clamp(18px,4vw,64px); color:var(--ink);
+  background:rgba(250,251,255,.88); border-bottom:1px solid rgba(221,228,242,.85);
+  backdrop-filter:blur(16px);
+}
+.brand-lockup{display:flex; align-items:center; gap:10px; min-width:0; font-weight:800}
+.brand-mark{display:grid; place-items:center; width:32px; height:32px; flex:none; color:#fff;
+  background:linear-gradient(145deg,#6D7BF2,#4F60D8); border-radius:10px; box-shadow:0 7px 18px rgba(83,103,232,.26)}
+.brand-mark svg{width:18px; height:18px}
+.brand-lockup span{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.brand-code{font-family:var(--mono); color:var(--muted); font-size:11px; letter-spacing:.08em}
+.nav-links{display:flex; align-items:center; gap:18px; margin-left:auto; font-size:13px; font-weight:700}
+.nav-links a{text-decoration:none; color:var(--muted)}
+.nav-links a:hover{color:var(--dispatch)}
+.live-pill{display:flex; align-items:center; gap:7px; flex:none; padding:6px 10px; border:1px solid var(--rule);
+  border-radius:999px; background:#fff; color:var(--muted); font-family:var(--mono); font-size:10.5px; letter-spacing:.06em}
+.live-pill .lamp{width:7px; height:7px}
+.experience{padding-bottom:64px}
+.hero{max-width:1180px; margin:0 auto; padding:clamp(38px,7vw,88px) 24px 34px; display:grid;
+  grid-template-columns:minmax(0,1.18fr) minmax(300px,.82fr); gap:42px; align-items:center}
+.eyebrow{display:inline-flex; align-items:center; gap:7px; color:var(--dispatch); font-family:var(--mono); font-size:11px;
+  font-weight:800; letter-spacing:.11em; text-transform:uppercase}
+.eyebrow::before{content:""; width:22px; height:2px; border-radius:9px; background:currentColor}
+.hero h1{max-width:760px; margin:12px 0 14px; color:var(--ink); font-size:clamp(30px,4.1vw,54px); line-height:1.12; letter-spacing:-.045em}
+.hero h1 em{color:var(--dispatch); font-style:normal}
+.hero .lead{max-width:680px; margin:0; color:var(--muted); font-size:16px; line-height:1.85}
+.hero-actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:24px}
+.hero-actions a{display:inline-flex; align-items:center; justify-content:center; min-height:43px; padding:0 17px; border-radius:12px;
+  text-decoration:none; font-size:13px; font-weight:800}
+.hero-actions .primary{color:#fff; background:linear-gradient(135deg,#5D70EE,#4557C6); box-shadow:0 10px 24px rgba(83,103,232,.24)}
+.hero-actions .secondary{color:var(--ink); border:1px solid var(--rule); background:#fff}
+.hero-note{margin:13px 0 0; color:var(--muted); font-size:12px}
+.trust-panel{position:relative; overflow:hidden; padding:24px; border:1px solid #E0E6FA; border-radius:24px;
+  background:radial-gradient(circle at 85% 8%,rgba(110,128,246,.18),transparent 34%),linear-gradient(145deg,#fff,#F1F4FF);
+  box-shadow:0 18px 45px rgba(38,58,105,.10)}
+.trust-panel::after{content:""; position:absolute; width:180px; height:180px; right:-82px; bottom:-90px; border:22px solid rgba(83,103,232,.08); border-radius:50%}
+.trust-kicker{position:relative; z-index:1; color:var(--muted); font-family:var(--mono); font-size:10.5px; font-weight:800; letter-spacing:.1em}
+.trust-panel h2{position:relative; z-index:1; margin:9px 0 19px; color:var(--ink); font-size:21px; line-height:1.35}
+.trust-list{position:relative; z-index:1; display:grid; gap:11px}
+.trust-item{display:grid; grid-template-columns:31px 1fr; gap:10px; align-items:start; padding:11px; border-radius:14px; background:rgba(255,255,255,.78)}
+.trust-item .index{display:grid; place-items:center; width:29px; height:29px; border-radius:9px; color:var(--dispatch); background:#E9EDFF; font-family:var(--mono); font-size:11px; font-weight:800}
+.trust-item b{display:block; font-size:13px}.trust-item span{display:block; margin-top:2px; color:var(--muted); font-size:11.5px; line-height:1.55}
+.story-strip{max-width:1180px; margin:0 auto 30px; padding:0 24px}
+.story-steps{display:grid; grid-template-columns:repeat(4,1fr); overflow:hidden; border:1px solid var(--rule); border-radius:18px; background:#fff; box-shadow:0 10px 26px rgba(37,54,92,.05)}
+.story-step{position:relative; min-height:84px; padding:17px 18px 15px 57px; border-left:1px solid var(--rule-soft)}
+.story-step:first-child{border-left:0}.story-step .num{position:absolute; left:17px; top:18px; color:#9AA7CD; font-family:var(--mono); font-size:11px; font-weight:800}.story-step b{display:block; font-size:13px}.story-step span{display:block; margin-top:3px; color:var(--muted); font-size:11.5px; line-height:1.45}
+.workspace{max-width:1320px; padding:0 24px 0}.workspace.wrap{margin:0 auto}
+.workspace-label{display:flex; align-items:center; justify-content:space-between; gap:15px; margin:0 0 13px}.workspace-label h2{margin:0; color:var(--ink); font-size:18px; letter-spacing:-.02em}.workspace-label p{margin:0; color:var(--muted); font-size:12px}
+.grid{grid-template-columns:minmax(245px,.78fr) minmax(360px,1.28fr) minmax(285px,.94fr); gap:20px}
+.card{overflow:hidden; border:1px solid var(--rule); border-radius:17px; box-shadow:0 10px 24px rgba(39,55,91,.045)}
+.card > h2{min-height:47px; padding:13px 16px; color:var(--muted); background:#FBFCFF; font-size:10.5px; letter-spacing:.12em}.card > h2 .n{padding:3px 7px; border-radius:99px; color:#6573AC; background:#EEF1FE; font-size:10px}
+.learner{padding:14px 16px; border-left:3px solid transparent}.learner:hover{background:#F7F8FF}.learner[aria-pressed="true"]{background:#EEF1FF; border-left-color:var(--dispatch)}
+.btn{border:0; border-radius:10px; background:linear-gradient(135deg,#5E70EF,#4658C8); box-shadow:0 7px 14px rgba(83,103,232,.18)}.btn:hover{background:linear-gradient(135deg,#5164E7,#3B4DBB)}.btn.ghost{border:1px solid var(--rule); color:var(--dispatch); background:#fff; box-shadow:none}.btn.ghost:hover{background:#F1F3FF}
+.line{padding:9px 0}.step{grid-template-columns:72px 1fr; gap:14px; padding:11px 17px 11px 0}.step .who{color:#6372AA}.tagstate{border-color:#D6DEF7; color:#6877AF; background:#F4F6FF}
+.res{padding:14px 16px}.res .kind{color:#5868CA; background:#EEF1FF}.res .ttl{font-size:14px}.resource-body{border-radius:10px; background:#FAFBFF}.resource-body > summary{padding:9px 11px}.claim{border-left-color:#38A37B}.source-link{color:#445BD3; font-weight:800; text-decoration:none}
+.charts{gap:20px; margin-top:20px}.charts .card{background:#fff}.notice,.verdict{border-radius:10px}.interview-option{border-radius:10px}.answer{border-radius:9px}
+.experience-footer{max-width:1180px; margin:35px auto 0; padding:0 24px; color:var(--muted); font-size:11.5px}.experience-footer span{display:inline-block; padding:8px 11px; border-radius:9px; background:#EEF1FA}
+@media(max-width:900px){.app-nav{gap:12px}.brand-code,.nav-links{display:none}.hero{grid-template-columns:1fr; gap:24px; padding-top:44px}.trust-panel{max-width:640px}.grid{grid-template-columns:1fr 1fr}.grid>div:nth-child(2){grid-column:span 2}.grid>div:nth-child(3){grid-column:span 2}.story-steps{grid-template-columns:1fr 1fr}.story-step:nth-child(3){border-left:0;border-top:1px solid var(--rule-soft)}.story-step:nth-child(4){border-top:1px solid var(--rule-soft)}}
+/* 两种起点并列呈现，后续流程共用同一工作台。 */
+.start-area{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;margin-bottom:20px;align-items:start}.start-card{margin:0}.start-card--interview{grid-column:1/-1}.start-option-copy{margin:0;padding:12px 16px;color:var(--muted);font-size:12.5px;line-height:1.6;background:#FBFCFF;border-bottom:1px solid var(--rule-soft)}.start-card .pad{padding:16px}.start-card--preset .learner{min-height:84px}.start-card--materials .field textarea{min-height:84px}.start-card--materials .btn{width:100%}
+@media(max-width:900px){.start-area{grid-template-columns:1fr}}
+@media(max-width:620px){.app-nav{min-height:58px;padding:10px 16px}.live-pill{margin-left:auto}.hero,.story-strip,.workspace,.experience-footer{padding-left:16px;padding-right:16px}.hero{padding-bottom:25px}.hero h1{font-size:34px}.hero .lead{font-size:14px}.story-steps{grid-template-columns:1fr}.story-step,.story-step:nth-child(3),.story-step:nth-child(4){border-left:0;border-top:1px solid var(--rule-soft)}.story-step:first-child{border-top:0}.grid{grid-template-columns:1fr;gap:14px}.grid>div:nth-child(2),.grid>div:nth-child(3){grid-column:auto}.charts{grid-template-columns:1fr}.workspace-label{align-items:flex-start;flex-direction:column}.trust-panel{padding:20px}.hero-actions a{width:100%}.start-area{gap:14px}}
+/* 工作台布局：入口固定在顶部，同一位置切换，不制造页面内跳转。 */
+.app-overview{max-width:1320px;margin:0 auto;padding:26px 24px 18px;display:flex;align-items:center;justify-content:space-between;gap:32px;border-bottom:1px solid var(--rule-soft)}
+.app-overview h1{margin:5px 0 6px;color:var(--ink);font-size:25px;line-height:1.25;letter-spacing:-.035em}.app-overview p{margin:0;color:var(--muted);font-size:13px;line-height:1.65}.trust-summary{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.trust-summary span{min-width:116px;padding:10px 12px;border:1px solid #DCE3F7;border-radius:11px;background:#F8F9FF;color:var(--muted);font-size:11px;line-height:1.5}.trust-summary b{display:block;margin-bottom:1px;color:var(--ink);font-size:12px}.entry-switch{display:inline-flex;max-width:100%;gap:4px;padding:4px;border:1px solid var(--rule);border-radius:12px;background:#F6F8FD}.entry-switch button{min-height:35px;padding:0 13px;border:0;border-radius:8px;background:transparent;color:var(--muted);font-size:12px;font-weight:800}.entry-switch button:hover{color:var(--dispatch)}.entry-switch button[aria-selected="true"]{background:#fff;color:var(--dispatch);box-shadow:0 2px 8px rgba(52,70,130,.12)}.start-area{display:block;margin:12px 0 20px}.start-card{max-width:none}.start-card[hidden]{display:none!important}.start-card--interview{margin-top:14px}.start-card--preset #learners{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.start-card--preset .learner{border-bottom:0;border-left:3px solid transparent}.start-card--preset .learner[aria-pressed="true"]{border-left-color:var(--dispatch)}
+.maintenance-area{max-width:1320px;margin:28px auto 0;padding:0 24px}.maintenance-area details{border:1px solid var(--rule);border-radius:13px;background:#FAFBFF}.maintenance-area summary{padding:12px 15px;color:var(--muted);cursor:pointer;font-size:12px;font-weight:800}.maintenance-area summary span{margin-left:8px;color:var(--muted);font-weight:400}.maintenance-area details[open] summary{border-bottom:1px solid var(--rule-soft)}.maintenance-area .start-card{border:0;border-radius:0;box-shadow:none}
+@media(max-width:900px){.app-overview{align-items:flex-start;flex-direction:column;gap:14px}.trust-summary{justify-content:flex-start}.start-card--preset #learners{grid-template-columns:1fr}}
+@media(max-width:620px){.app-overview,.maintenance-area{padding-left:16px;padding-right:16px}.app-overview{padding-top:20px;padding-bottom:14px}.app-overview h1{font-size:21px}.entry-switch{display:flex;width:100%;overflow-x:auto}.entry-switch button{flex:0 0 auto;padding:0 11px}.trust-summary{display:grid;grid-template-columns:1fr 1fr;width:100%}.trust-summary span:last-child{grid-column:1/-1}}
 </style>
 </head>
 <body>
 
-<div class="nameplate">
-  <h1>领域知识个性化生成与多智能体协同决策系统</h1>
-  <span class="code">XH-202630 / 工业机器人现场操作与调试</span>
-  <span class="state"><span class="lamp" id="lamp"></span><span id="stateTxt">待机</span></span>
+<header class="app-nav">
+  <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7.5 12 3l7 4.5v9L12 21l-7-4.5z"/><path d="m5 7.5 7 4.5 7-4.5M12 12v9"/></svg></span><span>领域知识个性化生成与多智能体协同决策系统</span></div>
+  <span class="brand-code">XH-202630 · 工业机器人现场操作与调试</span>
+  <span class="live-pill"><span class="lamp" id="lamp"></span><span id="stateTxt">准备就绪</span></span>
+</header>
+
+<main class="experience">
+<section class="app-overview" aria-label="系统说明">
+  <div><span class="eyebrow">你的个性化学习工作台</span><h1>工业机器人现场操作与调试</h1><p>告诉我们你的学习情况，获得可查看来源、会随作答更新的学习方案。</p></div>
+  <div class="trust-summary"><span><b>查看内容来源</b>每条学习内容都可定位</span><span><b>了解方案如何生成</b>审核与决策过程可见</span><span><b>获得下一步建议</b>作答后更新你的方案</span></div>
+</section>
+
+<section class="workspace wrap">
+<div class="workspace-label"><div><h2>从你的学习情况开始</h2><p>先填写学习经历并完成自适应测评；示例方案仅用于了解不同基础下的学习路径。</p></div></div>
+<div class="entry-switch" role="tablist" aria-label="选择开始方式">
+  <button type="button" role="tab" data-entry-mode="custom" aria-selected="true">填写我的学习情况</button>
+  <button type="button" role="tab" data-entry-mode="preset" aria-selected="false">查看示例方案</button>
 </div>
-
-<div class="wrap">
-<div class="grid">
-
-  <!-- 左：学习者与学情 -->
-  <div>
-    <section class="card">
-      <h2>学习者画像 <span class="n" id="pcount">0</span></h2>
+<section class="start-area" aria-label="功能入口">
+    <section class="card start-card start-card--preset" data-entry-panel="preset" hidden>
+      <h2>查看示例学习方案 <span class="n" id="pcount">0</span></h2>
+      <p class="start-option-copy">选择一位合成学习者示例，看看不同基础下会得到怎样的学习方案。</p>
       <div id="learners"><p class="empty">加载中</p></div>
       <div class="pad" style="border-top:1px solid var(--rule-soft)">
-        <button class="btn" id="run" disabled>开始诊断并生成</button>
+        <button class="btn" id="run" disabled>查看这份学习方案</button>
       </div>
     </section>
 
-    <section class="card" style="margin-top:16px" id="diagCard" hidden>
-      <h2>学情诊断</h2>
+    <section class="card start-card start-card--custom" id="intakeCard" data-entry-panel="custom">
+      <h2>填写我的学习情况 <span class="n">仅用于本次体验</span></h2>
+      <p class="start-option-copy">写下你的学习经历，开始属于你的自适应测评；实际作答会持续调整学习建议。</p>
       <div class="pad">
-        <div class="stat"><span>整体掌握度</span><b id="dOverall">-</b></div>
-        <div class="stat"><span>建议起始难度</span><b id="dEntry">-</b></div>
-        <div class="stat"><span>识别盲区</span><b id="dGaps">-</b></div>
+        <p class="narr" style="margin-top:0">你的自述只用于确定测评起点，真正的学习建议以逐题作答为准。请不要填写姓名、联系方式或其他个人敏感信息。</p>
+        <label class="field"><span>我目前的学习情况</span>
+          <textarea id="intakeText" maxlength="2000" placeholder="例如：我是机械专业大三，做过 40 小时工业机器人示教，想补强 TCP 标定和故障排查。"></textarea>
+        </label>
+        <button class="btn ghost" id="parseIntake" style="margin-top:11px">整理我的学习情况</button>
+        <div class="notice" id="intakeSummary" hidden></div>
+        <button class="btn" id="startInterview" disabled style="margin-top:11px">开始我的 12 题测评</button>
+      </div>
+    </section>
+
+    <section class="card start-card start-card--interview" id="interviewCard" data-entry-panel="custom" data-entry-interview="true" hidden>
+      <h2>完成我的自适应测评 <span class="n" id="interviewProgress">0 / 12</span></h2>
+      <div class="pad">
+        <div id="interviewQuestion"></div>
+        <button class="btn" id="finishInterview" hidden>用测评结果生成我的方案</button>
+      </div>
+    </section>
+
+ </section>
+
+<div class="grid">
+
+  <!-- 当前学习状态 -->
+  <div>
+    <section class="card" id="diagCard" hidden>
+      <h2>我的学习情况</h2>
+      <div class="pad">
+        <div class="stat"><span>我的当前掌握度</span><b id="dOverall">-</b></div>
+        <div class="stat"><span>推荐起始难度</span><b id="dEntry">-</b></div>
+        <div class="stat"><span>我需要补强的内容</span><b id="dGaps">-</b></div>
         <p class="narr" id="dNarr"></p>
       </div>
     </section>
@@ -186,21 +344,21 @@ select{font:inherit; padding:6px 8px; border:1px solid var(--rule); border-radiu
   <!-- 中：调度流水线 -->
   <div>
     <section class="card">
-      <h2>多智能体协同调度 <span class="n" id="ecount">0 步</span></h2>
-      <div class="line" id="timeline"><p class="empty">选择一位学习者后开始</p></div>
+      <h2>系统如何为我制定方案 <span class="n" id="ecount">0 步</span></h2>
+      <div class="line" id="timeline"><p class="empty">选择示例或填写学习情况后开始</p></div>
     </section>
 
     <section class="card" style="margin-top:16px" id="fbCard" hidden>
-      <h2>学习交互反馈</h2>
+      <h2>完成学习后的自测</h2>
       <div class="pad">
-        <label>针对知识点
+        <label>我想检验的知识点
           <select id="fbKp"></select>
         </label>
         <p style="color:var(--muted); font-size:12.5px; margin:9px 0 0">
-          点按下面四道题的作答结果，提交后由决策调度 Agent 按预先登记的阈值判定后续动作。
+          完成下方为你准备的测试题后提交作答，系统会据此调整你的下一步学习建议。
         </p>
         <div class="quiz" id="quiz"></div>
-        <button class="btn" id="submitFb">提交作答</button>
+        <button class="btn" id="submitFb">提交我的作答</button>
         <div class="verdict" id="verdict" hidden></div>
       </div>
     </section>
@@ -209,27 +367,105 @@ select{font:inherit; padding:6px 8px; border:1px solid var(--rule); border-radiu
   <!-- 右：资源台账 -->
   <div>
     <section class="card">
-      <h2>生成资源 <span class="n" id="rcount">0</span></h2>
-      <div id="resources"><p class="empty">尚未生成</p></div>
+      <h2>为我准备的学习资料 <span class="n" id="rcount">0</span></h2>
+      <div id="resources"><p class="empty">选择学习方式后，这里会显示为你准备的资料。</p></div>
     </section>
   </div>
 </div>
 
 <div class="charts" id="charts" hidden>
-  <section class="card"><h2>知识盲区定位</h2><div class="pad"><svg id="chartGaps" viewBox="0 0 420 300" role="img" aria-label="知识盲区定位图"></svg></div></section>
-  <section class="card"><h2>资源难度匹配曲线</h2><div class="pad"><svg id="chartFit" viewBox="0 0 420 300" role="img" aria-label="资源难度匹配曲线"></svg></div></section>
-  <section class="card"><h2>学习路径规划</h2><div class="pad"><svg id="chartPath" viewBox="0 0 420 300" role="img" aria-label="学习路径规划图"></svg></div></section>
+  <section class="card"><h2>我需要补强什么</h2><div class="pad"><svg id="chartGaps" viewBox="0 0 420 300" role="img" aria-label="需要补强的知识点"></svg></div></section>
+  <section class="card"><h2>资料难度是否适合我</h2><div class="pad"><svg id="chartFit" viewBox="0 0 420 300" role="img" aria-label="资料难度匹配情况"></svg></div></section>
+  <section class="card"><h2>我的学习路径</h2><div class="pad"><svg id="chartPath" viewBox="0 0 420 300" role="img" aria-label="我的学习路径"></svg></div></section>
 </div>
-</div>
+
+<section class="maintenance-area" aria-label="项目资料维护">
+  <details>
+    <summary>项目资料维护（仅项目成员）<span>提交参考资料前需补充来源和授权；系统只暂存，人工复核后才能入库。</span></summary>
+    <section class="card start-card start-card--materials" id="materials">
+      <h2>向项目提交参考资料 <span class="n">不会自动进入知识库</span></h2>
+      <p class="start-option-copy">此功能用于补充项目知识库，不属于学习者的学习流程。请提交原始资料，并完整说明来源、版本与使用授权。</p>
+      <div class="pad">
+        <label class="field"><span>选择要提交的资料</span><input type="file" id="materialFile" accept=".txt,.md,.pdf,.docx,.csv,.tsv,.xlsx"></label>
+        <label class="field"><span>资料来源、版本与使用授权</span><textarea id="materialSource" maxlength="500" placeholder="例如：FANUC 官方操作手册 B-83284CN/07，第 3 章；团队已获比赛使用授权。"></textarea></label>
+        <label class="check"><input type="checkbox" id="materialRights">我确认资料可用于本项目，且不包含学习者个人信息或未获授权内容。</label>
+        <button class="btn" id="stageMaterial">提交并检查资料信息</button>
+        <div class="notice" id="stageResult" hidden></div>
+      </div>
+    </section>
+  </details>
+</section>
+</section>
+<footer class="experience-footer"><span>演示说明：学习画像为合成数据；来源状态与运行模式以页面实时标识为准。</span></footer>
+</main>
 
 <script>
 const $ = s => document.querySelector(s);
-let profiles = [], picked = null, S = null;
+let profiles = [], picked = null, S = null, IV = null, customBackground = null;
 
 const TONE = {AUDIT:'pass', REVISE:'revise', GENERATE:'dispatch', DECIDE:'dispatch',
               DIAGNOSE:'dispatch', PLAN:'', ASSEMBLE:'pass', READY:'pass', FEEDBACK:''};
 
-function esc(s){return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function esc(s){return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function sourceWithLink(source){
+  return String(source || '').split(/(https?:\/\/[^\s<]+)/g).map(part => {
+    if(!/^https?:\/\//.test(part)) return esc(part);
+    return `<a class="source-link" href="${esc(part)}" target="_blank" rel="noopener noreferrer">打开原始来源</a>`;
+  }).join('');
+}
+
+function inlineResourceText(text){
+  return esc(text).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function resourceBody(r){
+  if(r.kind === 'quiz'){
+    const items = r.items || [];
+    if(!items.length) return '<p class="empty">本资源暂未生成测试题。</p>';
+    return `<ol class="resource-quiz">${items.map((it, i) => `
+      <li><div class="qmeta">第 ${i + 1} 题 · 判断题 · 难度 ${esc(it.difficulty || '-')}</div>
+        <div>${esc(it.stem)}</div>
+        <details><summary>查看答案与解析</summary>
+          <p class="qanswer">答案：${it.answer === false ? '错误' : '正确'}。${esc(it.explain || '')}</p>
+        </details>
+      </li>`).join('')}</ol>`;
+  }
+  if(!r.body) return '<p class="empty">本资源暂未生成正文。</p>';
+  return r.body.split('\n').map(line => {
+    const text = inlineResourceText(line.trim());
+    if(!text) return '';
+    if(line.startsWith('# ')) return `<h3>${inlineResourceText(line.slice(2))}</h3>`;
+    if(line.startsWith('## ')) return `<h4>${inlineResourceText(line.slice(3))}</h4>`;
+    if(/^\s*>\s*/.test(line)) return `<p class="rsource">${inlineResourceText(line.replace(/^\s*>\s*/, ''))}</p>`;
+    if(/^\s*依据\s*/.test(line)) return `<p class="rsource">${text}</p>`;
+    if(/^\d+\.\s+/.test(line)) return `<p class="rpoint">${text}</p>`;
+    if(/^\s*-\s+/.test(line)) return `<p class="rbullet">${inlineResourceText(line.replace(/^\s*-\s+/, ''))}</p>`;
+    return `<p>${text}</p>`;
+  }).join('');
+}
+
+function resourceCard(r){
+  const CN = {both:'双方印证', single:'单方提出', arbitrated:'仲裁采纳'};
+  return `<div class="res">
+    <div class="top"><span class="kind">${esc(r.kind)}</span>
+      <span class="diff">难度 ${r.difficulty}/5 · 断言 ${r.claims.length}</span></div>
+    <div class="ttl">${esc(r.title)}</div>
+    <details class="resource-body" open><summary>完整资源正文</summary>
+      <div class="resource-content">${resourceBody(r)}</div>
+    </details>
+    <details><summary>核验与溯源</summary>
+      ${r.claims.map(c => {
+        const kb = (S.kb || {})[c.source_id] || {};
+        const status = kb.verified ? '已人工核实' : '待核实';
+        return `<div class="claim">${esc(c.text)}
+          <div class="src">${esc(c.source_id || '无引用')} · ${sourceWithLink(kb.source)}</div>
+          <div class="src">${status} · 证据 ${esc(c.evidence_score)} · ${esc(CN[c.consensus] || '未标注共识')}</div>
+          ${kb.source_note ? `<div class="source-note">${esc(kb.source_note)}</div>` : ''}
+        </div>`;
+      }).join('')}
+    </details>
+  </div>`;
+}
 
 async function api(path, body){
   const opt = body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {};
@@ -237,18 +473,6 @@ async function api(path, body){
   const d = await r.json();
   if(!r.ok) throw new Error(d.error || '请求失败');
   return d;
-}
-
-function sourceWithLink(source){
-  return String(source || '').split(/(https?:\/\/[^\s<]+)/g).map(part => {
-    if(!/^https?:\/\//.test(part)) return esc(part);
-    return `<a class="source-link" href="${esc(part)}" target="_blank" rel="noopener noreferrer">打开原始来源</a>`;
-  }).join('');
-}
-function claimSource(c){
-  const kb = (S.kb || {})[c.source_id] || {};
-  const status = kb.verified ? '已人工核实' : '待人工核实';
-  return `<div class="src">${esc(c.source_id || '无引用')} · ${sourceWithLink(kb.source)} · ${status} · 证据 ${c.evidence_score}</div>`;
 }
 
 /* ---- 学习者列表 ---- */
@@ -269,20 +493,162 @@ async function loadProfiles(){
   });
 }
 
+/* ---- 自定义学习者：自述只提供先验，后续由实际作答纠正 ---- */
+function intakeSummary(bg, clarify){
+  const item = (name, value) => `<div><span>${name}</span><br>${esc(value || '未填写')}</div>`;
+  const questions = (clarify || []).length
+    ? `<p style="margin:9px 0 0">还可补充：${esc(clarify.join('；'))}</p>`
+    : '<p style="margin:9px 0 0">已了解你的学习情况，可以开始测评。</p>';
+  return `<b>已整理你的学习情况</b><div class="intake-fields">
+    ${item('学历/层次', bg.education)}${item('年级/岗位', bg.grade)}
+    ${item('专业方向', bg.major)}${item('实操时长', (bg.hands_on_hours || 0) + ' 小时')}
+    ${item('学习目标', bg.goal)}</div>${questions}`;
+}
+
+async function parseIntake(){
+  const text = $('#intakeText').value.trim();
+  const button = $('#parseIntake');
+  button.disabled = true; button.textContent = '正在整理…';
+  try{
+    const res = await api('/api/intake', {text});
+    customBackground = res.background;
+    $('#intakeSummary').innerHTML = intakeSummary(res.background, res.clarify);
+    $('#intakeSummary').hidden = false;
+    $('#startInterview').disabled = false;
+  }catch(e){
+    $('#intakeSummary').textContent = '无法解析：' + e.message;
+    $('#intakeSummary').hidden = false;
+    $('#startInterview').disabled = true;
+  }
+  button.disabled = false; button.textContent = '重新整理我的学习情况';
+}
+
+function renderInterview(res){
+  const snap = res.snapshot;
+  $('#interviewCard').dataset.started = 'true';
+  switchEntryMode('custom');
+  $('#interviewProgress').textContent = `${snap.asked} / ${snap.max_items}`;
+  IV.item = res.item;
+  if(!res.item){
+    $('#interviewQuestion').innerHTML = `<div class="notice ok"><b>你的测评已完成</b><br>已覆盖 ${snap.coverage} / ${snap.kp_total} 个知识点。现在可以用本次作答生成你的学习方案。</div>`;
+    $('#finishInterview').hidden = false;
+    return;
+  }
+  const it = res.item;
+  const options = (it.options || []).map((opt, index) =>
+    `<button class="interview-option" data-choice="${index}"><b>${String.fromCharCode(65 + index)}.</b> ${esc(opt)}</button>`).join('');
+  $('#interviewQuestion').innerHTML = `<div class="interview-meta">第 ${snap.asked + 1} 题 · ${esc(it._kp_name || it.kp || '知识点')} · 难度 ${esc(it.level || '-')} · 来源 ${esc(it.source_id || '未标注')} · ${esc(it._reason || 'select')}</div>
+    <div class="interview-question">${esc(it.stem)}</div><div class="interview-options">${options}</div>`;
+  document.querySelectorAll('.interview-option').forEach(button => {
+    button.onclick = () => answerInterview(Number(button.dataset.choice));
+  });
+}
+
+async function startInterview(){
+  if(!customBackground) return;
+  const button = $('#startInterview');
+  button.disabled = true; button.textContent = '正在准备题目…';
+  setState('正在测评', true);
+  try{
+    const res = await api('/api/interview/start', {background: customBackground, max_items: 12});
+    IV = {id: res.interview_id, background: customBackground, item: res.item};
+    renderInterview(res);
+  }catch(e){
+    $('#intakeSummary').textContent = '无法开始测评：' + e.message;
+    $('#intakeSummary').hidden = false;
+    setState('故障', false);
+  }
+  button.disabled = false; button.textContent = '重新开始我的 12 题测评';
+}
+
+async function answerInterview(choice){
+  if(!IV || !IV.item) return;
+  document.querySelectorAll('.interview-option').forEach(button => button.disabled = true);
+  try{
+    const res = await api('/api/interview/answer', {
+      interview_id: IV.id, item_id: IV.item.id, choice,
+    });
+    renderInterview(res);
+  }catch(e){
+    $('#interviewQuestion').insertAdjacentHTML('beforeend', `<div class="notice">提交失败：${esc(e.message)}</div>`);
+    document.querySelectorAll('.interview-option').forEach(button => button.disabled = false);
+  }
+}
+
+async function finishInterview(){
+  if(!IV) return;
+  const button = $('#finishInterview');
+  button.disabled = true; button.textContent = '正在生成我的方案…';
+  setState('正在生成方案', false);
+  $('#timeline').innerHTML = '';
+  try{
+    S = await api('/api/interview/finish', {interview_id: IV.id, background: IV.background, max_kp: 3});
+    render(); await stream(S.events, 0);
+    $('#interviewQuestion').innerHTML = '<div class="notice ok">已根据你的学习情况与实际作答，生成学习建议、学习路径和资料。</div>';
+    setState('准备就绪', true);
+  }catch(e){
+    $('#interviewQuestion').insertAdjacentHTML('beforeend', `<div class="notice">生成失败：${esc(e.message)}</div>`);
+    setState('故障', false);
+  }
+  button.disabled = false; button.textContent = '用测评结果生成我的方案';
+}
+
+/* ---- 资料上传：浏览器只发送原始文件；服务端只做暂存与质检 ---- */
+function readFileBase64(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('浏览器无法读取该文件'));
+    reader.onload = () => resolve(String(reader.result).split(',', 2)[1] || '');
+    reader.readAsDataURL(file);
+  });
+}
+
+function bytesLabel(bytes){
+  return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KiB` : `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
+}
+
+async function stageMaterial(){
+  const file = $('#materialFile').files[0];
+  const result = $('#stageResult');
+  if(!file){
+    result.textContent = '请先选择要提交的资料。'; result.hidden = false; return;
+  }
+  const button = $('#stageMaterial');
+  button.disabled = true; button.textContent = '正在检查资料信息…';
+  try{
+    const contentBase64 = await readFileBase64(file);
+    const res = await api('/api/materials/stage', {
+      filename: file.name,
+      content_base64: contentBase64,
+      source_description: $('#materialSource').value,
+      rights_confirmed: $('#materialRights').checked,
+    });
+    const skipped = res.skipped.length ? `<br>未读取：${res.skipped.map(x => `${esc(x.file)}（${esc(x.reason)}）`).join('；')}` : '';
+    result.classList.add('ok');
+    result.innerHTML = `<b>资料已提交，暂未进入知识库。</b><br>${esc(res.filename)} · ${bytesLabel(res.bytes)}；可供复核的内容 ${res.sourced} 条，需要单独处理 ${res.quarantined} 条，待归类 ${res.unassigned} 条。${skipped}<br><span>接下来：${res.next_steps.map(esc).join('；')}</span>`;
+    result.hidden = false;
+  }catch(e){
+    result.classList.remove('ok');
+    result.textContent = '未暂存：' + e.message;
+    result.hidden = false;
+  }
+  button.disabled = false; button.textContent = '提交并检查资料信息';
+}
+
 /* ---- 主流程 ---- */
 async function run(){
-  $('#run').disabled = true; $('#run').textContent = '调度中';
-  setState('运行中', false);
+  $('#run').disabled = true; $('#run').textContent = '正在生成学习方案…';
+  setState('正在生成方案', false);
   $('#timeline').innerHTML = '';
   try{
     S = await api('/api/run', {profile_id: picked, max_kp: 3});
     render(); await stream(S.events, 0);
-    setState('就绪', true);
+    setState('准备就绪', true);
   }catch(e){
     $('#timeline').innerHTML = `<p class="empty">运行失败：${esc(e.message)}</p>`;
     setState('故障', false);
   }
-  $('#run').disabled = false; $('#run').textContent = '重新运行';
+  $('#run').disabled = false; $('#run').textContent = '重新查看这份学习方案';
 }
 
 function setState(txt, on){
@@ -326,22 +692,12 @@ function render(){
   $('#dNarr').textContent = d.narrative;
 
   $('#rcount').textContent = S.resources.length;
-  $('#resources').innerHTML = S.resources.map(r => `
-    <div class="res">
-      <div class="top">
-        <span class="kind">${esc(r.kind)}</span>
-        <span class="diff">难度 ${r.difficulty}/5 · 断言 ${r.claims.length}</span>
-      </div>
-      <div class="ttl">${esc(r.title)}</div>
-      <details><summary>展开断言与出处</summary>
-        ${r.claims.map(c => `<div class="claim">${esc(c.text)}
-          ${claimSource(c)}</div>`).join('')}
-      </details>
-    </div>`).join('') || '<p class="empty">尚未生成</p>';
+  $('#resources').innerHTML = S.resources.map(resourceCard).join('') || '<p class="empty">暂未准备好学习资料。</p>';
 
   $('#fbCard').hidden = false;
   $('#fbKp').innerHTML = S.path.map((k, i) =>
     `<option value="${k}">${esc(S.path_names[i])}</option>`).join('');
+  $('#fbKp').onchange = buildQuiz;
   buildQuiz();
   $('#charts').hidden = false;
   drawGaps(); drawFit(); drawPath();
@@ -349,18 +705,43 @@ function render(){
 
 /* ---- 反馈 ---- */
 function buildQuiz(){
-  $('#quiz').innerHTML = [1,2,3,4].map(i =>
-    `<button class="tog" data-on="1" data-i="${i}">第${i}题 正确</button>`).join('');
-  document.querySelectorAll('.tog').forEach(b => b.onclick = () => {
-    const on = b.dataset.on === '1' ? '0' : '1';
-    b.dataset.on = on;
-    b.textContent = `第${b.dataset.i}题 ${on === '1' ? '正确' : '错误'}`;
+  const kp = $('#fbKp').value;
+  const resource = S.resources.find(r => r.kp === kp && r.kind === 'quiz');
+  const items = (resource && resource.items ? resource.items : []).slice(0, 4);
+  if(!items.length){
+    $('#quiz').innerHTML = '<p class="empty">该知识点暂未生成可用于反馈的测试题。</p>';
+    $('#submitFb').disabled = true;
+    return;
+  }
+  $('#submitFb').disabled = false;
+  $('#quiz').innerHTML = items.map((it, i) => `
+    <div class="feedback-question" data-answer="${it.answer === false ? '0' : '1'}">
+      <div class="feedback-meta">第 ${i + 1} 题 · 判断题 · 难度 ${esc(it.difficulty || '-')} · ${esc(it.source_id || '无引用')}</div>
+      <div class="feedback-stem">${esc(it.stem)}</div>
+      <div class="answer-row">
+        <button class="answer" data-value="1">正确</button>
+        <button class="answer" data-value="0">错误</button>
+      </div>
+      <div class="feedback-explain" hidden>${esc(it.explain || '')}</div>
+    </div>`).join('');
+  document.querySelectorAll('.answer').forEach(b => b.onclick = () => {
+    const box = b.closest('.feedback-question');
+    box.querySelectorAll('.answer').forEach(x => x.removeAttribute('data-on'));
+    b.dataset.on = '1';
+    box.dataset.pick = b.dataset.value;
+    box.querySelector('.feedback-explain').hidden = false;
   });
 }
 
 async function submitFb(){
   const before = S.events.length;
-  const answers = [...document.querySelectorAll('.tog')].map(b => b.dataset.on === '1');
+  const boxes = [...document.querySelectorAll('.feedback-question')];
+  if(boxes.some(b => b.dataset.pick === undefined)){
+    $('#verdict').hidden = false;
+    $('#verdict').textContent = '还有题目未作答，请为每道题选择“正确”或“错误”。';
+    return;
+  }
+  const answers = boxes.map(b => b.dataset.pick === b.dataset.answer);
   $('#submitFb').disabled = true;
   try{
     const res = await api('/api/feedback', {session_id: S.session_id, kp: $('#fbKp').value, answers});
@@ -378,15 +759,8 @@ async function submitFb(){
 
 /* 反馈后只刷资源和图，不重放整条时间线 */
 function render0(){
-  $('#resources').innerHTML = S.resources.map(r => `
-    <div class="res">
-      <div class="top"><span class="kind">${esc(r.kind)}</span>
-        <span class="diff">难度 ${r.difficulty}/5 · 断言 ${r.claims.length}</span></div>
-      <div class="ttl">${esc(r.title)}</div>
-      <details><summary>展开断言与出处</summary>
-        ${r.claims.map(c => `<div class="claim">${esc(c.text)}
-          ${claimSource(c)}</div>`).join('')}
-      </details></div>`).join('');
+  $('#resources').innerHTML = S.resources.map(resourceCard).join('');
+  buildQuiz();
   drawFit(); drawPath();
 }
 
@@ -485,6 +859,28 @@ function drawPath(){
 
 $('#run').onclick = run;
 $('#submitFb').onclick = submitFb;
+$('#parseIntake').onclick = parseIntake;
+$('#startInterview').onclick = startInterview;
+$('#finishInterview').onclick = finishInterview;
+$('#stageMaterial').onclick = stageMaterial;
+function switchEntryMode(mode){
+  document.querySelectorAll('[data-entry-panel]').forEach(panel => {
+    const isInterview = panel.dataset.entryInterview === 'true';
+    panel.hidden = panel.dataset.entryPanel !== mode || (isInterview && panel.dataset.started !== 'true');
+  });
+  document.querySelectorAll('[data-entry-mode]').forEach(button => {
+    button.setAttribute('aria-selected', String(button.dataset.entryMode === mode));
+  });
+}
+document.querySelectorAll('[data-entry-mode]').forEach(button => {
+  button.onclick = () => switchEntryMode(button.dataset.entryMode);
+});
+switchEntryMode('custom');
+$('#intakeText').addEventListener('input', () => {
+  customBackground = null;
+  $('#startInterview').disabled = true;
+  $('#intakeSummary').hidden = true;
+});
 loadProfiles();
 </script>
 </body>

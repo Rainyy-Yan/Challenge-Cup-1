@@ -8,6 +8,7 @@ import json
 import unittest
 from pathlib import Path
 
+from core.demo_sources import validate_demo_source_manifest
 from core.retrieval import Retriever
 
 
@@ -44,10 +45,11 @@ class TestDemoSourceManifest(unittest.TestCase):
             }
         return result
 
-    def test_manifest_covers_exactly_the_sources_used_by_snapshot(self):
+    def test_manifest_covers_exactly_the_sources_embedded_in_snapshot(self):
         used_by_profile = self._demo_sources_by_profile()
         used = set().union(*used_by_profile.values())
-        self.assertEqual(set(self.records), used)
+        self.assertEqual(set(self.records), set(self.snapshot["kb"]))
+        self.assertLessEqual(used, set(self.snapshot["kb"]))
 
         for chunk_id, record in self.records.items():
             expected_profiles = sorted(
@@ -55,6 +57,9 @@ class TestDemoSourceManifest(unittest.TestCase):
                 if chunk_id in ids
             )
             self.assertEqual(sorted(record["profiles"]), expected_profiles, chunk_id)
+
+    def test_snapshot_source_set_passes_runtime_manifest_validation(self):
+        validate_demo_source_manifest(self.snapshot["kb"], artifact="测试快照")
 
     def test_each_formal_demo_source_has_a_locatable_source_record(self):
         required = {
@@ -104,5 +109,6 @@ class TestDemoSourceManifest(unittest.TestCase):
         formal_demo = Retriever.from_jsonl(KB_PATH, demo_only=True)
         self.assertFalse(excluded & {chunk.id for chunk in formal_demo.chunks})
 
+        self.assertFalse(excluded & set(self.snapshot["kb"]))
         used = set().union(*self._demo_sources_by_profile().values())
         self.assertFalse(excluded & used)
