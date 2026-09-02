@@ -1,6 +1,6 @@
 """Fail-closed, transport-injectable inference provider for qykw."""
 from __future__ import annotations
-import http.client, ipaddress, json, os, queue, socket, ssl, threading, time
+import http.client, ipaddress, json, os, queue, re, socket, ssl, threading, time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -15,6 +15,10 @@ _RETRY_DELAY_SECONDS = 0.1
 _SAFE_REQUEST_ID = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 _MAX_ACTIVE_RESOLVERS = 2
 _RESOLVER_SLOTS = threading.BoundedSemaphore(_MAX_ACTIVE_RESOLVERS)
+_MAX_SCHEMA_DEPTH = 16
+_MAX_SCHEMA_NODES = 1_000
+_MAX_SCHEMA_ARRAY_ITEMS = 10_000
+_SAFE_SCHEMA_PATTERNS = frozenset({"^[0-9a-f]{64}$"})
 
 class InferenceProvider(Protocol):
     def capabilities(self) -> ProviderCapabilities: ...
@@ -102,9 +106,9 @@ class ResponsesInferenceProvider:
         return ProviderCapabilities(self._context_window,self._max_output_tokens,True,frozenset({"maximum"}))
     def complete(self, request: InferenceRequest) -> InferenceResponse:
         started=self._clock(); deadline_at=started+request.deadline_seconds
-        validate_provider_capabilities(self,request)
         try:
             _validate_schema_contract(request.schema)
+            validate_provider_capabilities(self,request)
             body = _request_body(self._model, request)
             if len(body) + request.max_output_tokens > self._context_window:
                 raise ValueError
@@ -210,8 +214,25 @@ def _request_body(model: str, request: InferenceRequest) -> bytes:
     return body
 def _is_acceptable_global_address(candidate: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return candidate.is_global and not any((candidate.is_private, candidate.is_loopback, candidate.is_link_local, candidate.is_multicast, candidate.is_reserved, candidate.is_unspecified, getattr(candidate, "is_site_local", False)))
-def _validate_schema_contract(schema: Mapping[str, object], *, root: bool=True) -> None:
-    if not isinstance(schema, Mapping): raise ValueError
+def _validate_schema_contract(
+    schema: Mapping[str, object],
+    *,
+    root: bool=True,
+    _depth: int=0,
+    _nodes: list[int] | None=None,
+) -> None:
+    if not isinstance(schema, Mapping) or _depth > _MAX_SCHEMA_DEPTH: raise ValueError
+    if _nodes is None: _nodes=[]
+    _nodes.append(1)
+    if len(_nodes)>_MAX_SCHEMA_NODES: raise ValueError
+    if "anyOf" in schema:
+        if root or set(schema)!={"anyOf"}: raise ValueError
+        options=schema["anyOf"]
+        if not isinstance(options,list) or len(options)!=2 or not all(isinstance(option,Mapping) for option in options): raise ValueError
+        option_types=[option.get("type") for option in options]
+        if len(set(option_types))!=len(option_types) or any(value not in {"string","null"} for value in option_types): raise ValueError
+        for option in options: _validate_schema_contract(option,root=False,_depth=_depth+1,_nodes=_nodes)
+        return
     expected=schema.get("type")
     if root and expected != "object": raise ValueError
     common={"type", "description"}
@@ -220,24 +241,31 @@ def _validate_schema_contract(schema: Mapping[str, object], *, root: bool=True) 
         allowed=common|{"additionalProperties", "required", "properties"}
         properties=schema.get("properties"); required=schema.get("required")
         if set(schema)-allowed or schema.get("additionalProperties") is not False or not isinstance(properties,Mapping) or not isinstance(required,list) or len(required)!=len(set(required)) or set(required)!=set(properties) or not all(isinstance(name,str) for name in required): raise ValueError
-        for child in properties.values(): _validate_schema_contract(child,root=False)
+        for child in properties.values(): _validate_schema_contract(child,root=False,_depth=_depth+1,_nodes=_nodes)
     elif expected=="array":
-        if set(schema) - (common | {"items"}): raise ValueError
+        if set(schema) - (common | {"items","minItems","maxItems"}): raise ValueError
         items=schema.get("items")
         if not isinstance(items,Mapping): raise ValueError
-        _validate_schema_contract(items,root=False)
+        minimum=schema.get("minItems",0); maximum=schema.get("maxItems",_MAX_SCHEMA_ARRAY_ITEMS)
+        if (not isinstance(minimum,int) or isinstance(minimum,bool) or not isinstance(maximum,int)
+                or isinstance(maximum,bool) or minimum<0 or maximum<minimum or maximum>_MAX_SCHEMA_ARRAY_ITEMS): raise ValueError
+        _validate_schema_contract(items,root=False,_depth=_depth+1,_nodes=_nodes)
     elif expected=="string":
-        allowed=common|{"minLength", "enum"}
+        allowed=common|{"minLength", "enum", "pattern"}
         if set(schema)-allowed: raise ValueError
         minimum=schema.get("minLength")
         enum=schema.get("enum")
+        pattern=schema.get("pattern")
         if minimum is not None and (not isinstance(minimum,int) or isinstance(minimum,bool) or minimum<0): raise ValueError
         if enum is not None and (not isinstance(enum,list) or not enum or not all(isinstance(value,str) for value in enum)): raise ValueError
+        if pattern is not None and (not isinstance(pattern,str) or pattern not in _SAFE_SCHEMA_PATTERNS): raise ValueError
     elif expected=="integer":
         allowed=common|{"minimum"}
         if set(schema)-allowed: raise ValueError
         minimum=schema.get("minimum")
         if minimum is not None and (not isinstance(minimum,int) or isinstance(minimum,bool)): raise ValueError
+    elif expected in {"boolean","null"}:
+        if set(schema)-common: raise ValueError
     else: raise ValueError
 def _transport_failure(exc: BaseException) -> tuple[ProviderErrorCode,bool]|None:
     if isinstance(exc,ProviderError): raise exc
@@ -272,6 +300,16 @@ def _parse_response(response: TransportResponse, schema: Mapping[str,object], ma
     return InferenceResponse(request_id,output["value"],InferenceUsage(usage["input_tokens"],usage["output_tokens"]))
 def _validate_schema(value: object, schema: Mapping[str,object]) -> None:
     if not isinstance(schema,Mapping): raise ValueError
+    if "anyOf" in schema:
+        options=schema.get("anyOf")
+        if not isinstance(options,list): raise ValueError
+        matches=0
+        for option in options:
+            try: _validate_schema(value,option)
+            except ValueError: continue
+            matches+=1
+        if matches!=1: raise ValueError
+        return
     expected=schema.get("type")
     if expected=="object":
         properties=schema.get("properties"); required=schema.get("required")
@@ -283,9 +321,17 @@ def _validate_schema(value: object, schema: Mapping[str,object]) -> None:
             _validate_schema(item,properties[name])
     elif expected=="array":
         if not isinstance(value,list) or not isinstance(schema.get("items"),Mapping): raise ValueError
+        minimum=schema.get("minItems",0); maximum=schema.get("maxItems",_MAX_SCHEMA_ARRAY_ITEMS)
+        if not minimum<=len(value)<=maximum: raise ValueError
         for item in value: _validate_schema(item,schema["items"])
     elif expected=="string":
-        if not isinstance(value,str) or len(value)<schema.get("minLength",0) or ("enum" in schema and value not in schema["enum"]): raise ValueError
+        if (not isinstance(value,str) or len(value)<schema.get("minLength",0)
+                or ("enum" in schema and value not in schema["enum"])
+                or ("pattern" in schema and re.search(schema["pattern"],value) is None)): raise ValueError
     elif expected=="integer":
         if not isinstance(value,int) or isinstance(value,bool) or value<schema.get("minimum",-(2**63)): raise ValueError
+    elif expected=="boolean":
+        if type(value) is not bool: raise ValueError
+    elif expected=="null":
+        if value is not None: raise ValueError
     else: raise ValueError

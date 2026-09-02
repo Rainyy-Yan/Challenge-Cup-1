@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from tools.qykw.domain import PullSnapshot, RunContext
+from tools.qykw.provider import InferenceProvider, validate_provider_capabilities
 from tools.qykw.state import RunStateStore
 
 
@@ -171,6 +172,16 @@ class SourceTreeIndex:
     def __post_init__(self) -> None:
         _require_tuple_items(self.entries, SourceTreeEntry, "entries")
         _require_tuple_items(self.blobs, SourceBlob, "blobs")
+
+
+@dataclass(frozen=True)
+class TrustedSourceFile:
+    """A controller-derived UTF-8 source view bound to the validated Head."""
+
+    path: str
+    mode: str
+    content: str
+    sha256: str
 
 
 class TrustedSourceTreeProvider(Protocol):
@@ -336,6 +347,203 @@ class ChangePolicy(Protocol):
     def validate_manifest(
         self, request: ChangeRequest, manifest: PatchManifest
     ) -> None: ...
+
+    def trusted_source_files(
+        self, request: ChangeRequest
+    ) -> tuple[TrustedSourceFile, ...]: ...
+
+
+def prepare_change(
+    request: ChangeRequest,
+    snapshot: PullSnapshot,
+    provider: InferenceProvider,
+    policy: ChangePolicy,
+    state_store: RunStateStore,
+) -> PatchManifest:
+    """Generate and validate one deterministic patch manifest.
+
+    The provider can propose only file paths and exact text replacements.  All
+    run bindings, the verification profile, source baselines, ordering, and
+    digest are supplied or recomputed by this controller.
+    """
+
+    policy.validate_request(request, snapshot)
+    source_files = _validate_trusted_source_files(
+        policy.trusted_source_files(request)
+    )
+
+    # Imported lazily so prompt builders can type-reference the immutable
+    # change contracts without creating an import cycle.
+    from tools.qykw.prompts import build_change_patch_request
+
+    inference_request = build_change_patch_request(request, source_files)
+    _raise_if_canceled(request, state_store)
+    validate_provider_capabilities(provider, inference_request)
+    response = provider.complete(inference_request)
+    _raise_if_canceled(request, state_store)
+
+    files = _parse_patch_files(response.value)
+    provisional = PatchManifest(
+        schema_version=1,
+        run_id=request.context.run_id,
+        source_repository=request.source_repository,
+        target_repository=request.target_repository,
+        source_pr_number=request.context.pr_number,
+        source_head_sha=request.source_head_sha,
+        target_base_sha=request.target_base_sha,
+        target_base_ref=request.target_base_ref,
+        verification_profile=request.verification_profile,
+        files=tuple(sorted(files, key=lambda patch: patch.path)),
+        digest="",
+    )
+    manifest = PatchManifest(
+        schema_version=provisional.schema_version,
+        run_id=provisional.run_id,
+        source_repository=provisional.source_repository,
+        target_repository=provisional.target_repository,
+        source_pr_number=provisional.source_pr_number,
+        source_head_sha=provisional.source_head_sha,
+        target_base_sha=provisional.target_base_sha,
+        target_base_ref=provisional.target_base_ref,
+        verification_profile=provisional.verification_profile,
+        files=provisional.files,
+        digest=compute_manifest_digest(provisional),
+    )
+    policy.validate_manifest(request, manifest)
+    _raise_if_canceled(request, state_store)
+    return manifest
+
+
+def canonical_manifest_bytes(
+    manifest: PatchManifest, *, include_digest: bool
+) -> bytes:
+    """Serialize a manifest with stable path ordering and edit ordering."""
+
+    if type(manifest) is not PatchManifest or type(include_digest) is not bool:
+        raise TypeError("invalid_manifest_serialization_input")
+    if include_digest and manifest.digest != compute_manifest_digest(manifest):
+        raise ValueError("manifest_digest_mismatch")
+    payload: dict[str, object] = {
+        "schema_version": manifest.schema_version,
+        "run_id": manifest.run_id,
+        "source_repository": manifest.source_repository,
+        "target_repository": manifest.target_repository,
+        "source_pr_number": manifest.source_pr_number,
+        "source_head_sha": manifest.source_head_sha,
+        "target_base_sha": manifest.target_base_sha,
+        "target_base_ref": manifest.target_base_ref,
+        "verification_profile": manifest.verification_profile,
+        "files": [
+            {
+                "path": patch.path,
+                "base_sha256": patch.base_sha256,
+                "create": patch.create,
+                "edits": [
+                    {"before": edit.before, "after": edit.after}
+                    for edit in patch.edits
+                ],
+            }
+            for patch in sorted(manifest.files, key=lambda item: item.path)
+        ],
+    }
+    if include_digest:
+        payload["digest"] = manifest.digest
+    try:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, UnicodeError):
+        raise ValueError("manifest_non_utf8") from None
+
+
+def compute_manifest_digest(manifest: PatchManifest) -> str:
+    """Bind every trusted field and exact replacement to one SHA-256."""
+
+    encoded = canonical_manifest_bytes(manifest, include_digest=False)
+    return hashlib.sha256(b"qykw-patch-manifest-v1\0" + encoded).hexdigest()
+
+
+def _parse_patch_files(value: object) -> tuple[FilePatch, ...]:
+    if type(value) is not dict or set(value) != {"files"}:
+        raise ValueError("invalid_patch_response")
+    raw_files = value["files"]
+    if type(raw_files) is not list or not 1 <= len(raw_files) <= 20:
+        raise ValueError("invalid_patch_file_count")
+    parsed: list[FilePatch] = []
+    for raw_patch in raw_files:
+        if type(raw_patch) is not dict or set(raw_patch) != {
+            "path", "base_sha256", "create", "edits"
+        }:
+            raise ValueError("invalid_patch_file")
+        path = raw_patch["path"]
+        base_sha256 = raw_patch["base_sha256"]
+        create = raw_patch["create"]
+        raw_edits = raw_patch["edits"]
+        if type(path) is not str or not path:
+            raise TypeError("invalid_patch_path")
+        if base_sha256 is not None and type(base_sha256) is not str:
+            raise TypeError("invalid_patch_base_digest")
+        if type(create) is not bool:
+            raise TypeError("invalid_patch_create")
+        if type(raw_edits) is not list or not 1 <= len(raw_edits) <= 100:
+            raise ValueError("invalid_patch_edit_count")
+        edits: list[TextEdit] = []
+        for raw_edit in raw_edits:
+            if type(raw_edit) is not dict or set(raw_edit) != {"before", "after"}:
+                raise ValueError("invalid_text_edit")
+            before = raw_edit["before"]
+            after = raw_edit["after"]
+            if type(before) is not str or type(after) is not str:
+                raise TypeError("invalid_text_edit_type")
+            try:
+                before.encode("utf-8")
+                after.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("non_utf8_text") from None
+            edits.append(TextEdit(before, after))
+        parsed.append(FilePatch(path, base_sha256, create, tuple(edits)))
+    return tuple(parsed)
+
+
+def _validate_trusted_source_files(
+    source_files: object,
+) -> tuple[TrustedSourceFile, ...]:
+    if type(source_files) is not tuple or len(source_files) > 100:
+        raise ValueError("invalid_trusted_source_view")
+    previous_path: str | None = None
+    total_bytes = 0
+    for source in source_files:
+        if type(source) is not TrustedSourceFile or source.mode != "100644":
+            raise ValueError("invalid_trusted_source_view")
+        if previous_path is not None and source.path <= previous_path:
+            raise ValueError("invalid_trusted_source_order")
+        previous_path = source.path
+        try:
+            encoded = source.content.encode("utf-8")
+        except (AttributeError, UnicodeEncodeError):
+            raise ValueError("invalid_trusted_source_view") from None
+        total_bytes += len(encoded)
+        if (
+            not source.path
+            or not source.content
+            or len(encoded) > 256 * 1024
+            or total_bytes > 2 * 1024 * 1024
+            or source.sha256 != hashlib.sha256(encoded).hexdigest()
+        ):
+            raise ValueError("invalid_trusted_source_view")
+    return source_files
+
+
+def _raise_if_canceled(
+    request: ChangeRequest, state_store: RunStateStore
+) -> None:
+    if state_store.is_cancel_requested(
+        request.context.pr_number, request.context.run_id
+    ):
+        raise ValueError("change_canceled")
 
 
 def _require_tuple_items(value: object, item_type: type, field: str) -> None:

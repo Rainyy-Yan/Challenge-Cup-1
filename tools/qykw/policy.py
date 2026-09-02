@@ -15,6 +15,7 @@ from tools.qykw.change import (
     SourceBlob,
     SourceTreeEntry,
     SourceTreeIndex,
+    TrustedSourceFile,
     TrustedSourceTreeProvider,
     compute_source_tree_index_digest,
 )
@@ -94,6 +95,8 @@ _MAX_COMPONENT_BYTES = 255
 _MAX_PATCH_TEXT_BYTES = 512 * 1024
 _MAX_MANIFEST_TEXT_BYTES = 2 * 1024 * 1024
 _MAX_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024
+_MAX_TRUSTED_SOURCE_FILES = 100
+_MAX_TRUSTED_SOURCE_BYTES = 2 * 1024 * 1024
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
 )
@@ -322,6 +325,71 @@ class DeterministicChangePolicy:
             if total_output_bytes > _MAX_TOTAL_OUTPUT_BYTES:
                 raise ValueError("total_output_limit")
 
+    def trusted_source_files(
+        self, request: ChangeRequest
+    ) -> tuple[TrustedSourceFile, ...]:
+        """Return a bounded UTF-8 view derived only from the validated Head."""
+
+        if self._validated_request != request:
+            raise ValueError("request_not_validated")
+        result: list[TrustedSourceFile] = []
+        total_bytes = 0
+        for key, entry in sorted(
+            self._tree_entries.items(), key=lambda item: item[1].path
+        ):
+            if entry.kind != "blob" or entry.mode != _REGULAR_MODE:
+                continue
+            source = self._source_files.get(key)
+            blob = self._tree_blobs.get(key)
+            if source is None and blob is None:
+                continue
+            try:
+                path = _normalize_change_path(entry.path)
+            except ValueError:
+                continue
+            if source is not None:
+                if (
+                    source.path != path
+                    or source.binary
+                    or source.generated
+                    or source.status.casefold() in {"removed", "deleted"}
+                    or source.head_mode != entry.mode
+                    or source.head_sha != entry.git_sha
+                    or source.head_content is None
+                ):
+                    continue
+                content = source.head_content
+                try:
+                    encoded = content.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise ValueError("non_utf8_text") from None
+                if _git_blob_object_sha(encoded, entry.git_sha) != entry.git_sha:
+                    raise ValueError("source_content_tree_mismatch")
+            else:
+                assert blob is not None
+                try:
+                    content = blob.content.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                encoded = blob.content
+            if not content or len(encoded) > _MAX_FILE_BYTES:
+                continue
+            total_bytes += len(encoded)
+            if (
+                len(result) >= _MAX_TRUSTED_SOURCE_FILES
+                or total_bytes > _MAX_TRUSTED_SOURCE_BYTES
+            ):
+                raise ValueError("trusted_source_context_limit")
+            result.append(
+                TrustedSourceFile(
+                    path=path,
+                    mode=entry.mode,
+                    content=content,
+                    sha256=hashlib.sha256(encoded).hexdigest(),
+                )
+            )
+        return tuple(result)
+
     def _validate_patch(self, path: str, patch: FilePatch) -> int:
         key = _collision_key(path)
         tree_entry = self._tree_entries.get(key)
@@ -394,6 +462,12 @@ class DeterministicChangePolicy:
         if source_content is None:
             raise ValueError("source_content_unavailable")
         _validate_text(source_content, allow_empty=False)
+        try:
+            trusted_sha256 = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError:
+            raise ValueError("non_utf8_text") from None
+        if patch.base_sha256 != trusted_sha256:
+            raise ValueError("base_digest_mismatch")
         content = source_content
         for edit in patch.edits:
             _validate_text(edit.before, allow_empty=False)

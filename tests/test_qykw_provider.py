@@ -248,6 +248,109 @@ def secure_provider(
 
 
 class TestResponsesInferenceProvider(unittest.TestCase):
+    def test_supports_bounded_patch_schema_types_without_coercion(self) -> None:
+        schema = {
+            "title": "patch-v1",
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["flag", "digest", "items"],
+            "properties": {
+                "flag": {"type": "boolean"},
+                "digest": {
+                    "anyOf": [
+                        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        {"type": "null"},
+                    ]
+                },
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {"type": "string", "minLength": 1},
+                },
+            },
+        }
+        value = {"flag": True, "digest": None, "items": ["x"]}
+        provider = secure_provider(RecordingTransport([good_response(value)]))
+
+        response = provider.complete(replace(request(), schema=schema))
+
+        self.assertEqual(response.value, value)
+
+        invalid_values = (
+            {"flag": 1, "digest": None, "items": ["x"]},
+            {"flag": True, "digest": 12, "items": ["x"]},
+            {"flag": True, "digest": "g" * 64, "items": ["x"]},
+            {"flag": True, "digest": None, "items": []},
+            {"flag": True, "digest": None, "items": ["x", "y", "z"]},
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ProviderError, "invalid_response"):
+                    secure_provider(
+                        RecordingTransport([good_response(invalid)])
+                    ).complete(replace(request(), schema=schema))
+
+    def test_rejects_unbounded_ambiguous_or_oversized_schema_extensions(self) -> None:
+        base = {
+            "title": "invalid-v1",
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["value"],
+            "properties": {"value": {"type": "string"}},
+        }
+        invalid_children = (
+            {"type": "string", "pattern": "["},
+            {"anyOf": [{"type": "string"}, {"type": "string"}]},
+            {"anyOf": [{"type": "string"}]},
+            {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 1,
+                "items": {"type": "string"},
+            },
+            {
+                "type": "array",
+                "maxItems": 10001,
+                "items": {"type": "string"},
+            },
+        )
+        for child in invalid_children:
+            schema = {
+                **base,
+                "properties": {"value": child},
+            }
+            transport = RecordingTransport([good_response()])
+            with self.subTest(child=child), self.assertRaisesRegex(
+                ProviderError, "invalid_config"
+            ):
+                secure_provider(transport).complete(replace(request(), schema=schema))
+            self.assertEqual(transport.calls, 0)
+
+        deep: dict[str, object] = {"type": "string"}
+        for _ in range(18):
+            deep = {"type": "array", "items": deep}
+        wide_properties = {
+            f"field_{index}": {"type": "string"} for index in range(1_001)
+        }
+        oversized_schemas = (
+            {**base, "properties": {"value": deep}},
+            {
+                "title": "wide-v1",
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(wide_properties),
+                "properties": wide_properties,
+            },
+        )
+        for schema in oversized_schemas:
+            transport = RecordingTransport([good_response()])
+            with self.subTest(schema_title=schema["title"]), self.assertRaisesRegex(
+                ProviderError, "invalid_config"
+            ):
+                secure_provider(transport).complete(replace(request(), schema=schema))
+            self.assertEqual(transport.calls, 0)
+
     def test_rejects_insecure_endpoint_before_transport(self) -> None:
         transport = RecordingTransport([good_response()])
         provider = secure_provider(transport, base_url="http://allowed.example/v1")
