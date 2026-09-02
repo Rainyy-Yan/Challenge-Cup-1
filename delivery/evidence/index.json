@@ -106,7 +106,7 @@
       "gate": "G2",
       "category": "statistical-result",
       "title": "经人工签字批准的正式指标计分卡",
-      "path": "delivery/evidence/G2/EV-G2-FORMAL-SCORECARD-APPROVED-001/UTC_TIMESTAMP_CANDIDATE_SHA/scorecard.json",
+      "path": "delivery/evidence/G2/EV-G2-FORMAL-SCORECARD-APPROVED-001/UTC_TIMESTAMP_CANDIDATE_SHA/result/scorecard.json",
       "status": "planned",
       "owner": "unassigned",
       "related_issues": [67],
