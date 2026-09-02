@@ -50,11 +50,11 @@ ARTIFACT_KINDS = {
     "resource_output",
     "coverage_evidence",
 }
-TRUST_LIMITATIONS = [
+TRUST_LIMITATIONS = (
     "Manifest and hash validation proves only internal content/reference binding; "
     "it does not prove the real-world authenticity of sources, excerpts, signatures, "
-    "or reviewer identities."
-]
+    "or reviewer identities.",
+)
 
 
 def _unknown_fields(value: dict, allowed: set[str], label: str, errors: list[str]) -> None:
@@ -423,19 +423,13 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
         errors.append(
             "provenance.artifact_manifest_sha256 must match the canonical artifact_manifest"
         )
-    for kind in (
-        "profile_snapshot",
-        "claim_output",
-        "resource_output",
-        "coverage_evidence",
-    ):
-        digests = [
-            artifact["sha256"]
-            for artifact in artifacts.values()
-            if artifact.get("kind") == kind
-        ]
-        if len(digests) != len(set(digests)):
-            errors.append(f"{kind} content hashes must be unique")
+    profile_digests = [
+        artifact["sha256"]
+        for artifact in artifacts.values()
+        if artifact.get("kind") == "profile_snapshot"
+    ]
+    if len(profile_digests) != len(set(profile_digests)):
+        errors.append("profile_snapshot content hashes must be unique")
     return artifacts
 
 
@@ -756,6 +750,65 @@ def _validate_records(
             elif adjudicator in reviewers:
                 errors.append(f"{singular} {display_id} adjudicator must be distinct from both reviewers")
     return accepted
+
+
+def _validate_artifact_closure(
+    data: dict, artifacts: dict[str, dict], errors: list[str]
+) -> None:
+    manifest_ids = {
+        kind: {
+            artifact_id
+            for artifact_id, artifact in artifacts.items()
+            if artifact.get("kind") == kind
+        }
+        for kind in ARTIFACT_KINDS
+    }
+    referenced_ids = {kind: set() for kind in ARTIFACT_KINDS}
+
+    dataset = data.get("dataset")
+    if isinstance(dataset, dict):
+        profile_mapping = dataset.get("profile_artifact_ids")
+        if isinstance(profile_mapping, dict):
+            for artifact_id in profile_mapping.values():
+                canonical = _normalise_identity(artifact_id)
+                if canonical is not None:
+                    referenced_ids["profile_snapshot"].add(canonical)
+        cases = dataset.get("cases")
+        if isinstance(cases, list):
+            for case in cases:
+                if not isinstance(case, dict):
+                    continue
+                canonical = _normalise_identity(case.get("artifact_id"))
+                if canonical is not None:
+                    referenced_ids["case_input"].add(canonical)
+
+    for key, kind in (("claims", "claim_output"), ("adaptations", "resource_output")):
+        records = data.get(key)
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            canonical = _normalise_identity(record.get("artifact_id"))
+            if canonical is not None:
+                referenced_ids[kind].add(canonical)
+
+    coverage = data.get("coverage_universe")
+    if isinstance(coverage, list):
+        for point in coverage:
+            evidence_ids = point.get("evidence_ids") if isinstance(point, dict) else None
+            if not isinstance(evidence_ids, list):
+                continue
+            for evidence_id in evidence_ids:
+                canonical = _normalise_identity(evidence_id)
+                if canonical is not None:
+                    referenced_ids["coverage_evidence"].add(canonical)
+
+    for kind in sorted(ARTIFACT_KINDS):
+        if manifest_ids[kind] != referenced_ids[kind]:
+            errors.append(
+                f"artifact_manifest {kind} ids must exactly match referenced ids"
+            )
 
 
 def validate_truth(data: dict) -> list[str]:
@@ -1123,6 +1176,8 @@ def validate_truth(data: dict) -> list[str]:
                 if not math.isfinite(coverage_ratio):
                     errors.append("coverage ratio must be finite")
 
+    _validate_artifact_closure(data, artifacts, errors)
+
     if reviewer_ids is not None:
         for records, allowed, metric in (
             (claims, HALLUCINATION_LABELS, "hallucination"),
@@ -1233,7 +1288,7 @@ def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
             "claims": {"records": None, "cases": None, "share": None},
             "adaptations": {"records": None, "cases": None, "share": None},
         },
-        "limitations": errors + TRUST_LIMITATIONS,
+        "limitations": errors + list(TRUST_LIMITATIONS),
         "overall_status": "not_assessable",
     }
 
@@ -1387,7 +1442,7 @@ def build_scorecard(data: dict) -> dict:
             "claims": claims_common_pair,
             "adaptations": adaptations_common_pair,
         },
-        "limitations": TRUST_LIMITATIONS,
+        "limitations": list(TRUST_LIMITATIONS),
         "overall_status": "pass" if passed else "fail",
     }
 

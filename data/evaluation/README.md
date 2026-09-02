@@ -33,9 +33,19 @@ Ownership is bidirectional rather than an ID-only declaration:
 - each coverage artifact's `subject_id` is the knowledge-point ID it supports,
   so evidence for one point cannot be relabelled as evidence for another.
 
-Profile, claim-output, resource-output, and coverage-evidence content hashes
-must be unique within their kinds. Claim, resource, and coverage artifacts must
-cite at least one approved citation.
+For every artifact kind, the manifest ID set must exactly equal the set of IDs
+referenced by the dataset, rows, or coverage universe. Orphan artifacts and
+extra artifacts competing for an existing subject are rejected. Coverage may
+reference multiple evidence artifacts for one knowledge point, but every
+manifested coverage artifact must appear in at least one coverage row.
+
+Profile-snapshot content hashes must be unique. Claim, resource, and coverage
+content may legitimately repeat across different owned subjects, so those
+hashes are not globally unique; ownership and the closed ID sets prevent row
+inflation. Case-input hashes may repeat across different profiles, while the
+required 50 unique `(profile_snapshot.sha256, case_input.sha256)` pairs prevent
+duplicate cases under the same profile. Claim, resource, and coverage artifacts
+must cite at least one approved citation.
 
 Every citation has exactly `id`, `source_id`, `locator`, `excerpt`, `sha256`,
 and `review_status`. Its digest binds the UTF-8 excerpt; an artifact digest binds

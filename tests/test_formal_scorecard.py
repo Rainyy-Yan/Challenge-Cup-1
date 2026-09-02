@@ -147,12 +147,6 @@ def valid_truth() -> dict:
     artifacts.extend(
         [
             _artifact(
-                "e-001",
-                "coverage_evidence",
-                subject_id="kp-001",
-                citation_ids=["citation-approved"],
-            ),
-            _artifact(
                 "e-002",
                 "coverage_evidence",
                 subject_id="kp-002",
@@ -261,6 +255,14 @@ def passing_truth() -> dict:
         {"kp_id": "kp-001", "weight": 2.0, "covered": True, "evidence_ids": ["e-001"]},
         {"kp_id": "kp-002", "weight": 3.0, "covered": True, "evidence_ids": ["e-002"]},
     ]
+    truth["artifact_manifest"]["artifacts"].append(
+        _artifact(
+            "e-001",
+            "coverage_evidence",
+            subject_id="kp-001",
+            citation_ids=["citation-approved"],
+        )
+    )
     _refresh_manifest_hash(truth)
     return truth
 
@@ -322,6 +324,61 @@ class TestTruthValidation(unittest.TestCase):
             "claims artifact_id must not be reused across records",
             validate_truth(truth),
         )
+
+    def test_rejects_orphan_artifact_for_every_kind(self):
+        cases = (
+            ("profile_snapshot", "profile-orphan", None, []),
+            ("case_input", "case-orphan", None, []),
+            ("claim_output", "claim-orphan", "case-000", ["citation-approved"]),
+            (
+                "resource_output",
+                "adaptation-orphan",
+                "case-000",
+                ["citation-approved"],
+            ),
+            (
+                "coverage_evidence",
+                "kp-orphan",
+                None,
+                ["citation-approved"],
+            ),
+        )
+        for kind, subject_id, case_id, citation_ids in cases:
+            with self.subTest(kind=kind):
+                truth = valid_truth()
+                truth["artifact_manifest"]["artifacts"].append(
+                    _artifact(
+                        f"orphan-{kind}",
+                        kind,
+                        subject_id=subject_id,
+                        case_id=case_id,
+                        citation_ids=citation_ids,
+                    )
+                )
+                _refresh_manifest_hash(truth)
+
+                self.assertIn(
+                    f"artifact_manifest {kind} ids must exactly match referenced ids",
+                    validate_truth(truth),
+                )
+
+    def test_allows_repeated_output_evidence_and_cross_profile_case_content(self):
+        truth = passing_truth()
+        artifacts = {
+            artifact["id"]: artifact
+            for artifact in truth["artifact_manifest"]["artifacts"]
+        }
+        for source_id, target_id in (
+            ("pass-claim-artifact-000", "pass-claim-artifact-001"),
+            ("pass-resource-artifact-000", "pass-resource-artifact-001"),
+            ("e-001", "e-002"),
+            ("case-artifact-000", "case-artifact-001"),
+        ):
+            artifacts[target_id]["content"] = artifacts[source_id]["content"]
+            artifacts[target_id]["sha256"] = artifacts[source_id]["sha256"]
+        _refresh_manifest_hash(truth)
+
+        self.assertEqual(validate_truth(truth), [])
 
     def test_rejects_profile_artifact_reuse_and_duplicate_profile_content(self):
         for mutation, expected in (
@@ -572,18 +629,20 @@ class TestTruthValidation(unittest.TestCase):
         truth["dataset"]["cases"] = truth["dataset"]["cases"][:49]
         truth["claims"] = truth["claims"][:49]
         truth["adaptations"] = truth["adaptations"][:49]
-        self.assertEqual(validate_truth(truth), ["at least 50 cases are required"])
+        self.assertIn("at least 50 cases are required", validate_truth(truth))
 
     def test_rejects_fewer_than_three_profiles(self):
         truth = valid_truth()
         truth["dataset"]["profile_ids"] = ["profile-1", "profile-2"]
         del truth["dataset"]["profile_artifact_ids"]["profile-3"]
-        self.assertEqual(
-            validate_truth(truth),
-            [
-                "dataset.profile_ids must contain at least 3 distinct non-empty values",
-                "dataset.profile_artifact_ids must reference at least 3 distinct artifacts",
-            ],
+        errors = validate_truth(truth)
+        self.assertIn(
+            "dataset.profile_ids must contain at least 3 distinct non-empty values",
+            errors,
+        )
+        self.assertIn(
+            "dataset.profile_artifact_ids must reference at least 3 distinct artifacts",
+            errors,
         )
 
     def test_rejects_malformed_repository_sha(self):
@@ -731,17 +790,17 @@ class TestTruthValidation(unittest.TestCase):
     def test_rejects_covered_point_without_evidence(self):
         truth = valid_truth()
         truth["coverage_universe"][1]["evidence_ids"] = []
-        self.assertEqual(
+        self.assertIn(
+            "covered coverage point kp-002 needs evidence",
             validate_truth(truth),
-            ["covered coverage point kp-002 needs evidence"],
         )
 
     def test_rejects_whitespace_only_coverage_evidence(self):
         truth = valid_truth()
         truth["coverage_universe"][1]["evidence_ids"] = ["   "]
-        self.assertEqual(
+        self.assertIn(
+            "covered coverage point kp-002 needs evidence",
             validate_truth(truth),
-            ["covered coverage point kp-002 needs evidence"],
         )
 
     def test_rejects_normalized_duplicate_coverage_ids(self):
@@ -1022,6 +1081,14 @@ class TestTruthValidation(unittest.TestCase):
 
 
 class TestScorecard(unittest.TestCase):
+    def test_limitations_cannot_be_mutated_across_scorecards(self):
+        first = build_scorecard(passing_truth())
+        first["limitations"].append("caller pollution")
+
+        second = build_scorecard(passing_truth())
+
+        self.assertNotIn("caller pollution", second["limitations"])
+
     def test_every_status_reports_the_complete_trust_boundary(self):
         expected = (
             "Manifest and hash validation proves only internal content/reference binding; "
@@ -1145,6 +1212,15 @@ print(json.dumps({
             record["final_label"] = label
         truth["coverage_universe"][0]["covered"] = True
         truth["coverage_universe"][0]["evidence_ids"] = ["e-001"]
+        truth["artifact_manifest"]["artifacts"].append(
+            _artifact(
+                "e-001",
+                "coverage_evidence",
+                subject_id="kp-001",
+                citation_ids=["citation-approved"],
+            )
+        )
+        _refresh_manifest_hash(truth)
 
         scorecard = build_scorecard(truth)
 
