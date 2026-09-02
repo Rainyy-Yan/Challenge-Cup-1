@@ -1,6 +1,6 @@
 # qykw 代码审查机器人
 
-qykw 是启元开物独立工程审查机器人。第一阶段只提供分析、计划、审查、状态和软停止能力；它不会执行 PR 代码、修改代码、批准或合并 PR，也不会直接推送任何分支。
+qykw 是启元开物独立工程机器人。默认审查通道只提供分析、计划、审查、状态和软停止能力，不执行 PR 代码，也不修改、批准或合并 PR。授权变更使用另一条隔离工作流；规则见 [qykw 授权变更通道](qykw-authorized-change.md)。
 
 ## 自动触发规则
 
@@ -18,7 +18,7 @@ qykw 是启元开物独立工程审查机器人。第一阶段只提供分析、
 @qykw <指令> [范围或要求]
 ```
 
-| 指令 | 第一阶段行为 |
+| 指令 | 行为 |
 | --- | --- |
 | `帮助` | 返回命令和权限说明 |
 | `分析 <问题>` | 只读分析固定 Head 上下文 |
@@ -27,7 +27,7 @@ qykw 是启元开物独立工程审查机器人。第一阶段只提供分析、
 | `复审 [范围]` | 对最新 Head 启动显式复审 |
 | `状态` | 返回当前运行阶段和状态 |
 | `总结` | 汇总结论、覆盖和限制 |
-| `修复`、`实现` | 返回 `capability_disabled`，不写代码 |
+| `修复 <问题>`、`实现 <需求>` | 转入授权变更通道；仅配置的 writer 可发起 |
 | `停止` | 为目标运行追加软取消标记 |
 
 引用、围栏代码、行内代码、HTML 注释、邮箱、相似账号、全角符号和含零宽字符的伪装提及不会触发。未知或含糊命令保持只读，不能由推理结果提升权限。
@@ -43,19 +43,22 @@ qykw 是启元开物独立工程审查机器人。第一阶段只提供分析、
 - 停止标记独立追加；并发中的旧状态保存不能覆盖它。
 - 状态与历史评论使用分页读取，不能假定目标记录在前 100 条内。
 
-## 工作流隔离
+## 双通道与工作流隔离
 
 审查链路使用默认分支中的可信控制器，并拆分为 `authorize`、`analyze`、`publish` 和 `record_failure`。独立 `control` 工作流只处理精确的 `停止` 命令。所有 checkout 都禁用持久化凭据，不检出或执行 PR Head。
 
+授权变更链路拆分为 `authorize-change`、`prepare-change`、`verify-change`、`publish-change` 和 `record-change-result`。它只接受 PR 评论中的 `修复` 或 `实现`，并同时校验配置 writer 与仓库写权限。验证固定 Head、运行 `full` 配置，并使用唯一的 digest-pinned `QYKW_VERIFICATION_IMAGE_REF`；发布阶段最多创建专用分支和 Draft PR，最终审查与合并始终由 `xyh202131` 完成。
+
 - `authorize`、`publish`、`record_failure` 和 `control` 只持有仓库限定的 `QYKW_REVIEW_TOKEN`。
 - `analyze` 只持有只读仓库令牌与 `QYKW_INFERENCE_*` 配置。
-- 两类凭据不会进入同一个 job。
-- 工作流不引用代码发布令牌，阶段产物只保留 1 天且不包含代码全文、完整评论、原始响应或 Secrets。
+- 审查通道的两类凭据不会进入同一个 job。
+- 变更阶段分别持有审查令牌、推理密钥或发布令牌，三类凭据不会共存。
+- 阶段产物只保留 1 天，不能提升权限，也不包含完整评论、原始推理响应或 Secrets。
 
 仓库所有者需要配置：
 
-- Secret：`QYKW_REVIEW_TOKEN`、`QYKW_INFERENCE_API_KEY`。
-- Variables：`QYKW_INFERENCE_BASE_URL`、`QYKW_INFERENCE_ALLOWED_HOSTS`、`QYKW_INFERENCE_CONTEXT_WINDOW`、`QYKW_INFERENCE_MAX_OUTPUT_TOKENS`、`QYKW_INFERENCE_TIMEOUT_SECONDS`，以及运行时所需的后端选择值。
+- Secret：`QYKW_REVIEW_TOKEN`、`QYKW_INFERENCE_API_KEY`；启用授权变更时还需要仓库限定的 `QYKW_PUBLISH_TOKEN`。
+- Variables：`QYKW_INFERENCE_BASE_URL`、`QYKW_INFERENCE_ALLOWED_HOSTS`、`QYKW_INFERENCE_CONTEXT_WINDOW`、`QYKW_INFERENCE_MAX_OUTPUT_TOKENS`、`QYKW_INFERENCE_TIMEOUT_SECONDS`，以及启用授权变更时所需的 `QYKW_VERIFICATION_IMAGE_REF`。
 
 这些值不得写入源码、配置文件、Issue、PR、Actions 产物或日志。`.github/qykw.toml` 只保存非敏感策略，并且只从默认分支读取。
 
@@ -72,3 +75,5 @@ py -3 tools/check_qykw_coverage.py qykw-coverage.json --line 95 --branch 90
 ```
 
 门禁分别要求语句覆盖率至少 95%、分支覆盖率至少 90%，不使用语句与分支混合后的总百分比。
+
+授权变更的本地测试和静态工作流检查已经完成，但 Ubuntu Docker 实跑与真实 GitHub 端到端门禁尚未完成。在这两项通过前，不得宣称该通道已上线或生产可用。
