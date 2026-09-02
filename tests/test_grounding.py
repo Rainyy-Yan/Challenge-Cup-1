@@ -47,8 +47,10 @@ class TestChunkProvenance(unittest.TestCase):
         for c in self.raw:
             if c["verified"]:
                 continue
+            # 公开网页可能改版或失效；单有 URL 不是稳定的内容级溯源。
+            # 没有 SHA 的记录必须明确保留人工复核标记。
             traceable = "｜sha:" in c["source"]
-            flagged = "待核实" in c["source"]
+            flagged = "待核实" in c["source"] or "待人工核实" in c["source"]
             self.assertTrue(traceable or flagged,
                             f"{c['id']} 未核实，出处既不可回溯也无占位标记：{c['source']}")
 

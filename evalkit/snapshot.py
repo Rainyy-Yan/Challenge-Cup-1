@@ -24,6 +24,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 import config
+from core.demo_sources import validate_demo_source_manifest
+from core.demo_items import formal_demo_items
 from orchestrator import Orchestrator, load_profile
 
 PROFILES = ["P-A", "P-B", "P-C"]
@@ -62,10 +64,16 @@ def build(inject: float, drift: float) -> dict:
     kb = {}
     orch = Orchestrator()
     for c in orch.retriever.chunks:
+        if not c.demo_eligible:
+            continue
         kb[c.id] = {"title": c.title, "source": c.source, "kp": c.kp,
-                    "text": c.text}
+                    "text": c.text, "verified": c.publicly_verified,
+                    "source_note": c.source_note}
+    validate_demo_source_manifest(kb, artifact="离线快照")
 
-    items = json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+    items = formal_demo_items(
+        json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+    )
     kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
 
     return {
@@ -73,8 +81,15 @@ def build(inject: float, drift: float) -> dict:
         "items": items,
         "kps": kps,
         "dims": json.loads((config.DATA / "dimensions.json").read_text(encoding="utf-8"))["dimensions"],
-        "injection": {"hallucination_rate": inject, "numeric_drift": drift,
-                      "note": "演示快照开启了幻觉注入与数值漂移，用于展示纠错分支，非真实跑分"},
+        "injection": {
+            "hallucination_rate": inject,
+            "numeric_drift": drift,
+            "note": (
+                "演示快照开启了幻觉注入与数值漂移，用于展示纠错分支，非真实跑分"
+                if inject or drift else
+                "默认参赛快照未开启故障注入，展示正常离线闭环"
+            ),
+        },
         "thresholds": {
             "hallucination": config.TARGET_HALLUCINATION,
             "adapt": config.TARGET_ADAPT,
@@ -92,8 +107,9 @@ def build(inject: float, drift: float) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--inject", type=float, default=0.35)
-    ap.add_argument("--drift", type=float, default=0.7)
+    # 参赛默认 Demo 必须是无故障注入的正常流程；注入仅用于单独的机制验证。
+    ap.add_argument("--inject", type=float, default=0.0)
+    ap.add_argument("--drift", type=float, default=0.0)
     ap.add_argument("--out", default="web/snapshot.json")
     args = ap.parse_args()
 

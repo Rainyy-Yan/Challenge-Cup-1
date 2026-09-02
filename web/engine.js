@@ -190,6 +190,9 @@ class Adaptive {
     this.items = {};
     this.byKp = {};
     for (const it of items) {
+      // 与 core.demo_items.formal_demo_items 保持一致：原题库可保留待改题，
+      // 但浏览器端正式测评不能把它们重新纳入候选集。
+      if (it.demo_eligible === false) continue;
       this.items[it.id] = it;
       (this.byKp[it.kp] = this.byKp[it.kp] || []).push(it);
     }

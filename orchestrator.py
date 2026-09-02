@@ -53,7 +53,8 @@ class IllegalTransition(RuntimeError):
 class Orchestrator:
     def __init__(self, llm=None, retriever: Retriever | None = None):
         self.llm = llm or build_llm()
-        self.retriever = retriever or Retriever.from_jsonl(config.KB_PATH)
+        # 默认编排的是可交付的正式 Demo，不得加载已被来源治理排除的切片。
+        self.retriever = retriever or Retriever.from_jsonl(config.KB_PATH, demo_only=True)
         kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
         self.kp_index = {k["id"]: k for k in kps}
         self.diagnoser = DiagnoseAgent(self.llm)
