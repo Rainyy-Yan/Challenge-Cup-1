@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
+import json
 from pathlib import Path
 from typing import Protocol
 
@@ -160,13 +162,67 @@ class SourceTreeIndex:
 
     schema_version: int
     source_head_sha: str
+    root_tree_sha: str
     complete: bool
     entries: tuple[SourceTreeEntry, ...]
     blobs: tuple[SourceBlob, ...]
+    digest: str
 
     def __post_init__(self) -> None:
         _require_tuple_items(self.entries, SourceTreeEntry, "entries")
         _require_tuple_items(self.blobs, SourceBlob, "blobs")
+
+
+class TrustedSourceTreeProvider(Protocol):
+    """Controller capability that reads one fixed repository Head tree."""
+
+    def get_complete_tree(
+        self, source_repository: str, source_head_sha: str
+    ) -> SourceTreeIndex: ...
+
+
+def compute_source_tree_index_digest(index: SourceTreeIndex) -> str:
+    """Return the canonical digest binding a complete source-tree index."""
+
+    entries = sorted(
+        (
+            {
+                "path": entry.path,
+                "mode": entry.mode,
+                "kind": entry.kind,
+                "git_sha": entry.git_sha,
+            }
+            for entry in index.entries
+        ),
+        key=lambda item: item["path"],
+    )
+    blobs = sorted(
+        (
+            {
+                "path": blob.path,
+                "mode": blob.mode,
+                "git_sha": blob.git_sha,
+                "content_sha256": hashlib.sha256(blob.content).hexdigest(),
+            }
+            for blob in index.blobs
+        ),
+        key=lambda item: item["path"],
+    )
+    payload = {
+        "schema_version": index.schema_version,
+        "source_head_sha": index.source_head_sha,
+        "root_tree_sha": index.root_tree_sha,
+        "complete": index.complete,
+        "entries": entries,
+        "blobs": blobs,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(b"qykw-source-tree-index-v1\0" + encoded).hexdigest()
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,7 @@
 """Tests for qykw's deterministic authorized-change boundary."""
 
 from dataclasses import FrozenInstanceError, replace
+import hashlib
 from pathlib import Path
 import unittest
 
@@ -20,10 +21,12 @@ from tools.qykw.change import (
     SourceTreeEntry,
     SourceTreeIndex,
     TextEdit,
+    TrustedSourceTreeProvider,
     VerificationAttestation,
     WriteKind,
     WriteReceipt,
     WriteState,
+    compute_source_tree_index_digest,
 )
 from tools.qykw.config import parse_qykw_config
 from tools.qykw.domain import (
@@ -91,12 +94,17 @@ def changed_file(
     binary: bool = False,
     status: str = "modified",
 ) -> ChangedFile:
+    head_sha = (
+        "d" * 40
+        if mode == "160000"
+        else git_blob_sha((content or "").encode("utf-8"))
+    )
     return ChangedFile(
         path,
         None,
         status,
         "base-sha",
-        "head-sha",
+        head_sha,
         "100644",
         mode,
         content,
@@ -144,22 +152,55 @@ def manifest(request: ChangeRequest, *files: FilePatch) -> PatchManifest:
     )
 
 
+def git_blob_sha(content: bytes) -> str:
+    framed = f"blob {len(content)}\0".encode("ascii") + content
+    return hashlib.sha1(framed).hexdigest()
+
+
 def tree_index(
     *entries: SourceTreeEntry,
     blobs: tuple[SourceBlob, ...] = (),
     complete: bool = True,
 ) -> SourceTreeIndex:
     default_entries = (
-        SourceTreeEntry("core", "040000", "tree", "core-tree"),
-        SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+        SourceTreeEntry("core", "040000", "tree", "e" * 40),
+        SourceTreeEntry(
+            "core/service.py",
+            "100644",
+            "blob",
+            git_blob_sha(b"old value\n"),
+        ),
     )
-    return SourceTreeIndex(
+    provisional = SourceTreeIndex(
         1,
         "a" * 40,
+        "f" * 40,
         complete,
         entries or default_entries,
         blobs,
+        "0" * 64,
     )
+    return replace(provisional, digest=compute_source_tree_index_digest(provisional))
+
+
+class FakeTreeProvider:
+    def __init__(
+        self,
+        index: SourceTreeIndex | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.index = index or tree_index()
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def get_complete_tree(
+        self, source_repository: str, source_head_sha: str
+    ) -> SourceTreeIndex:
+        self.calls.append((source_repository, source_head_sha))
+        if self.error is not None:
+            raise self.error
+        return self.index
 
 
 def change_config():
@@ -172,10 +213,18 @@ def change_config():
     )
 
 
-def policy(*, source_tree: SourceTreeIndex | None = None) -> DeterministicChangePolicy:
+def policy(
+    *,
+    source_tree: SourceTreeIndex | None = None,
+    tree_provider: TrustedSourceTreeProvider | None = None,
+) -> DeterministicChangePolicy:
     return DeterministicChangePolicy(
         change_config(),
-        source_tree=tree_index() if source_tree is None else source_tree,
+        tree_provider=(
+            FakeTreeProvider(source_tree)
+            if tree_provider is None
+            else tree_provider
+        ),
     )
 
 
@@ -325,6 +374,17 @@ class TestChangePolicy(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     policy().validate_request(altered, snapshot())
 
+    def test_failed_reauthorization_clears_the_previous_run_atomically(self) -> None:
+        request = change_request()
+        subject = policy()
+        subject.validate_request(request, snapshot())
+        subject.validate_manifest(request, manifest(request))
+
+        with self.assertRaises(ValueError):
+            subject.validate_request(request, replace(snapshot(), state="closed"))
+        with self.assertRaisesRegex(ValueError, "request_not_validated"):
+            subject.validate_manifest(request, manifest(request))
+
     def test_rejects_path_traversal_confusion_and_sensitive_paths(self) -> None:
         request = change_request()
         dangerous = (
@@ -364,10 +424,24 @@ class TestChangePolicy(unittest.TestCase):
             "bad\u0085.py",
             "bad\u200b.py",
             "stream.py:payload",
+            "bad<name.py",
+            "bad>name.py",
+            'bad"name.py',
+            "bad|name.py",
+            "bad?name.py",
+            "bad*name.py",
             "trailing./file.py",
             "trailing /file.py",
             "CON.py",
+            "CONIN$.txt",
+            "CONOUT$.txt",
             "dir/AUX.txt",
+            "COM¹.txt",
+            "COM².txt",
+            "COM³.txt",
+            "LPT¹.txt",
+            "LPT².txt",
+            "LPT³.txt",
             "a" * 256 + ".py",
             "x/" * 520 + "file.py",
             ".gitmodules",
@@ -398,10 +472,12 @@ class TestChangePolicy(unittest.TestCase):
             )
 
         colliding_tree = tree_index(
-            SourceTreeEntry("core", "040000", "tree", "core-tree"),
-            SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
-            SourceTreeEntry("Straße.py", "100644", "blob", "one"),
-            SourceTreeEntry("STRASSE.py", "100644", "blob", "two"),
+            SourceTreeEntry("core", "040000", "tree", "e" * 40),
+            SourceTreeEntry(
+                "core/service.py", "100644", "blob", git_blob_sha(b"old value\n")
+            ),
+            SourceTreeEntry("Straße.py", "100644", "blob", "1" * 40),
+            SourceTreeEntry("STRASSE.py", "100644", "blob", "2" * 40),
         )
         with self.assertRaises(ValueError):
             policy(source_tree=colliding_tree).validate_request(request, snapshot())
@@ -424,7 +500,7 @@ class TestChangePolicy(unittest.TestCase):
 
         subject = policy(
             source_tree=tree_index(
-                SourceTreeEntry("vendor", "160000", "commit", "head-sha"),
+                SourceTreeEntry("vendor", "160000", "commit", "d" * 40),
             )
         )
         subject.validate_request(
@@ -444,14 +520,22 @@ class TestChangePolicy(unittest.TestCase):
         request = change_request()
         subject = policy(
             source_tree=tree_index(
-                SourceTreeEntry("core", "040000", "tree", "core-tree"),
-                SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
-                SourceTreeEntry(".github", "040000", "tree", "github-tree"),
+                SourceTreeEntry("core", "040000", "tree", "e" * 40),
                 SourceTreeEntry(
-                    ".github/workflows", "040000", "tree", "workflows-tree"
+                    "core/service.py",
+                    "100644",
+                    "blob",
+                    git_blob_sha(b"old value\n"),
+                ),
+                SourceTreeEntry(".github", "040000", "tree", "b" * 40),
+                SourceTreeEntry(
+                    ".github/workflows", "040000", "tree", "c" * 40
                 ),
                 SourceTreeEntry(
-                    ".github/workflows/ci.yml", "100644", "blob", "head-sha"
+                    ".github/workflows/ci.yml",
+                    "100644",
+                    "blob",
+                    git_blob_sha(b"old value\n"),
                 ),
             )
         )
@@ -463,8 +547,12 @@ class TestChangePolicy(unittest.TestCase):
 
     def test_create_requires_a_complete_tree_proof_of_absence(self) -> None:
         request = change_request()
+        with self.assertRaises(TypeError):
+            DeterministicChangePolicy(change_config())  # type: ignore[call-arg]
         with self.assertRaises(ValueError):
-            DeterministicChangePolicy(change_config()).validate_request(request, snapshot())
+            policy(tree_provider=FakeTreeProvider(error=RuntimeError("offline"))).validate_request(
+                request, snapshot()
+            )
         with self.assertRaises(ValueError):
             policy(source_tree=tree_index(complete=False)).validate_request(
                 request, snapshot()
@@ -472,9 +560,14 @@ class TestChangePolicy(unittest.TestCase):
 
         subject = policy(
             source_tree=tree_index(
-                SourceTreeEntry("core", "040000", "tree", "core-tree"),
-                SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
-                SourceTreeEntry("existing.py", "100644", "blob", "existing-sha"),
+                SourceTreeEntry("core", "040000", "tree", "e" * 40),
+                SourceTreeEntry(
+                    "core/service.py",
+                    "100644",
+                    "blob",
+                    git_blob_sha(b"old value\n"),
+                ),
+                SourceTreeEntry("existing.py", "100644", "blob", "3" * 40),
             )
         )
         subject.validate_request(request, snapshot())
@@ -493,12 +586,21 @@ class TestChangePolicy(unittest.TestCase):
     def test_complete_tree_allows_only_proven_regular_blob_and_tree_parents(self) -> None:
         request = change_request()
         source_tree = tree_index(
-            SourceTreeEntry("core", "040000", "tree", "core-tree"),
-            SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
-            SourceTreeEntry("unchanged.py", "100644", "blob", "unchanged-sha"),
-            SourceTreeEntry("link", "120000", "blob", "link-sha"),
+            SourceTreeEntry("core", "040000", "tree", "e" * 40),
+            SourceTreeEntry(
+                "core/service.py", "100644", "blob", git_blob_sha(b"old value\n")
+            ),
+            SourceTreeEntry(
+                "unchanged.py", "100644", "blob", git_blob_sha(b"before\n")
+            ),
+            SourceTreeEntry("link", "120000", "blob", git_blob_sha(b"target")),
             blobs=(
-                SourceBlob("unchanged.py", "100644", b"before\n", "unchanged-sha"),
+                SourceBlob(
+                    "unchanged.py",
+                    "100644",
+                    b"before\n",
+                    git_blob_sha(b"before\n"),
+                ),
             ),
         )
         subject = policy(source_tree=source_tree)
@@ -533,10 +635,134 @@ class TestChangePolicy(unittest.TestCase):
             )
 
         invalid_tree = tree_index(
-            SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+            SourceTreeEntry(
+                "core/service.py", "100644", "blob", git_blob_sha(b"old value\n")
+            ),
         )
         with self.assertRaises(ValueError):
             policy(source_tree=invalid_tree).validate_request(request, snapshot())
+
+    def test_tree_provider_is_fixed_to_repository_head_and_index_provenance(self) -> None:
+        request = change_request()
+        provider = FakeTreeProvider()
+        subject = policy(tree_provider=provider)
+        subject.validate_request(request, snapshot())
+        self.assertEqual(
+            provider.calls,
+            [(request.source_repository, request.source_head_sha)],
+        )
+        self.assertFalse(hasattr(SourceTreeIndex, "from_mapping"))
+
+        bad_digest = replace(tree_index(), digest="0" * 64)
+        with self.assertRaises(ValueError):
+            policy(source_tree=bad_digest).validate_request(request, snapshot())
+        bad_root = replace(tree_index(), root_tree_sha="not-an-oid")
+        bad_root = replace(
+            bad_root,
+            digest=compute_source_tree_index_digest(bad_root),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=bad_root).validate_request(request, snapshot())
+
+        expected_sha = git_blob_sha(b"before\n")
+        bad_blob = tree_index(
+            SourceTreeEntry("core", "040000", "tree", "e" * 40),
+            SourceTreeEntry(
+                "core/service.py", "100644", "blob", git_blob_sha(b"old value\n")
+            ),
+            SourceTreeEntry("unchanged.py", "100644", "blob", expected_sha),
+            blobs=(
+                SourceBlob("unchanged.py", "100644", b"tampered\n", expected_sha),
+            ),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=bad_blob).validate_request(request, snapshot())
+
+    def test_additional_policy_boundaries_fail_closed(self) -> None:
+        request = change_request()
+        bad_mode = replace(
+            request,
+            context=replace(
+                request.context,
+                command=replace(request.context.command, mode=CommandMode.READ_ONLY),
+            ),
+        )
+        with self.assertRaises(ValueError):
+            policy().validate_request(bad_mode, snapshot())
+        with self.assertRaises(ValueError):
+            policy().validate_request(
+                replace(
+                    request,
+                    context=replace(request.context, event_action="deleted"),
+                ),
+                snapshot(),
+            )
+
+        no_full = parse_qykw_config(
+            {
+                "version": 1,
+                "authorization": {"code_writers": ["xyh202131"]},
+                "verification": {"profiles": ["backend"]},
+            }
+        )
+        with self.assertRaises(ValueError):
+            DeterministicChangePolicy(
+                no_full,
+                tree_provider=FakeTreeProvider(),
+            ).validate_request(request, snapshot())
+
+        invalid_result = FakeTreeProvider()
+        invalid_result.index = object()  # type: ignore[assignment]
+        with self.assertRaises(ValueError):
+            policy(tree_provider=invalid_result).validate_request(request, snapshot())
+        with self.assertRaises(ValueError):
+            policy().validate_request(
+                request,
+                snapshot(changed_file(), changed_file()),
+            )
+
+        wrong_head = replace(tree_index(), source_head_sha="b" * 40)
+        wrong_head = replace(
+            wrong_head,
+            digest=compute_source_tree_index_digest(wrong_head),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=wrong_head).validate_request(request, snapshot())
+
+        invalid_kind = tree_index(
+            SourceTreeEntry("core", "040000", "tree", "e" * 40),
+            SourceTreeEntry(
+                "core/service.py", "100644", "unknown", git_blob_sha(b"old value\n")
+            ),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=invalid_kind).validate_request(request, snapshot())
+
+        unchanged_sha = git_blob_sha(b"before\n")
+        duplicate_blobs = tree_index(
+            SourceTreeEntry("core", "040000", "tree", "e" * 40),
+            SourceTreeEntry(
+                "core/service.py", "100644", "blob", git_blob_sha(b"old value\n")
+            ),
+            SourceTreeEntry("unchanged.py", "100644", "blob", unchanged_sha),
+            blobs=(
+                SourceBlob("unchanged.py", "100644", b"before\n", unchanged_sha),
+                SourceBlob("unchanged.py", "100644", b"before\n", unchanged_sha),
+            ),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=duplicate_blobs).validate_request(request, snapshot())
+
+        subject = policy()
+        subject.validate_request(request, snapshot())
+        for invalid_manifest in (
+            replace(manifest(request), schema_version=2),
+            replace(manifest(request), digest="not-a-digest"),
+            replace(manifest(request), files=()),
+        ):
+            with self.subTest(manifest=invalid_manifest):
+                with self.assertRaises(ValueError):
+                    subject.validate_manifest(request, invalid_manifest)
 
     def test_rejects_delete_empty_duplicate_and_oversized_changes(self) -> None:
         request = change_request()
@@ -591,7 +817,17 @@ class TestChangePolicy(unittest.TestCase):
             policy().validate_request(request, snapshot())
 
         request = change_request()
-        subject = policy()
+        subject = policy(
+            source_tree=tree_index(
+                SourceTreeEntry("core", "040000", "tree", "e" * 40),
+                SourceTreeEntry(
+                    "core/service.py",
+                    "100644",
+                    "blob",
+                    git_blob_sha(b"LEFT RIGHT\n"),
+                ),
+            )
+        )
         subject.validate_request(
             request,
             snapshot(changed_file(content="LEFT RIGHT\n")),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from pathlib import PurePosixPath
@@ -14,6 +15,8 @@ from tools.qykw.change import (
     SourceBlob,
     SourceTreeEntry,
     SourceTreeIndex,
+    TrustedSourceTreeProvider,
+    compute_source_tree_index_digest,
 )
 from tools.qykw.config import QykwConfig
 from tools.qykw.domain import (
@@ -91,7 +94,10 @@ _MAX_COMPONENT_BYTES = 255
 _MAX_PATCH_TEXT_BYTES = 512 * 1024
 _MAX_MANIFEST_TEXT_BYTES = 2 * 1024 * 1024
 _MAX_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024
-_WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", "clock$"})
+_WINDOWS_RESERVED = frozenset(
+    {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
+)
+_WINDOWS_INVALID_CHARACTERS = frozenset('<>:"|?*')
 
 
 class DeterministicChangePolicy:
@@ -106,16 +112,20 @@ class DeterministicChangePolicy:
         self,
         config: QykwConfig,
         *,
-        source_tree: SourceTreeIndex | None = None,
+        tree_provider: TrustedSourceTreeProvider,
     ) -> None:
         self._config = config
-        self._source_tree = source_tree
+        self._tree_provider = tree_provider
         self._validated_request: ChangeRequest | None = None
         self._source_files: dict[str, ChangedFile] = {}
         self._tree_entries: dict[str, SourceTreeEntry] = {}
         self._tree_blobs: dict[str, SourceBlob] = {}
 
     def validate_request(self, request: ChangeRequest, snapshot: PullSnapshot) -> None:
+        self._validated_request = None
+        self._source_files = {}
+        self._tree_entries = {}
+        self._tree_blobs = {}
         context = request.context
         expected_kind = {
             CommandName.FIX: ChangeKind.FIX,
@@ -169,7 +179,19 @@ class DeterministicChangePolicy:
         if any(left != middle or middle != right for left, middle, right in expected):
             raise ValueError("pull_snapshot_mismatch")
 
-        tree_entries, tree_blobs = self._validate_source_tree(request.source_head_sha)
+        try:
+            source_tree = self._tree_provider.get_complete_tree(
+                request.source_repository,
+                request.source_head_sha,
+            )
+        except Exception:
+            raise ValueError("source_tree_unavailable") from None
+        if type(source_tree) is not SourceTreeIndex:
+            raise ValueError("invalid_source_tree_result")
+        tree_entries, tree_blobs = self._validate_source_tree(
+            source_tree,
+            request.source_head_sha,
+        )
 
         source_files: dict[str, ChangedFile] = {}
         for file in snapshot.changed_files:
@@ -196,13 +218,18 @@ class DeterministicChangePolicy:
         self._tree_blobs = tree_blobs
 
     def _validate_source_tree(
-        self, source_head_sha: str
+        self, index: SourceTreeIndex, source_head_sha: str
     ) -> tuple[dict[str, SourceTreeEntry], dict[str, SourceBlob]]:
-        index = self._source_tree
-        if index is None or index.schema_version != 1 or index.complete is not True:
+        if index.schema_version != 1 or index.complete is not True:
             raise ValueError("complete_source_tree_required")
         if index.source_head_sha != source_head_sha:
             raise ValueError("source_tree_head_mismatch")
+        if not _is_git_oid(index.root_tree_sha):
+            raise ValueError("invalid_root_tree_sha")
+        if not _is_sha256(index.digest) or index.digest != compute_source_tree_index_digest(
+            index
+        ):
+            raise ValueError("source_tree_digest_mismatch")
 
         entries: dict[str, SourceTreeEntry] = {}
         for entry in index.entries:
@@ -218,7 +245,7 @@ class DeterministicChangePolicy:
                 valid = entry.mode == "160000"
             else:
                 valid = False
-            if not valid or not isinstance(entry.git_sha, str) or not entry.git_sha:
+            if not valid or not _is_git_oid(entry.git_sha):
                 raise ValueError("invalid_source_tree_entry")
             entries[key] = entry
 
@@ -248,6 +275,7 @@ class DeterministicChangePolicy:
                 or entry.kind != "blob"
                 or entry.mode != blob.mode
                 or entry.git_sha != blob.git_sha
+                or _git_blob_object_sha(blob.content, entry.git_sha) != entry.git_sha
             ):
                 raise ValueError("source_blob_tree_mismatch")
             blobs[key] = blob
@@ -338,6 +366,12 @@ class DeterministicChangePolicy:
             if source.head_mode != tree_entry.mode or source.head_sha != tree_entry.git_sha:
                 raise ValueError("source_snapshot_tree_mismatch")
             source_content = source.head_content
+            if (
+                source_content is not None
+                and _git_blob_object_sha(source_content.encode("utf-8"), tree_entry.git_sha)
+                != tree_entry.git_sha
+            ):
+                raise ValueError("source_content_tree_mismatch")
         else:
             assert blob is not None
             try:
@@ -394,8 +428,8 @@ def _normalize_repository_path(value: str) -> str:
         raise ValueError("noncanonical_unicode_path")
     if any(unicodedata.category(character) in {"Cc", "Cf"} for character in value):
         raise ValueError("path_control_character")
-    if ":" in value:
-        raise ValueError("path_stream_forbidden")
+    if any(character in _WINDOWS_INVALID_CHARACTERS for character in value):
+        raise ValueError("windows_invalid_path_character")
     if _utf8_size(value) > _MAX_PATH_BYTES:
         raise ValueError("path_too_long")
     if value.startswith("/") or _WINDOWS_ABSOLUTE.match(value):
@@ -411,7 +445,8 @@ def _normalize_repository_path(value: str) -> str:
         reserved_stem = part.split(".", 1)[0].casefold()
         if (
             reserved_stem in _WINDOWS_RESERVED
-            or re.fullmatch(r"(?:com|lpt)[1-9]", reserved_stem) is not None
+            or re.fullmatch(r"(?:com|lpt)(?:[1-9]|[¹²³])", reserved_stem)
+            is not None
         ):
             raise ValueError("windows_reserved_path")
     path = PurePosixPath(value)
@@ -451,6 +486,23 @@ def _validate_text(value: str, *, allow_empty: bool) -> int:
 
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and _HEX_SHA256.fullmatch(value) is not None
+
+
+def _is_git_oid(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) in {40, 64}
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _git_blob_object_sha(content: bytes, expected_oid: str) -> str:
+    framed = f"blob {len(content)}\0".encode("ascii") + content
+    if len(expected_oid) == 40:
+        return hashlib.sha1(framed).hexdigest()
+    if len(expected_oid) == 64:
+        return hashlib.sha256(framed).hexdigest()
+    raise ValueError("invalid_git_oid")
 
 
 def _collision_key(path: str) -> str:
