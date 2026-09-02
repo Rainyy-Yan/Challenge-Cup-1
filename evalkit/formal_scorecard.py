@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
 import random
 import re
 from datetime import datetime
+from pathlib import Path
 from statistics import NormalDist
 
 
 HALLUCINATION_LABELS = {"yes", "no", "unassessable"}
 ADAPTATION_LABELS = {"correct", "incorrect", "unassessable"}
+HALLUCINATION_THRESHOLD = 0.05
+ADAPTATION_THRESHOLD = 0.85
+COVERAGE_THRESHOLD = 0.90
+KAPPA_THRESHOLD = 0.60
 
 
 def wilson_interval(
@@ -513,11 +520,96 @@ def validate_truth(data: dict) -> list[str]:
     return errors
 
 
+def _metric_placeholder(threshold: float) -> dict:
+    """Return a stable metric shape when frozen truth cannot be assessed."""
+    return {
+        "numerator": None,
+        "denominator": None,
+        "point_estimate": None,
+        "wilson_interval": None,
+        "bootstrap_interval": None,
+        "interval": None,
+        "threshold": threshold,
+        "conservative_decision": False,
+    }
+
+
+def _kappa_placeholder() -> dict:
+    return {
+        "n": 0,
+        "agreement": None,
+        "value": None,
+        "threshold": KAPPA_THRESHOLD,
+        "decision": False,
+    }
+
+
+def _provenance(data: object) -> dict:
+    """Keep only deterministic, input-supplied provenance fields in reports."""
+    if not isinstance(data, dict):
+        return {}
+    provenance = data.get("provenance")
+    result = dict(provenance) if isinstance(provenance, dict) else {}
+    for key in ("dataset_id", "frozen_at", "seed"):
+        if key in data:
+            result[key] = data[key]
+    return result
+
+
+def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
+    return {
+        "provenance": _provenance(data),
+        "data_quality": {
+            "decision": "not_assessable",
+            "errors": errors,
+            "thresholds": {
+                "minimum_cases": 50,
+                "minimum_profiles": 3,
+                "minimum_assessable_share": 0.95,
+                "minimum_kappa": KAPPA_THRESHOLD,
+            },
+        },
+        "kappa": {
+            "hallucination": _kappa_placeholder(),
+            "adaptation": _kappa_placeholder(),
+        },
+        "hallucination_rate": _metric_placeholder(HALLUCINATION_THRESHOLD),
+        "adaptation_accuracy": _metric_placeholder(ADAPTATION_THRESHOLD),
+        "coverage": {
+            "numerator": None,
+            "denominator": None,
+            "point_estimate": None,
+            "interval": None,
+            "threshold": COVERAGE_THRESHOLD,
+            "conservative_decision": False,
+        },
+        "assessable_share": {"claims": None, "adaptations": None},
+        "limitations": errors + [
+            "Human reviewer roster attestations are declarations; external signatures or records establish their real-world authenticity."
+        ],
+        "overall_status": "not_assessable",
+    }
+
+
+def _with_metric_decision(metric: dict, threshold: float, *, lower_is_better: bool) -> dict:
+    result = dict(metric)
+    result["threshold"] = threshold
+    interval = result["interval"]
+    result["conservative_decision"] = (
+        interval[1] < threshold if lower_is_better else interval[0] >= threshold
+    )
+    return result
+
+
 def build_scorecard(data: dict) -> dict:
-    """Build deterministic measurements from adjudicated, human-attested labels."""
+    """Build a deterministic formal evidence gate from frozen truth data.
+
+    Invalid or incomplete input returns a reportable ``not_assessable`` card so
+    command-line consumers always have an auditable artifact to inspect.
+    """
     errors = validate_truth(data)
     if errors:
-        raise ValueError("invalid formal truth: " + "; ".join(errors))
+        return _not_assessable_scorecard(data, errors)
 
     claims = data["claims"]
     adaptations = data["adaptations"]
@@ -534,25 +626,67 @@ def build_scorecard(data: dict) -> dict:
     coverage = data.get("coverage_universe", [])
     covered_weight = sum(point["weight"] for point in coverage if point["covered"])
     total_weight = sum(point["weight"] for point in coverage)
+    hallucination = _with_metric_decision(
+        _metric(hallucination_records, {"yes"}, seed=data["seed"]),
+        HALLUCINATION_THRESHOLD,
+        lower_is_better=True,
+    )
+    adaptation = _with_metric_decision(
+        _metric(adaptation_records, {"correct"}, seed=data["seed"]),
+        ADAPTATION_THRESHOLD,
+        lower_is_better=False,
+    )
+    coverage_metric = {
+        "numerator": covered_weight,
+        "denominator": total_weight,
+        "point_estimate": covered_weight / total_weight if total_weight else 0.0,
+        "interval": None,
+        "threshold": COVERAGE_THRESHOLD,
+    }
+    coverage_metric["conservative_decision"] = (
+        coverage_metric["point_estimate"] >= COVERAGE_THRESHOLD
+    )
+    hallucination_kappa = _kappa_from_records(
+        claims,
+        [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
+        HALLUCINATION_LABELS,
+    )
+    adaptation_kappa = _kappa_from_records(
+        adaptations,
+        [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
+        ADAPTATION_LABELS,
+    )
+    for kappa in (hallucination_kappa, adaptation_kappa):
+        kappa["threshold"] = KAPPA_THRESHOLD
+        kappa["decision"] = kappa["value"] is not None and kappa["value"] >= KAPPA_THRESHOLD
+
+    passed = (
+        hallucination["conservative_decision"]
+        and adaptation["conservative_decision"]
+        and coverage_metric["conservative_decision"]
+        and hallucination_kappa["decision"]
+        and adaptation_kappa["decision"]
+    )
     return {
-        "hallucination_rate": _metric(hallucination_records, {"yes"}, seed=data["seed"]),
-        "adaptation_accuracy": _metric(adaptation_records, {"correct"}, seed=data["seed"]),
+        "provenance": _provenance(data),
+        "data_quality": {
+            "decision": "pass",
+            "errors": [],
+            "thresholds": {
+                "minimum_cases": 50,
+                "minimum_profiles": 3,
+                "minimum_assessable_share": 0.95,
+                "minimum_kappa": KAPPA_THRESHOLD,
+            },
+        },
+        "hallucination_rate": hallucination,
+        "adaptation_accuracy": adaptation,
         "coverage": {
-            "numerator": covered_weight,
-            "denominator": total_weight,
-            "point_estimate": covered_weight / total_weight if total_weight else 0.0,
+            **coverage_metric,
         },
         "kappa": {
-            "hallucination": _kappa_from_records(
-                claims,
-                [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
-                HALLUCINATION_LABELS,
-            ),
-            "adaptation": _kappa_from_records(
-                adaptations,
-                [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
-                ADAPTATION_LABELS,
-            ),
+            "hallucination": hallucination_kappa,
+            "adaptation": adaptation_kappa,
         },
         "assessable_share": {
             "claims": (
@@ -567,4 +701,110 @@ def build_scorecard(data: dict) -> dict:
                 else 0.0
             ),
         },
+        "limitations": [
+            "Human reviewer roster attestations are declarations; external signatures or records establish their real-world authenticity."
+        ],
+        "overall_status": "pass" if passed else "fail",
     }
+
+
+def _display(value: object) -> str:
+    if value is None:
+        return "not available"
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
+
+
+def _interval_display(interval: object) -> str:
+    if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+        return "not available"
+    return f"[{_display(interval[0])}, {_display(interval[1])}]"
+
+
+def render_scorecard_markdown(scorecard: dict) -> str:
+    """Render a deterministic, operator-readable companion to scorecard JSON."""
+    lines = [
+        "# Formal Metric Scorecard",
+        "",
+        "This is an official metric evidence gate, not the jury's 100-point score.",
+        "",
+        f"Overall status: **{scorecard['overall_status']}**",
+        "",
+        "## Provenance",
+        "",
+        "```json",
+        json.dumps(scorecard["provenance"], ensure_ascii=False, sort_keys=True, indent=2),
+        "```",
+        "",
+        "## Data quality gates",
+        "",
+        f"Decision: **{scorecard['data_quality']['decision']}**",
+    ]
+    for error in scorecard["data_quality"]["errors"]:
+        lines.append(f"- {error}")
+    lines.extend(["", "## Metrics", ""])
+    for title, key in (
+        ("Hallucination rate", "hallucination_rate"),
+        ("Adaptation accuracy", "adaptation_accuracy"),
+        ("Core-knowledge coverage", "coverage"),
+    ):
+        metric = scorecard[key]
+        lines.extend(
+            [
+                f"### {title}",
+                "",
+                f"- Numerator: {_display(metric['numerator'])}",
+                f"- Denominator: {_display(metric['denominator'])}",
+                f"- Point estimate: {_display(metric['point_estimate'])}",
+                f"- 95% interval: {_interval_display(metric['interval'])}",
+                f"- Threshold: {_display(metric['threshold'])}",
+                f"- Conservative decision: {_display(metric['conservative_decision'])}",
+                "",
+            ]
+        )
+    lines.extend(["## Reviewer agreement", ""])
+    for title, key in (("Claims", "hallucination"), ("Adaptations", "adaptation")):
+        kappa = scorecard["kappa"][key]
+        lines.extend(
+            [
+                f"### {title}",
+                "",
+                f"- Cohen's Kappa: {_display(kappa['value'])}",
+                f"- Threshold: {_display(kappa['threshold'])}",
+                f"- Decision: {_display(kappa['decision'])}",
+                "",
+            ]
+        )
+    lines.extend(["## Limitations", ""])
+    lines.extend(f"- {limitation}" for limitation in scorecard["limitations"])
+    return "\n".join(lines) + "\n"
+
+
+def _write_scorecard(output: Path, scorecard: dict) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "scorecard.json").write_text(
+        json.dumps(scorecard, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (output / "scorecard.md").write_text(render_scorecard_markdown(scorecard), encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Write JSON and Markdown evidence reports for a frozen truth file."""
+    parser = argparse.ArgumentParser(description="Build a deterministic formal metric scorecard")
+    parser.add_argument("--truth", required=True, type=Path, help="frozen formal-truth JSON")
+    parser.add_argument("--out", required=True, type=Path, help="report output directory")
+    args = parser.parse_args(argv)
+    try:
+        data = json.loads(args.truth.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        scorecard = _not_assessable_scorecard({}, [f"truth file could not be read as JSON: {error}"])
+    else:
+        scorecard = build_scorecard(data)
+    _write_scorecard(args.out, scorecard)
+    return 0 if scorecard["overall_status"] in {"pass", "fail"} else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

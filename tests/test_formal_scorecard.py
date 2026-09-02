@@ -1,6 +1,12 @@
 """Offline contract tests for the formal evidence scorecard."""
 
+import json
 import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -74,6 +80,40 @@ def valid_truth() -> dict:
             {"kp_id": "kp-002", "weight": 3.0, "covered": True, "evidence_ids": ["e-002"]},
         ],
     }
+
+
+def passing_truth() -> dict:
+    """Return a hand-built fixture whose conservative boundaries meet all gates."""
+    truth = valid_truth()
+    truth["claims"] = []
+    truth["adaptations"] = []
+    for index in range(200):
+        case_id = f"case-{index % 50:03d}"
+        label = "yes" if index == 0 else "no"
+        truth["claims"].append(
+            {
+                "id": f"pass-claim-{index:03d}",
+                "case_id": case_id,
+                "labels": {"reviewer-one": label, "reviewer-two": label},
+                "final_label": label,
+            }
+        )
+    for index in range(300):
+        case_id = f"case-{index % 50:03d}"
+        label = "incorrect" if index < 30 else "correct"
+        truth["adaptations"].append(
+            {
+                "id": f"pass-adaptation-{index:03d}",
+                "case_id": case_id,
+                "labels": {"reviewer-one": label, "reviewer-two": label},
+                "final_label": label,
+            }
+        )
+    truth["coverage_universe"] = [
+        {"kp_id": "kp-001", "weight": 2.0, "covered": True, "evidence_ids": ["e-001"]},
+        {"kp_id": "kp-002", "weight": 3.0, "covered": True, "evidence_ids": ["e-002"]},
+    ]
+    return truth
 
 
 class TestIntervals(unittest.TestCase):
@@ -497,3 +537,109 @@ class TestTruthValidation(unittest.TestCase):
             validate_truth(truth),
             ["duplicate dataset profile_id: profile-1"],
         )
+
+
+class TestScorecard(unittest.TestCase):
+    def test_complete_truth_that_meets_every_conservative_gate_passes(self):
+        scorecard = build_scorecard(passing_truth())
+
+        self.assertEqual(scorecard["overall_status"], "pass")
+        self.assertTrue(scorecard["hallucination_rate"]["conservative_decision"])
+        self.assertTrue(scorecard["adaptation_accuracy"]["conservative_decision"])
+        self.assertTrue(scorecard["coverage"]["conservative_decision"])
+        self.assertEqual(scorecard["data_quality"]["decision"], "pass")
+        self.assertIn("provenance", scorecard)
+        self.assertIn("limitations", scorecard)
+
+    def test_point_estimate_above_adaptation_target_but_lower_bound_below_target_fails(self):
+        truth = valid_truth()
+        for index, record in enumerate(truth["adaptations"]):
+            label = "correct" if index < 43 else "incorrect"
+            record["labels"] = {"reviewer-one": label, "reviewer-two": label}
+            record["final_label"] = label
+        truth["coverage_universe"][0]["covered"] = True
+        truth["coverage_universe"][0]["evidence_ids"] = ["e-001"]
+
+        scorecard = build_scorecard(truth)
+
+        adaptation = scorecard["adaptation_accuracy"]
+        self.assertEqual(adaptation["point_estimate"], 0.86)
+        self.assertGreaterEqual(adaptation["point_estimate"], adaptation["threshold"])
+        self.assertLess(adaptation["interval"][0], adaptation["threshold"])
+        self.assertFalse(adaptation["conservative_decision"])
+        self.assertEqual(scorecard["overall_status"], "fail")
+
+    def test_invalid_truth_is_reported_as_not_assessable_with_quality_errors(self):
+        truth = valid_truth()
+        truth["status"] = "draft"
+
+        scorecard = build_scorecard(truth)
+
+        self.assertEqual(scorecard["overall_status"], "not_assessable")
+        self.assertEqual(scorecard["data_quality"]["decision"], "not_assessable")
+        self.assertIn("truth status must be frozen", scorecard["limitations"])
+
+
+class TestCli(unittest.TestCase):
+    def _run_cli(self, truth: dict, output: Path) -> subprocess.CompletedProcess[str]:
+        truth_path = output.parent / "truth.json"
+        truth_path.write_text(json.dumps(truth), encoding="utf-8")
+        environment = os.environ.copy()
+        for key in (
+            "AGENTEDU_MINIMAX_API_KEY",
+            "AGENTEDU_DEEPSEEK_API_KEY",
+            "AGENTEDU_API_KEY",
+        ):
+            environment[key] = ""
+        return subprocess.run(
+            [
+                sys.executable,
+                "-X",
+                "utf8",
+                "-m",
+                "evalkit.formal_scorecard",
+                "--truth",
+                str(truth_path),
+                "--out",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+
+    def test_cli_writes_byte_deterministic_reports_for_assessable_pass(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            first = self._run_cli(passing_truth(), root / "first")
+            second = self._run_cli(passing_truth(), root / "second")
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(
+                (root / "first" / "scorecard.json").read_bytes(),
+                (root / "second" / "scorecard.json").read_bytes(),
+            )
+            self.assertEqual(
+                (root / "first" / "scorecard.md").read_bytes(),
+                (root / "second" / "scorecard.md").read_bytes(),
+            )
+            report = json.loads((root / "first" / "scorecard.json").read_text("utf-8"))
+            markdown = (root / "first" / "scorecard.md").read_text("utf-8")
+            self.assertEqual(report["overall_status"], "pass")
+            self.assertIn("official metric evidence gate", markdown)
+            self.assertIn("not the jury's 100-point score", markdown)
+
+    def test_cli_writes_not_assessable_reports_for_empty_template(self):
+        template = Path(__file__).resolve().parents[1] / "data" / "evaluation" / "formal_truth.template.json"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "report"
+            truth = json.loads(template.read_text(encoding="utf-8"))
+            result = self._run_cli(truth, output)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertTrue((output / "scorecard.json").is_file())
+            self.assertTrue((output / "scorecard.md").is_file())
+            report = json.loads((output / "scorecard.json").read_text("utf-8"))
+            self.assertEqual(report["overall_status"], "not_assessable")
