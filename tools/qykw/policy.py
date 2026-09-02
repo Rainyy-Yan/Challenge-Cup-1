@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import PurePosixPath
 
-from tools.qykw.change import ChangeKind, ChangeRequest, FilePatch, PatchManifest
+from tools.qykw.change import (
+    ChangeKind,
+    ChangeRequest,
+    FilePatch,
+    PatchManifest,
+    SourceBlob,
+    SourceTreeEntry,
+    SourceTreeIndex,
+)
 from tools.qykw.config import QykwConfig
 from tools.qykw.domain import (
     Actor,
@@ -32,7 +41,12 @@ _CHANGE_EVENT_NAMES = frozenset({"issue_comment", "pull_request_review_comment"}
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:")
 _SECRET_REFERENCE = re.compile(
-    r"(?:\$\{\{\s*secrets\.|\bsecrets\s*[.[]|\bgithub_token\b|\bqykw_[a-z0-9_]*token\b)",
+    r"(?:"
+    r"\bsecrets\s*(?:\.|\[\s*['\"])|"
+    r"\bgithub\s*(?:\.\s*token|\[\s*['\"]token['\"]\s*\])|"
+    r"\bgithub_token\b|"
+    r"\bqykw_[a-z0-9_]*(?:token|key|secret|password)\b"
+    r")",
     re.IGNORECASE,
 )
 _SENSITIVE_COMPONENTS = frozenset(
@@ -61,13 +75,23 @@ _SENSITIVE_PATHS = frozenset(
     {
         "tools/check_qykw_coverage.py",
         ".coveragerc",
+        ".gitmodules",
         "requirements-dev.txt",
     }
 )
 _UNSAFE_MODES = frozenset({"120000", "160000"})
+_REGULAR_MODE = "100644"
+_TREE_MODE = "040000"
 _MAX_CHANGE_FILES = 20
 _MAX_FILE_BYTES = 256 * 1024
 _MAX_EDITS_PER_FILE = 100
+_MAX_INSTRUCTION_BYTES = 16 * 1024
+_MAX_PATH_BYTES = 1024
+_MAX_COMPONENT_BYTES = 255
+_MAX_PATCH_TEXT_BYTES = 512 * 1024
+_MAX_MANIFEST_TEXT_BYTES = 2 * 1024 * 1024
+_MAX_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024
+_WINDOWS_RESERVED = frozenset({"con", "prn", "aux", "nul", "clock$"})
 
 
 class DeterministicChangePolicy:
@@ -78,10 +102,18 @@ class DeterministicChangePolicy:
     substitute repository metadata after authorization.
     """
 
-    def __init__(self, config: QykwConfig) -> None:
+    def __init__(
+        self,
+        config: QykwConfig,
+        *,
+        source_tree: SourceTreeIndex | None = None,
+    ) -> None:
         self._config = config
+        self._source_tree = source_tree
         self._validated_request: ChangeRequest | None = None
         self._source_files: dict[str, ChangedFile] = {}
+        self._tree_entries: dict[str, SourceTreeEntry] = {}
+        self._tree_blobs: dict[str, SourceBlob] = {}
 
     def validate_request(self, request: ChangeRequest, snapshot: PullSnapshot) -> None:
         context = request.context
@@ -118,6 +150,8 @@ class DeterministicChangePolicy:
             or request.instruction != context.command.argument
         ):
             raise ValueError("instruction_mismatch")
+        if _utf8_size(request.instruction) > _MAX_INSTRUCTION_BYTES:
+            raise ValueError("instruction_too_large")
         if request.verification_profile != "full":
             raise ValueError("verification_profile_not_allowed")
         if "full" not in self._config.verification.profiles:
@@ -135,14 +169,89 @@ class DeterministicChangePolicy:
         if any(left != middle or middle != right for left, middle, right in expected):
             raise ValueError("pull_snapshot_mismatch")
 
+        tree_entries, tree_blobs = self._validate_source_tree(request.source_head_sha)
+
         source_files: dict[str, ChangedFile] = {}
         for file in snapshot.changed_files:
             normalized = _normalize_repository_path(file.path)
-            if normalized in source_files:
+            key = _collision_key(normalized)
+            if key in source_files:
                 raise ValueError("duplicate_snapshot_path")
-            source_files[normalized] = file
+            tree_entry = tree_entries.get(key)
+            removed = file.status.casefold() in {"removed", "deleted"}
+            if removed:
+                if tree_entry is not None:
+                    raise ValueError("source_snapshot_tree_mismatch")
+            elif (
+                tree_entry is None
+                or tree_entry.path != normalized
+                or tree_entry.mode != file.head_mode
+                or tree_entry.git_sha != file.head_sha
+            ):
+                raise ValueError("source_snapshot_tree_mismatch")
+            source_files[key] = file
         self._validated_request = request
         self._source_files = source_files
+        self._tree_entries = tree_entries
+        self._tree_blobs = tree_blobs
+
+    def _validate_source_tree(
+        self, source_head_sha: str
+    ) -> tuple[dict[str, SourceTreeEntry], dict[str, SourceBlob]]:
+        index = self._source_tree
+        if index is None or index.schema_version != 1 or index.complete is not True:
+            raise ValueError("complete_source_tree_required")
+        if index.source_head_sha != source_head_sha:
+            raise ValueError("source_tree_head_mismatch")
+
+        entries: dict[str, SourceTreeEntry] = {}
+        for entry in index.entries:
+            path = _normalize_repository_path(entry.path)
+            key = _collision_key(path)
+            if key in entries:
+                raise ValueError("source_tree_path_collision")
+            if entry.kind == "tree":
+                valid = entry.mode == _TREE_MODE
+            elif entry.kind == "blob":
+                valid = entry.mode in {_REGULAR_MODE, "100755", "120000"}
+            elif entry.kind == "commit":
+                valid = entry.mode == "160000"
+            else:
+                valid = False
+            if not valid or not isinstance(entry.git_sha, str) or not entry.git_sha:
+                raise ValueError("invalid_source_tree_entry")
+            entries[key] = entry
+
+        for entry in entries.values():
+            parent = PurePosixPath(entry.path).parent
+            if parent == PurePosixPath("."):
+                continue
+            parent_entry = entries.get(_collision_key(parent.as_posix()))
+            if (
+                parent_entry is None
+                or parent_entry.path != parent.as_posix()
+                or parent_entry.kind != "tree"
+                or parent_entry.mode != _TREE_MODE
+            ):
+                raise ValueError("incomplete_source_tree_parent")
+
+        blobs: dict[str, SourceBlob] = {}
+        for blob in index.blobs:
+            path = _normalize_repository_path(blob.path)
+            key = _collision_key(path)
+            if key in blobs:
+                raise ValueError("source_blob_path_collision")
+            entry = entries.get(key)
+            if (
+                entry is None
+                or entry.path != path
+                or entry.kind != "blob"
+                or entry.mode != blob.mode
+                or entry.git_sha != blob.git_sha
+            ):
+                raise ValueError("source_blob_tree_mismatch")
+            blobs[key] = blob
+        return entries, blobs
 
     def validate_manifest(self, request: ChangeRequest, manifest: PatchManifest) -> None:
         if self._validated_request != request:
@@ -167,51 +276,102 @@ class DeterministicChangePolicy:
             raise ValueError("change_file_limit")
 
         seen: set[str] = set()
+        manifest_text_bytes = 0
+        total_output_bytes = 0
         for patch in manifest.files:
             path = _normalize_change_path(patch.path)
-            if path in seen:
+            key = _collision_key(path)
+            if key in seen:
                 raise ValueError("duplicate_patch_path")
-            seen.add(path)
-            self._validate_patch(path, patch)
+            seen.add(key)
+            patch_text_bytes = _patch_text_size(patch)
+            if patch_text_bytes > _MAX_PATCH_TEXT_BYTES:
+                raise ValueError("patch_text_limit")
+            manifest_text_bytes += patch_text_bytes
+            if manifest_text_bytes > _MAX_MANIFEST_TEXT_BYTES:
+                raise ValueError("manifest_text_limit")
+            total_output_bytes += self._validate_patch(path, patch)
+            if total_output_bytes > _MAX_TOTAL_OUTPUT_BYTES:
+                raise ValueError("total_output_limit")
 
-    def _validate_patch(self, path: str, patch: FilePatch) -> None:
-        source = self._source_files.get(path)
+    def _validate_patch(self, path: str, patch: FilePatch) -> int:
+        key = _collision_key(path)
+        tree_entry = self._tree_entries.get(key)
+        if tree_entry is not None and tree_entry.path != path:
+            raise ValueError("source_tree_path_collision")
         parent = PurePosixPath(path).parent
         while parent != PurePosixPath("."):
-            parent_source = self._source_files.get(parent.as_posix())
-            if parent_source is not None and parent_source.head_mode in _UNSAFE_MODES:
+            parent_path = parent.as_posix()
+            parent_entry = self._tree_entries.get(_collision_key(parent_path))
+            if (
+                parent_entry is None
+                or parent_entry.path != parent_path
+                or parent_entry.kind != "tree"
+                or parent_entry.mode != _TREE_MODE
+            ):
                 raise ValueError("unsafe_source_parent")
             parent = parent.parent
         if not patch.edits or len(patch.edits) > _MAX_EDITS_PER_FILE:
             raise ValueError("invalid_edit_count")
         if patch.create:
-            if source is not None:
+            if tree_entry is not None:
                 raise ValueError("create_path_exists")
             if patch.base_sha256 is not None:
                 raise ValueError("new_file_base_digest_forbidden")
             if len(patch.edits) != 1 or patch.edits[0].before != "":
                 raise ValueError("invalid_new_file_edit")
-            _validate_text(patch.edits[0].after, allow_empty=False)
-            return
+            return _validate_text(patch.edits[0].after, allow_empty=False)
 
-        if source is None:
+        if (
+            tree_entry is None
+            or tree_entry.kind != "blob"
+            or tree_entry.mode != _REGULAR_MODE
+        ):
             raise ValueError("unknown_source_path")
-        if source.binary or source.generated or source.status.casefold() in {
-            "removed",
-            "deleted",
-        }:
+        source = self._source_files.get(key)
+        blob = self._tree_blobs.get(key)
+        if source is None and blob is None:
+            raise ValueError("source_content_unavailable")
+        if source is not None and source.path != path:
+            raise ValueError("source_path_collision")
+        if source is not None:
+            if source.head_mode != tree_entry.mode or source.head_sha != tree_entry.git_sha:
+                raise ValueError("source_snapshot_tree_mismatch")
+            source_content = source.head_content
+        else:
+            assert blob is not None
+            try:
+                source_content = blob.content.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError("non_utf8_text") from error
+        if source is not None and (
+            source.binary
+            or source.generated
+            or source.status.casefold() in {"removed", "deleted"}
+        ):
             raise ValueError("unsafe_source_file")
-        if source.head_mode in _UNSAFE_MODES or source.head_content is None:
+        if source is not None and (
+            source.head_mode in _UNSAFE_MODES or source_content is None
+        ):
             raise ValueError("unsafe_source_file")
         if not _is_sha256(patch.base_sha256):
             raise ValueError("invalid_base_digest")
 
-        _validate_text(source.head_content, allow_empty=False)
+        if source_content is None:
+            raise ValueError("source_content_unavailable")
+        _validate_text(source_content, allow_empty=False)
+        content = source_content
         for edit in patch.edits:
             _validate_text(edit.before, allow_empty=False)
             _validate_text(edit.after, allow_empty=False)
             if edit.before == edit.after:
                 raise ValueError("empty_edit")
+            if content.count(edit.before) != 1:
+                raise ValueError("ambiguous_edit")
+            content = content.replace(edit.before, edit.after, 1)
+            if _utf8_size(content) > _MAX_FILE_BYTES:
+                raise ValueError("change_file_too_large")
+        return _validate_text(content, allow_empty=False)
 
 
 def _normalize_change_path(value: str) -> str:
@@ -222,7 +382,7 @@ def _normalize_change_path(value: str) -> str:
         raise ValueError("sensitive_path_forbidden")
     if len(folded) >= 2 and folded[0] == "tools" and folded[1] == "qykw":
         raise ValueError("qykw_self_change_forbidden")
-    if normalized.casefold() in _SENSITIVE_PATHS:
+    if _collision_key(normalized) in _SENSITIVE_PATHS:
         raise ValueError("sensitive_path_forbidden")
     return normalized
 
@@ -230,11 +390,30 @@ def _normalize_change_path(value: str) -> str:
 def _normalize_repository_path(value: str) -> str:
     if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
         raise ValueError("invalid_change_path")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError("noncanonical_unicode_path")
+    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in value):
+        raise ValueError("path_control_character")
+    if ":" in value:
+        raise ValueError("path_stream_forbidden")
+    if _utf8_size(value) > _MAX_PATH_BYTES:
+        raise ValueError("path_too_long")
     if value.startswith("/") or _WINDOWS_ABSOLUTE.match(value):
         raise ValueError("absolute_path_forbidden")
     raw_parts = value.split("/")
     if any(part in {"", ".", ".."} for part in raw_parts):
         raise ValueError("path_traversal_forbidden")
+    for part in raw_parts:
+        if part.endswith((" ", ".")):
+            raise ValueError("path_trailing_character")
+        if _utf8_size(part) > _MAX_COMPONENT_BYTES:
+            raise ValueError("path_component_too_long")
+        reserved_stem = part.split(".", 1)[0].casefold()
+        if (
+            reserved_stem in _WINDOWS_RESERVED
+            or re.fullmatch(r"(?:com|lpt)[1-9]", reserved_stem) is not None
+        ):
+            raise ValueError("windows_reserved_path")
     path = PurePosixPath(value)
     normalized = path.as_posix()
     if normalized != value:
@@ -254,7 +433,7 @@ def _is_sensitive_component(part: str) -> bool:
     )
 
 
-def _validate_text(value: str, *, allow_empty: bool) -> None:
+def _validate_text(value: str, *, allow_empty: bool) -> int:
     if not isinstance(value, str) or (not allow_empty and not value):
         raise ValueError("empty_file_forbidden")
     try:
@@ -267,10 +446,33 @@ def _validate_text(value: str, *, allow_empty: bool) -> None:
         raise ValueError("binary_content_forbidden")
     if _SECRET_REFERENCE.search(value):
         raise ValueError("secret_reference_forbidden")
+    return len(encoded)
 
 
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and _HEX_SHA256.fullmatch(value) is not None
+
+
+def _collision_key(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _patch_text_size(patch: FilePatch) -> int:
+    size = _utf8_size(patch.path) + 32
+    if patch.base_sha256 is not None:
+        size += _utf8_size(patch.base_sha256)
+    for edit in patch.edits:
+        if not isinstance(edit.before, str) or not isinstance(edit.after, str):
+            raise ValueError("invalid_edit_text")
+        size += _utf8_size(edit.before) + _utf8_size(edit.after) + 32
+    return size
+
+
+def _utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError("non_utf8_text") from error
 
 
 def authorize_command(

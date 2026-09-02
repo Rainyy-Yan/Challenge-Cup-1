@@ -1,14 +1,29 @@
 """Tests for qykw's deterministic authorized-change boundary."""
 
 from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 import unittest
 
 from tools.qykw.change import (
+    AppliedPatch,
+    ChangePublication,
     ChangeKind,
     ChangeRequest,
+    CommandResult,
+    FileDigest,
     FilePatch,
     PatchManifest,
+    PreparedWorkspace,
+    PublicationStage,
+    PublishedFile,
+    SourceBlob,
+    SourceTreeEntry,
+    SourceTreeIndex,
     TextEdit,
+    VerificationAttestation,
+    WriteKind,
+    WriteReceipt,
+    WriteState,
 )
 from tools.qykw.config import parse_qykw_config
 from tools.qykw.domain import (
@@ -129,15 +144,39 @@ def manifest(request: ChangeRequest, *files: FilePatch) -> PatchManifest:
     )
 
 
-def policy() -> DeterministicChangePolicy:
-    config = parse_qykw_config(
+def tree_index(
+    *entries: SourceTreeEntry,
+    blobs: tuple[SourceBlob, ...] = (),
+    complete: bool = True,
+) -> SourceTreeIndex:
+    default_entries = (
+        SourceTreeEntry("core", "040000", "tree", "core-tree"),
+        SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+    )
+    return SourceTreeIndex(
+        1,
+        "a" * 40,
+        complete,
+        entries or default_entries,
+        blobs,
+    )
+
+
+def change_config():
+    return parse_qykw_config(
         {
             "version": 1,
             "authorization": {"code_writers": ["xyh202131"]},
             "verification": {"profiles": ["backend", "frontend", "full"]},
         }
     )
-    return DeterministicChangePolicy(config)
+
+
+def policy(*, source_tree: SourceTreeIndex | None = None) -> DeterministicChangePolicy:
+    return DeterministicChangePolicy(
+        change_config(),
+        source_tree=tree_index() if source_tree is None else source_tree,
+    )
 
 
 class TestChangePolicy(unittest.TestCase):
@@ -148,6 +187,96 @@ class TestChangePolicy(unittest.TestCase):
         patch = FilePatch("core/service.py", "0" * 64, False, (TextEdit("a", "b"),))
         with self.assertRaises(FrozenInstanceError):
             patch.path = "other.py"  # type: ignore[misc]
+
+    def test_contract_tuple_fields_reject_mutable_or_wrong_typed_values(self) -> None:
+        request = change_request()
+        with self.assertRaises((TypeError, ValueError)):
+            FilePatch("core/service.py", "0" * 64, False, [TextEdit("a", "b")])  # type: ignore[arg-type]
+        with self.assertRaises((TypeError, ValueError)):
+            FilePatch("core/service.py", "0" * 64, False, ("not-an-edit",))  # type: ignore[arg-type]
+        with self.assertRaises((TypeError, ValueError)):
+            replace(manifest(request), files=[manifest(request).files[0]])  # type: ignore[arg-type]
+        with self.assertRaises((TypeError, ValueError)):
+            replace(manifest(request), files=("not-a-patch",))  # type: ignore[arg-type]
+
+        digest = FileDigest("core/service.py", "100644", "0" * 64)
+        result = CommandResult("tests", "1" * 64, 0, False, 1, "2" * 64, "OK")
+        receipt = WriteReceipt(WriteKind.BLOB, "core/service.py", "sha", WriteState.CREATED)
+        tuple_objects = (
+            (PreparedWorkspace(Path("workspace"), "a" * 40, (digest,)), "source_files"),
+            (
+                VerificationAttestation(
+                    1,
+                    1,
+                    request.context.run_id,
+                    request.source_repository,
+                    request.source_head_sha,
+                    request.target_repository,
+                    request.target_base_sha,
+                    request.target_base_ref,
+                    "1" * 64,
+                    "full",
+                    "image",
+                    "2" * 64,
+                    "3" * 64,
+                    (digest,),
+                    True,
+                    False,
+                    (result,),
+                ),
+                "output_files",
+            ),
+            (
+                VerificationAttestation(
+                    1,
+                    1,
+                    request.context.run_id,
+                    request.source_repository,
+                    request.source_head_sha,
+                    request.target_repository,
+                    request.target_base_sha,
+                    request.target_base_ref,
+                    "1" * 64,
+                    "full",
+                    "image",
+                    "2" * 64,
+                    "3" * 64,
+                    (digest,),
+                    True,
+                    False,
+                    (result,),
+                ),
+                "results",
+            ),
+            (AppliedPatch((digest,), "2" * 64, "3" * 64), "files"),
+            (tree_index(), "entries"),
+            (tree_index(), "blobs"),
+            (
+                ChangePublication(
+                    PublicationStage.BLOBS,
+                    "qykw/run-fix",
+                    WriteState.NOT_CREATED,
+                    WriteState.NOT_CREATED,
+                    None,
+                    None,
+                    (receipt,),
+                    False,
+                    None,
+                ),
+                "receipts",
+            ),
+        )
+        for value, field in tuple_objects:
+            with self.subTest(type=type(value).__name__, field=field):
+                with self.assertRaises(TypeError):
+                    replace(value, **{field: list(getattr(value, field))})
+                with self.assertRaises(TypeError):
+                    replace(value, **{field: (object(),)})
+
+        with self.assertRaises(TypeError):
+            SourceBlob("file.py", "100644", bytearray(b"x"), "sha")  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            PublishedFile("file.py", "100644", bytearray(b"x"), "0" * 64)  # type: ignore[arg-type]
 
     def test_only_authorized_exact_pr_comment_change_commands_are_accepted(self) -> None:
         subject = policy()
@@ -227,6 +356,56 @@ class TestChangePolicy(unittest.TestCase):
                         manifest(request, FilePatch(path, None, True, (TextEdit("", "x"),))),
                     )
 
+    def test_rejects_noncanonical_cross_platform_paths_and_collisions(self) -> None:
+        request = change_request()
+        dangerous = (
+            "cafe\u0301.py",
+            "bad\u0001.py",
+            "bad\u0085.py",
+            "bad\u200b.py",
+            "stream.py:payload",
+            "trailing./file.py",
+            "trailing /file.py",
+            "CON.py",
+            "dir/AUX.txt",
+            "a" * 256 + ".py",
+            "x/" * 520 + "file.py",
+            ".gitmodules",
+        )
+        for path in dangerous:
+            with self.subTest(path=path[:40]):
+                subject = policy()
+                subject.validate_request(request, snapshot())
+                with self.assertRaises(ValueError):
+                    subject.validate_manifest(
+                        request,
+                        manifest(
+                            request,
+                            FilePatch(path, None, True, (TextEdit("", "x"),)),
+                        ),
+                    )
+
+        subject = policy()
+        subject.validate_request(request, snapshot())
+        with self.assertRaises(ValueError):
+            subject.validate_manifest(
+                request,
+                manifest(
+                    request,
+                    FilePatch("Straße.py", None, True, (TextEdit("", "x"),)),
+                    FilePatch("STRASSE.py", None, True, (TextEdit("", "y"),)),
+                ),
+            )
+
+        colliding_tree = tree_index(
+            SourceTreeEntry("core", "040000", "tree", "core-tree"),
+            SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+            SourceTreeEntry("Straße.py", "100644", "blob", "one"),
+            SourceTreeEntry("STRASSE.py", "100644", "blob", "two"),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=colliding_tree).validate_request(request, snapshot())
+
     def test_rejects_symlink_submodule_binary_removed_and_generated_targets(self) -> None:
         request = change_request()
         unsafe = (
@@ -239,11 +418,15 @@ class TestChangePolicy(unittest.TestCase):
         for file in unsafe:
             with self.subTest(file=file):
                 subject = policy()
-                subject.validate_request(request, snapshot(file))
                 with self.assertRaises(ValueError):
+                    subject.validate_request(request, snapshot(file))
                     subject.validate_manifest(request, manifest(request))
 
-        subject = policy()
+        subject = policy(
+            source_tree=tree_index(
+                SourceTreeEntry("vendor", "160000", "commit", "head-sha"),
+            )
+        )
         subject.validate_request(
             request,
             snapshot(changed_file("vendor", mode="160000", content="gitlink")),
@@ -259,12 +442,101 @@ class TestChangePolicy(unittest.TestCase):
 
     def test_unrelated_sensitive_pull_file_does_not_block_a_safe_target(self) -> None:
         request = change_request()
-        subject = policy()
+        subject = policy(
+            source_tree=tree_index(
+                SourceTreeEntry("core", "040000", "tree", "core-tree"),
+                SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+                SourceTreeEntry(".github", "040000", "tree", "github-tree"),
+                SourceTreeEntry(
+                    ".github/workflows", "040000", "tree", "workflows-tree"
+                ),
+                SourceTreeEntry(
+                    ".github/workflows/ci.yml", "100644", "blob", "head-sha"
+                ),
+            )
+        )
         subject.validate_request(
             request,
             snapshot(changed_file(), changed_file(".github/workflows/ci.yml")),
         )
         subject.validate_manifest(request, manifest(request))
+
+    def test_create_requires_a_complete_tree_proof_of_absence(self) -> None:
+        request = change_request()
+        with self.assertRaises(ValueError):
+            DeterministicChangePolicy(change_config()).validate_request(request, snapshot())
+        with self.assertRaises(ValueError):
+            policy(source_tree=tree_index(complete=False)).validate_request(
+                request, snapshot()
+            )
+
+        subject = policy(
+            source_tree=tree_index(
+                SourceTreeEntry("core", "040000", "tree", "core-tree"),
+                SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+                SourceTreeEntry("existing.py", "100644", "blob", "existing-sha"),
+            )
+        )
+        subject.validate_request(request, snapshot())
+
+        # A changed-files listing cannot prove that this unchanged path is
+        # absent from the fixed Head tree.
+        with self.assertRaises(ValueError):
+            subject.validate_manifest(
+                request,
+                manifest(
+                    request,
+                    FilePatch("existing.py", None, True, (TextEdit("", "new"),)),
+                ),
+            )
+
+    def test_complete_tree_allows_only_proven_regular_blob_and_tree_parents(self) -> None:
+        request = change_request()
+        source_tree = tree_index(
+            SourceTreeEntry("core", "040000", "tree", "core-tree"),
+            SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+            SourceTreeEntry("unchanged.py", "100644", "blob", "unchanged-sha"),
+            SourceTreeEntry("link", "120000", "blob", "link-sha"),
+            blobs=(
+                SourceBlob("unchanged.py", "100644", b"before\n", "unchanged-sha"),
+            ),
+        )
+        subject = policy(source_tree=source_tree)
+        subject.validate_request(request, snapshot())
+        subject.validate_manifest(
+            request,
+            manifest(
+                request,
+                FilePatch(
+                    "unchanged.py",
+                    "0" * 64,
+                    False,
+                    (TextEdit("before", "after"),),
+                ),
+            ),
+        )
+        with self.assertRaises(ValueError):
+            subject.validate_manifest(
+                request,
+                manifest(
+                    request,
+                    FilePatch("link", "0" * 64, False, (TextEdit("a", "b"),)),
+                ),
+            )
+        with self.assertRaises(ValueError):
+            subject.validate_manifest(
+                request,
+                manifest(
+                    request,
+                    FilePatch("missing/new.py", None, True, (TextEdit("", "x"),)),
+                ),
+            )
+
+        invalid_tree = tree_index(
+            SourceTreeEntry("core/service.py", "100644", "blob", "head-sha"),
+        )
+        with self.assertRaises(ValueError):
+            policy(source_tree=invalid_tree).validate_request(request, snapshot())
 
     def test_rejects_delete_empty_duplicate_and_oversized_changes(self) -> None:
         request = change_request()
@@ -305,6 +577,93 @@ class TestChangePolicy(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             subject.validate_manifest(request, secret_reference)
+
+    def test_rejects_instruction_replay_and_manifest_capacity_overflow(self) -> None:
+        request = replace(change_request(), instruction="x" * (16 * 1024 + 1))
+        request = replace(
+            request,
+            context=replace(
+                request.context,
+                command=replace(request.context.command, argument=request.instruction),
+            ),
+        )
+        with self.assertRaises(ValueError):
+            policy().validate_request(request, snapshot())
+
+        request = change_request()
+        subject = policy()
+        subject.validate_request(
+            request,
+            snapshot(changed_file(content="LEFT RIGHT\n")),
+        )
+        with self.assertRaises(ValueError):
+            subject.validate_manifest(
+                request,
+                manifest(
+                    request,
+                    FilePatch(
+                        "core/service.py",
+                        "0" * 64,
+                        False,
+                        (
+                            TextEdit("LEFT", "L" * 140_000),
+                            TextEdit("RIGHT", "R" * 140_000),
+                        ),
+                    ),
+                ),
+            )
+
+        subject = policy()
+        subject.validate_request(request, snapshot())
+        wide = tuple(
+            FilePatch(
+                f"generated-{index}.py",
+                None,
+                True,
+                (TextEdit("", "x" * 200_000),),
+            )
+            for index in range(20)
+        )
+        with self.assertRaises(ValueError):
+            subject.validate_manifest(request, manifest(request, *wide))
+
+    def test_rejects_secret_reference_variants_without_blocking_plain_text(self) -> None:
+        request = change_request()
+        unsafe = (
+            "value = '${{ github.token }}'\n",
+            'value = "${{ github[\'token\'] }}"\n',
+            'value = "${{ secrets[\'DEPLOY\'] }}"\n',
+            'value = os.environ["GITHUB_TOKEN"]\n',
+            "value = process.env.QYKW_PUBLISH_TOKEN\n",
+            'value = getenv("QYKW_REVIEW_TOKEN")\n',
+        )
+        for index, content in enumerate(unsafe):
+            with self.subTest(index=index):
+                subject = policy()
+                subject.validate_request(request, snapshot())
+                with self.assertRaises(ValueError):
+                    subject.validate_manifest(
+                        request,
+                        manifest(
+                            request,
+                            FilePatch("new.py", None, True, (TextEdit("", content),)),
+                        ),
+                    )
+
+        subject = policy()
+        subject.validate_request(request, snapshot())
+        subject.validate_manifest(
+            request,
+            manifest(
+                request,
+                FilePatch(
+                    "new.py",
+                    None,
+                    True,
+                    (TextEdit("", "tokenization keeps ordinary prose readable\n"),),
+                ),
+            ),
+        )
 
     def test_manifest_binding_and_profile_cannot_be_overridden(self) -> None:
         request = change_request()

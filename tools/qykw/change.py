@@ -42,6 +42,9 @@ class FilePatch:
     create: bool
     edits: tuple[TextEdit, ...]
 
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.edits, TextEdit, "edits")
+
 
 @dataclass(frozen=True)
 class PatchManifest:
@@ -57,6 +60,9 @@ class PatchManifest:
     files: tuple[FilePatch, ...]
     digest: str
 
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.files, FilePatch, "files")
+
 
 @dataclass(frozen=True)
 class FileDigest:
@@ -70,6 +76,9 @@ class PreparedWorkspace:
     root: Path
     source_head_sha: str
     source_files: tuple[FileDigest, ...]
+
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.source_files, FileDigest, "source_files")
 
 
 @dataclass(frozen=True)
@@ -103,12 +112,19 @@ class VerificationAttestation:
     canceled: bool
     results: tuple[CommandResult, ...]
 
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.output_files, FileDigest, "output_files")
+        _require_tuple_items(self.results, CommandResult, "results")
+
 
 @dataclass(frozen=True)
 class AppliedPatch:
     files: tuple[FileDigest, ...]
     output_tree_digest: str
     workspace_tree_digest: str
+
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.files, FileDigest, "files")
 
 
 @dataclass(frozen=True)
@@ -125,6 +141,10 @@ class SourceBlob:
     content: bytes
     git_sha: str
 
+    def __post_init__(self) -> None:
+        if type(self.content) is not bytes:
+            raise TypeError("content_must_be_bytes")
+
 
 @dataclass(frozen=True)
 class SourceTreeEntry:
@@ -135,11 +155,30 @@ class SourceTreeEntry:
 
 
 @dataclass(frozen=True)
+class SourceTreeIndex:
+    """Controller-owned, complete listing of one fixed source Head tree."""
+
+    schema_version: int
+    source_head_sha: str
+    complete: bool
+    entries: tuple[SourceTreeEntry, ...]
+    blobs: tuple[SourceBlob, ...]
+
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.entries, SourceTreeEntry, "entries")
+        _require_tuple_items(self.blobs, SourceBlob, "blobs")
+
+
+@dataclass(frozen=True)
 class PublishedFile:
     path: str
     mode: str
     content: bytes
     sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.content) is not bytes:
+            raise TypeError("content_must_be_bytes")
 
 
 @dataclass(frozen=True)
@@ -209,6 +248,9 @@ class ChangePublication:
     partial: bool
     error_code: str | None
 
+    def __post_init__(self) -> None:
+        _require_tuple_items(self.receipts, WriteReceipt, "receipts")
+
 
 class PatchGenerator(Protocol):
     def generate(
@@ -238,3 +280,10 @@ class ChangePolicy(Protocol):
     def validate_manifest(
         self, request: ChangeRequest, manifest: PatchManifest
     ) -> None: ...
+
+
+def _require_tuple_items(value: object, item_type: type, field: str) -> None:
+    if type(value) is not tuple:
+        raise TypeError(f"{field}_must_be_tuple")
+    if any(type(item) is not item_type for item in value):
+        raise TypeError(f"{field}_contains_invalid_item")
