@@ -480,6 +480,10 @@ def _error(code: str) -> int:
 
 
 def _safe_code(error: BaseException) -> str:
+    from tools.qykw.provider import ProviderError
+
+    if isinstance(error, ProviderError):
+        return f"inference_{error.code.value}"
     code = str(error)
     return code if code in _PUBLIC_ERROR_CODES else "phase_failed"
 
