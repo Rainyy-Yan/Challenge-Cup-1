@@ -41,6 +41,47 @@ _RUN_KEYS = frozenset({
     "trigger_comment_kind", "command",
 })
 _COMMAND_KEYS = frozenset({"name", "argument", "mode"})
+_PUBLIC_ERROR_CODES = frozenset({
+    "ambiguous_change_phase_dependencies",
+    "artifact_file_mismatch",
+    "artifact_phase_mismatch",
+    "artifact_required",
+    "artifact_runtime_mismatch",
+    "artifact_too_large",
+    "change_handler_phase_mismatch",
+    "change_phase_dependencies_unavailable",
+    "control_command_not_stop",
+    "error_code_not_allowed",
+    "immutable_run_binding_changed",
+    "invalid_artifact_digest",
+    "invalid_artifact_file_binding",
+    "invalid_artifact_json",
+    "invalid_artifact_predecessor",
+    "invalid_artifact_runtime",
+    "invalid_artifact_schema",
+    "invalid_change_phase",
+    "invalid_context_digest",
+    "invalid_controller_sha",
+    "invalid_error_code",
+    "invalid_phase_payload",
+    "invalid_phase_result",
+    "invalid_publication_journal_root",
+    "invalid_run_binding",
+    "invalid_verification_image_digest",
+    "invalid_workflow_run_id",
+    "phase_controller_required",
+    "phase_credentials_unavailable",
+    "phase_not_available",
+    "phase_runtime_mismatch",
+    "root_artifact_not_allowed",
+    "root_phase_not_available",
+    "unexpected_qykw_environment",
+    "unsafe_artifact_path",
+    "unsafe_output_path",
+    "unsupported_artifact_version",
+    "untrusted_phase_runtime",
+    "verification_image_digest_unavailable",
+})
 
 
 def main(argv: Sequence[str] | None = None, *, controller: object | None = None) -> int:
@@ -84,7 +125,7 @@ def main(argv: Sequence[str] | None = None, *, controller: object | None = None)
             artifact = _read_artifact(Path(args.artifact))
             result = _run_phase(args.phase, artifact, controller, args.error_code)
         _write_artifact(Path(args.output), result)
-    except (OSError, ValueError, TypeError) as error:
+    except Exception as error:
         return _error(_safe_code(error))
     return 0
 
@@ -435,7 +476,7 @@ def _error(code: str) -> int:
 
 def _safe_code(error: BaseException) -> str:
     code = str(error)
-    return code if code and code.replace("_", "").isalnum() and len(code) <= 80 else "phase_failed"
+    return code if code in _PUBLIC_ERROR_CODES else "phase_failed"
 
 
 if __name__ == "__main__":

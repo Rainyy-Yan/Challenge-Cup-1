@@ -72,6 +72,8 @@ class ProductionPhaseController:
         run = _run_from_artifact(artifact)
         if run is None:
             return _skipped("analyze", "upstream_skipped")
+        if run.command.mode is CommandMode.CHANGE:
+            return _skipped("analyze", "review_lane_noop", run)
         gateway, state, config = self._read_services()
         record = state.get(run.pr_number, run.run_id)
         if record is None or record.context != run:
@@ -173,6 +175,8 @@ class ProductionPhaseController:
         run = _run_from_artifact(artifact)
         if run is None:
             return _skipped("record-failure", "upstream_skipped")
+        if run.command.mode is CommandMode.CHANGE:
+            return _skipped("record-failure", "review_lane_noop", run)
         persisted_code = _failure_code(run, error_code)
         gateway, state, _ = self._review_services()
         record = state.get(run.pr_number, run.run_id)

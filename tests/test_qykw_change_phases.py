@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 from dataclasses import replace
+import io
 import json
 import os
 from pathlib import Path
@@ -672,6 +674,65 @@ class TestReviewChangeIsolation(unittest.TestCase):
         publish._review_services = lambda: (_ for _ in ()).throw(AssertionError("side effect"))  # type: ignore[method-assign]
         published = publish.publish(artifact)
         self.assertEqual(published["payload"]["status"], "review_lane_noop")
+
+    def test_review_analyze_and_failure_noop_on_change_before_any_service(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact, _run_payload
+
+        run = _run_from_artifact({"run": run_binding()})
+        self.assertIsNotNone(run)
+        artifact = {
+            "version": 1,
+            "phase": "authorize",
+            "run": _run_payload(run),
+            "payload": {"authorization": "accepted"},
+        }
+
+        analyze = ProductionPhaseController("analyze", {})
+        analyze._read_services = lambda: (_ for _ in ()).throw(AssertionError("read service called"))  # type: ignore[method-assign]
+        analyzed = analyze.analyze(artifact)
+        self.assertEqual(analyzed["payload"], {"status": "skipped", "reason": "review_lane_noop"})
+
+        failure = ProductionPhaseController("record-failure", {})
+        failure._review_services = lambda: (_ for _ in ()).throw(AssertionError("review service called"))  # type: ignore[method-assign]
+        recorded = failure.record_failure(artifact, "provider_failed")
+        self.assertEqual(recorded["payload"], {"status": "skipped", "reason": "review_lane_noop"})
+
+    def test_cli_unknown_exceptions_never_become_public_error_codes(self) -> None:
+        from tools.qykw import __main__ as entry
+
+        class FailingController:
+            def __init__(self, error: Exception) -> None:
+                self.error = error
+
+            def root(self) -> dict[str, object]:
+                raise self.error
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "authorize.json"
+            for error in (
+                ValueError("SENTINELTOKEN"),
+                RuntimeError("SENTINELTOKEN"),
+                OSError("SENTINELTOKEN"),
+            ):
+                with self.subTest(error=type(error).__name__):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        result = entry.main(
+                            ["--phase", "authorize", "--output", str(output)],
+                            controller=FailingController(error),
+                        )
+                    self.assertEqual(result, 2)
+                    self.assertEqual(stderr.getvalue(), "::error::phase_failed\n")
+                    self.assertNotIn("SENTINELTOKEN", stderr.getvalue())
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = entry.main(
+                    ["--phase", "authorize", "--output", str(output)],
+                    controller=FailingController(ValueError("artifact_required")),
+                )
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr.getvalue(), "::error::artifact_required\n")
 
 
 if __name__ == "__main__":

@@ -685,7 +685,7 @@ class TestPhaseArtifactIntegration(unittest.TestCase):
             with self.subTest(phase=phase):
                 with self.assertRaises(ValueError):
                     entry._run_phase(phase, artifact, controller, code)
-        self.assertEqual(entry._safe_code(ValueError("safe_code")), "safe_code")
+        self.assertEqual(entry._safe_code(ValueError("safe_code")), "phase_failed")
         self.assertEqual(entry._safe_code(ValueError("unsafe code!")), "phase_failed")
 
     def test_provider_capability_failure_records_a_failed_terminal_run(self) -> None:
