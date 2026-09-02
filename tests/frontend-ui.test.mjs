@@ -10,6 +10,7 @@ test('learner workspace uses the approved blue and white palette', () => {
   assert.match(stylesheet, /--surface:#FFFFFF/);
   assert.match(stylesheet, /--accent:#5367E8/);
   assert.match(stylesheet, /--accent-soft:#EEF1FF/);
+  assert.match(stylesheet, /\.kind\{color:var\(--technical\)\}/);
 });
 
 const sandbox = {};
