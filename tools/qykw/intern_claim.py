@@ -35,7 +35,8 @@ class PullLifecycleEvent:
 
 _COMMANDS = {command.value: command for command in InternCommand}
 _PULL_ACTIONS = frozenset({"opened", "edited", "ready_for_review", "reopened", "closed"})
-_CLOSING = re.compile(r"(?i)(?<![A-Za-z0-9_./-])closes[ \t]+#([1-9][0-9]*)(?![0-9])")
+_CLOSING = re.compile(r"(?i)(?<![A-Za-z0-9_./-])closes[ \t]+#([1-9][0-9]*)(?![A-Za-z0-9_/-])")
+_ISSUE_REF = re.compile(r"(?<![A-Za-z0-9_./-])#([0-9]+)(?![A-Za-z0-9_/-])")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _FENCE_END = re.compile(r"^ {0,3}(`+|~+)[ \t]*$")
 
@@ -115,9 +116,13 @@ def parse_closing_issue(body: str) -> int | None:
         return None
     text = "\n".join(_visible_lines(body, preserve_inline_code=False))
     matches = list(_CLOSING.finditer(text))
-    if len(matches) != 1:
+    references = list(_ISSUE_REF.finditer(text))
+    if len(matches) != 1 or len(references) != 1:
         return None
     match = matches[0]
+    reference = references[0]
+    if reference.start() != match.start() + match.group(0).index("#"):
+        return None
     if (match.start() and text[match.start() - 1] == "[") or text[match.end():].startswith("]("):
         return None
     return int(match.group(1))
@@ -153,7 +158,19 @@ def _visible_lines(body: str, *, preserve_inline_code: bool) -> list[str]:
     body = re.sub(r"<!--[\s\S]*?-->", "", body)
     visible: list[str] = []
     fence: tuple[str, int] | None = None
+    in_blockquote = False
     for raw in body.splitlines():
+        if not raw.strip():
+            in_blockquote = False
+            visible.append(raw)
+            continue
+        if re.match(r"^\s{4,}", raw) or raw.startswith("\t"):
+            continue
+        if re.match(r"^\s{0,3}>", raw):
+            in_blockquote = True
+            continue
+        if in_blockquote:
+            continue
         if fence:
             closing = _FENCE_END.match(raw)
             if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= fence[1]:
@@ -163,8 +180,6 @@ def _visible_lines(body: str, *, preserve_inline_code: bool) -> list[str]:
         if opening:
             marker = opening.group(1)
             fence = (marker[0], len(marker))
-            continue
-        if re.match(r"^\s{0,3}>", raw):
             continue
         visible.append(raw if preserve_inline_code else re.sub(r"`[^`]*`", "", raw))
     return visible

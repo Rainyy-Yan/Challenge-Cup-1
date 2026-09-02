@@ -56,6 +56,10 @@ class TestInternCommandParsing(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(parse_intern_command(body))
 
+    def test_rejects_lazy_quote_continuation_and_indented_code(self) -> None:
+        self.assertIsNone(parse_intern_command("> quoted context\n/intern-assign"))
+        self.assertIsNone(parse_intern_command("    /intern-assign"))
+
 
 class TestInternEventNormalization(unittest.TestCase):
     def test_normalizes_issue_comment_event(self) -> None:
@@ -106,6 +110,9 @@ class TestClosingIssueParsing(unittest.TestCase):
             "Closes qiyuankaiwu/agentedu#17",
             "Closes #017",
             "[Closes #17](https://example.test/17)",
+            "Closes #17\nsee #18",
+            "Closes #17suffix",
+            "Closes #17 extra #18",
             "```\nCloses #17\n```",
         ):
             with self.subTest(body=body):
