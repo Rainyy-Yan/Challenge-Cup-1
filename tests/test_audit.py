@@ -12,7 +12,7 @@
 
 import unittest
 
-from agents.audit import AuditAgent
+from agents.audit import AuditAgent, semantic_boundary_issue
 import config
 from core.llm import MockLLM
 from core.retrieval import Retriever
@@ -193,6 +193,27 @@ class TestAudit(unittest.TestCase):
         kept, dropped = auditor.review([claim])
         self.assertFalse(dropped)
         self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_automatic_mode_does_not_hide_cancelled_validation(self):
+        issue = semantic_boundary_issue(
+            "快速校对完成后无需验证精度。",
+            "自动模式可用于生产；快速校对完成后必须验证精度。",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_broad_substrings_do_not_create_a_requirement(self):
+        issue = semantic_boundary_issue(
+            "查看错误信息无需打开附录。",
+            "维护需求记录在附录中，应用程序重新定义了错误信息格式。",
+        )
+        self.assertIsNone(issue)
+
+    def test_explicit_automatic_validation_in_evidence_is_preserved(self):
+        issue = semantic_boundary_issue(
+            "自检完成后会自动验证精度。",
+            "自检完成后会自动验证精度。",
+        )
+        self.assertIsNone(issue)
 
 
 if __name__ == "__main__":

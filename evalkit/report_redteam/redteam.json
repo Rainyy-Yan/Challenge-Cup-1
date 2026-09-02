@@ -230,7 +230,7 @@
       "why_wrong": "原文要求完成后必须另行验证精度",
       "caught": true,
       "verdict": "contradicted",
-      "audit_note": "断言用“自动”取消了资料明确保留的条件或步骤"
+      "audit_note": "断言用“自动验证”取消了资料明确保留的条件或步骤"
     },
     {
       "category": "H6",

@@ -681,12 +681,17 @@ const SCOPE_LIMIT_CUES = [
   "机型手册", "现场规程", "通用数值标准"
 ];
 const RELAXATION_CUES = [
-  "无需", "不必", "不需要", "不用", "自动", "完全替代", "可以省略"
+  "无需", "不必", "不需要", "不用", "完全替代", "可以省略"
+];
+const AUTOMATIC_COMPLETION_CUES = [
+  "自动验证", "自动核对", "自动确认", "自动校验"
 ];
 const REQUIREMENT_CUES = [
-  "必须", "需要", "需", "应", "不得", "不能", "错误", "未知", "前提", "完成后",
-  "重新"
+  "必须验证", "必须核对", "必须确认", "需要验证", "需要核对", "需要确认",
+  "应当验证", "应当核对", "应当确认", "仍需验证", "仍需核对", "仍需确认",
+  "另行验证", "前提满足"
 ];
+const RISK_REQUIREMENT_RE = /(?:错误|不正确)(?:的)?[^，。；]{0,16}(?:时)?可能(?:导致|触发)/;
 
 function semanticBoundaryIssue(claimText, evidenceText) {
   const expandsScope = SCOPE_EXPANSION_CUES.some(cue => claimText.includes(cue));
@@ -695,9 +700,11 @@ function semanticBoundaryIssue(claimText, evidenceText) {
   if (expandsScope && limitsScope && !preservesScope)
     return "断言把资料限定的适用范围扩大成了无条件通用结论";
 
-  const relaxation = RELAXATION_CUES.find(cue => claimText.includes(cue));
-  const evidenceRelaxes = RELAXATION_CUES.some(cue => evidenceText.includes(cue));
-  const hasRequirement = REQUIREMENT_CUES.some(cue => evidenceText.includes(cue));
+  const relaxationCues = RELAXATION_CUES.concat(AUTOMATIC_COMPLETION_CUES);
+  const relaxation = relaxationCues.find(cue => claimText.includes(cue));
+  const evidenceRelaxes = relaxationCues.some(cue => evidenceText.includes(cue));
+  const hasRequirement = REQUIREMENT_CUES.some(cue => evidenceText.includes(cue)) ||
+    RISK_REQUIREMENT_RE.test(evidenceText);
   if (relaxation && !evidenceRelaxes && hasRequirement)
     return `断言用“${relaxation}”取消了资料明确保留的条件或步骤`;
   return null;
@@ -1105,7 +1112,7 @@ function clarify(bg) {
 
 global.Engine = {
   tokenize, overlapRatio, jaccard, numbersIn, cnToInt,
-  Retriever, BKT, Adaptive, debate, review, auditOne,
+  Retriever, BKT, Adaptive, debate, review, auditOne, semanticBoundaryIssue,
   luckProbability, masteryInterval, evidenceState, buildAbility,
   makeItem, vetItem, quantities, isNumericOption,
   runPipeline, parseIntake, clarify, learnerLevel, splitSentences, draftClaims

@@ -34,7 +34,9 @@ from core.retrieval import Retriever
 from core.schema import Claim
 
 # 每条：(类别, 断言文本, 声称的出处, 说明)
-# 真值全部来自 data/kb/robotics.jsonl，写夹具时逐条对照过原文。
+# 真值全部来自 data/kb/robotics.jsonl，写夹具时逐条对照过原文。这套夹具
+# 绑定当前正式 Demo 来源；来源下架或改写后必须先重绑夹具与真实对照，
+# tests/test_redteam.py 会拒绝继续引用已退出正式 Demo 的切片。
 FIXTURES: list[tuple[str, str, str | None, str]] = [
     # ---- H1 凭空捏造 ----
     ("H1", "控制柜每运行500小时需要更换一次主控板电池。", None, "无出处"),
