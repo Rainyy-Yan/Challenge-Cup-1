@@ -60,12 +60,18 @@ py -3 -X utf8 -c "import hashlib; print(hashlib.sha256('exact content'.encode('u
 ```
 
 After the artifacts and citations are final, compute the manifest digest from
-canonical JSON (`sort_keys=True`, compact separators, and `ensure_ascii=False`)
-and store it as `provenance.artifact_manifest_sha256`. This runnable command
-uses the same canonicalization as the scorer (replace the placeholder path):
+canonical JSON (`ensure_ascii=False`, `sort_keys=True`, compact separators, and
+`allow_nan=False`) and store it as `provenance.artifact_manifest_sha256`. Hash
+only the `artifact_manifest` object, not the truth root. These commands use the
+same canonicalization and strict UTF-8 encoding as the scorer; replace the
+placeholder truth path:
 
 ```powershell
-py -3 -X utf8 -c "import hashlib,json,pathlib; d=json.loads(pathlib.Path('manifest.json').read_text(encoding='utf-8')); c=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False); print(hashlib.sha256(c.encode('utf-8')).hexdigest())"
+py -3 -X utf8 -c "import hashlib,json,pathlib; d=json.loads(pathlib.Path('formal_truth.json').read_text(encoding='utf-8')); c=json.dumps(d['artifact_manifest'],ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False); print(hashlib.sha256(c.encode('utf-8',errors='strict')).hexdigest())"
+```
+
+```bash
+python3 -X utf8 -c "import hashlib,json,pathlib; d=json.loads(pathlib.Path('formal_truth.json').read_text(encoding='utf-8')); c=json.dumps(d['artifact_manifest'],ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False); print(hashlib.sha256(c.encode('utf-8',errors='strict')).hexdigest())"
 ```
 
 Freeze first, then hash, then assign reviewers. Any later content, citation, or

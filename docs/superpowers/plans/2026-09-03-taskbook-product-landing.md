@@ -17,7 +17,7 @@
 - Official thresholds are hallucination rate `< 0.05`, adaptation accuracy `>= 0.85`, and core-knowledge coverage `>= 0.90`.
 - Machine processing must never create human-review identities, labels, authorization conclusions, or `human_verified` status.
 - Formal scoring is offline and deterministic; it must not read `.env` or call a model provider.
-- A metric passes only on the conservative confidence-interval boundary, not the point estimate alone. Thresholds have one source: `config.py` (`TARGET_HALLUCINATION`, `TARGET_ADAPT`, `TARGET_COVERAGE`, `FORMAL_KAPPA_MIN`).
+- 两个二项指标只在 Wilson/Bootstrap 保守置信区间边界通过；coverage 是冻结加权全集普查，按点估计判断且 `interval=null`。阈值唯一来源是 `config.py`（`TARGET_HALLUCINATION`、`TARGET_ADAPT`、`TARGET_COVERAGE`、`FORMAL_KAPPA_MIN`）。
 - Existing frontend behavior and model routing are out of scope unless a regression blocks the formal workflow.
 
 ---
