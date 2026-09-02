@@ -30,12 +30,12 @@ class TestAudit(unittest.TestCase):
 
     def test_true_claims_pass(self):
         truths = [
-            Claim(text="示教器三位使能开关只有保持在中间位时伺服才能上电。",
+            Claim(text="三位使能装置有松开、中间位和按死三种状态。",
                   source_id="KB-003"),
-            Claim(text="T1模式下末端法兰中心的移动速度被限制在250毫米每秒以内。",
+            Claim(text="手动模式速度最高为250 mm/s。",
                   source_id="KB-004"),
-            Claim(text="报警SRVO-005含义为机器人超程。", source_id="KB-017"),
-            Claim(text="机器人安全围栏高度不低于1.4米。", source_id="KB-022"),
+            Claim(text="SRVO-001 表示操作面板急停被按下。", source_id="KB-015"),
+            Claim(text="带联锁的安全门打开时应停止自动运行。", source_id="KB-022"),
         ]
         kept, dropped = self.auditor.review(truths)
         self.assertEqual(len(dropped), 0, [d.audit_note for d in dropped])
@@ -66,7 +66,7 @@ class TestAudit(unittest.TestCase):
 
     def test_altered_number_is_contradicted(self):
         """句式照抄，把 250 改成 200。这类最难靠人眼发现。"""
-        c = Claim(text="T1模式下末端法兰中心的移动速度被限制在200毫米每秒以内。",
+        c = Claim(text="手动模式速度最高为200 mm/s。",
                   source_id="KB-004")
         kept, dropped = self.auditor.review([c])
         self.assertEqual(len(kept), 0)
@@ -74,8 +74,8 @@ class TestAudit(unittest.TestCase):
         self.assertIn("200", dropped[0].audit_note)
 
     def test_wrong_alarm_code_mapping_is_caught(self):
-        """把 SRVO-005 的含义安到 SRVO-002 上。"""
-        c = Claim(text="报警SRVO-002含义为机器人超程。", source_id="KB-016")
+        """把操作面板急停的含义安到示教器急停上。"""
+        c = Claim(text="SRVO-002 表示操作面板急停被按下。", source_id="KB-016")
         kept, dropped = self.auditor.review([c])
         self.assertEqual(len(kept), 0)
 
@@ -85,9 +85,9 @@ class TestAudit(unittest.TestCase):
         planted = [
             Claim(text="国家标准规定该项检测每72小时执行一次。", source_id="KB-021"),
             Claim(text="TCP标定四个姿态的夹角必须小于10度。", source_id="KB-006"),
-            Claim(text="安全围栏高度不低于2.4米。", source_id="KB-022"),
+            Claim(text="手动模式速度最高为900 mm/s。", source_id="KB-004"),
             Claim(text="子程序调用层数上限为32层。", source_id="KB-012"),
-            Claim(text="软限位修改后立即生效无需重启。", source_id="KB-025"),
+            Claim(text="三位使能装置有8种状态。", source_id="KB-003"),
             Claim(text="控制器会自动切换到备用固件分区。", source_id=None),
         ]
         kept, dropped = self.auditor.review(planted)
@@ -96,7 +96,7 @@ class TestAudit(unittest.TestCase):
                                 f"拦截率仅 {rate:.0%}，漏网：{[k.text for k in kept]}")
 
     def test_evidence_score_recorded(self):
-        c = Claim(text="报警SRVO-005含义为机器人超程。", source_id="KB-017")
+        c = Claim(text="SRVO-001 表示操作面板急停被按下。", source_id="KB-015")
         self.auditor.review([c])
         self.assertGreater(c.evidence_score, config.EVIDENCE_MIN)
 

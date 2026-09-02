@@ -22,6 +22,7 @@ from agents.debate import DebateAgent
 from agents.decide import ACTION_DOWN, ACTION_UP, DecideAgent
 from agents.generate import GenerateAgent
 from agents.diagnose import DiagnoseAgent
+from core.demo_items import formal_demo_items
 from core.llm import build_llm
 from core.retrieval import Retriever
 from core.schema import Event, Resource, Session
@@ -53,10 +54,14 @@ class IllegalTransition(RuntimeError):
 class Orchestrator:
     def __init__(self, llm=None, retriever: Retriever | None = None):
         self.llm = llm or build_llm()
-        self.retriever = retriever or Retriever.from_jsonl(config.KB_PATH)
+        # 默认编排的是可交付的正式 Demo，不得加载已被来源治理排除的切片。
+        self.retriever = retriever or Retriever.from_jsonl(config.KB_PATH, demo_only=True)
+        demo_items = formal_demo_items(
+            json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+        )
         kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
         self.kp_index = {k["id"]: k for k in kps}
-        self.diagnoser = DiagnoseAgent(self.llm)
+        self.diagnoser = DiagnoseAgent(self.llm, items=demo_items)
         self.auditor = AuditAgent(self.llm, self.retriever)
         self.generator = GenerateAgent(self.llm, self.retriever,
                                        self.kp_index, auditor=self.auditor)
