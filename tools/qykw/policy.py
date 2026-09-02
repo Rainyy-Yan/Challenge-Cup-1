@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import hmac
 import json
@@ -102,6 +103,7 @@ _MAX_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024
 _MAX_TRUSTED_SOURCE_FILES = 100
 _MAX_TRUSTED_SOURCE_CONTEXT_BYTES = 650_000
 _MAX_SOURCE_OMISSION_DETAILS = 100
+_MAX_ASSIGNMENT_EXPRESSION_LENGTH = 4096
 _KNOWN_SECRET = re.compile(
     r"(?:"
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
@@ -696,8 +698,7 @@ def _contains_high_confidence_secret(content: str) -> bool:
     if _KNOWN_SECRET.search(content):
         return True
     for match in _SECRET_ASSIGNMENT.finditer(content):
-        value = match.group("quoted") or match.group("unquoted")
-        if not _is_placeholder_secret_value(value):
+        if _assignment_contains_secret(match):
             return True
     for match in _BEARER_VALUE.finditer(content):
         if not _is_placeholder_secret_value(match.group("value")):
@@ -711,6 +712,24 @@ def _contains_high_confidence_secret(content: str) -> bool:
 
 def _is_placeholder_secret_value(value: str) -> bool:
     return value.casefold() in _PLACEHOLDER_VALUES
+
+
+def _assignment_contains_secret(match: re.Match[str]) -> bool:
+    quoted = match.group("quoted")
+    if quoted is not None:
+        return not _is_placeholder_secret_value(quoted)
+    value = match.group("unquoted").strip()
+    if not value or _is_placeholder_secret_value(value):
+        return False
+    if value.casefold() in {"none", "null", "nil", "undefined"}:
+        return False
+    if len(value) > _MAX_ASSIGNMENT_EXPRESSION_LENGTH:
+        return True
+    try:
+        expression = ast.parse(value, mode="eval").body
+    except (MemoryError, OverflowError, RecursionError, SyntaxError, ValueError):
+        return True
+    return not isinstance(expression, (ast.Attribute, ast.Call, ast.Subscript))
 
 
 def _validate_text(value: str, *, allow_empty: bool) -> int:

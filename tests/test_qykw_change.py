@@ -691,6 +691,42 @@ class TestPatchGeneration(unittest.TestCase):
                     content,
                 )
 
+    def test_secret_assignment_references_remain_available_as_source_context(self) -> None:
+        references = (
+            "token = None\n",
+            'api_key = os.environ["API_KEY"]\n',
+            "password = getpass()\n",
+            "secret = config.secret\n",
+        )
+        for index, content in enumerate(references):
+            path = f"reference-{index}.py"
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(content=content):
+                self.generate(
+                    snapshot_value=snapshot(source),
+                    subject=policy(
+                        source_tree=tree_index(
+                            SourceTreeEntry(
+                                path,
+                                "100644",
+                                "blob",
+                                git_blob_sha(content.encode()),
+                            )
+                        )
+                    ),
+                    provider=provider,
+                )
+                self.assertEqual(provider.calls, 1)
+                self.assertEqual(
+                    provider.request.payload["untrusted"]["source_files"][0][
+                        "content"
+                    ],
+                    content,
+                )
+
     def test_high_entropy_generic_secret_assignments_still_fail_closed(self) -> None:
         secrets = (
             'token = "mR9!wQ2#zT7$pL4@xV8&"\n',
@@ -742,6 +778,9 @@ class TestPatchGeneration(unittest.TestCase):
             ("Authorization: Bearer secret-token-value\n", "header.txt"),
             ("password secret-password\n", "connection.txt"),
             ('api_key="your-secret-key"\n', "settings.py"),
+            ('password="None"\n', "settings.py"),
+            ('token="config.secret"\n', "settings.py"),
+            ("token=aaaaaaaa\n", "settings.py"),
         )
         for content, path in credentials:
             source = changed_file(path, content=content)
