@@ -24,7 +24,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 import config
-from core.demo_sources import validate_demo_source_manifest
+from core.demo_sources import (
+    publicly_verified_source_ids,
+    validate_demo_source_manifest,
+)
 from core.demo_items import formal_demo_items
 from orchestrator import Orchestrator, load_profile
 
@@ -62,12 +65,14 @@ def build(inject: float, drift: float) -> dict:
         sessions[pid] = data
 
     kb = {}
+    publicly_verified = publicly_verified_source_ids()
     orch = Orchestrator()
     for c in orch.retriever.chunks:
         if not c.demo_eligible:
             continue
         kb[c.id] = {"title": c.title, "source": c.source, "kp": c.kp,
-                    "text": c.text, "verified": c.publicly_verified,
+                    "text": c.text,
+                    "verified": c.verified and c.id in publicly_verified,
                     "source_note": c.source_note}
     validate_demo_source_manifest(kb, artifact="离线快照")
 

@@ -53,6 +53,13 @@ class TestProvenancePayload(unittest.TestCase):
 
         self.assertNotIn(excluded.id, payload["kb"])
 
+    def test_pending_legacy_verification_is_not_published(self) -> None:
+        """旧 verified 标记没有完整人工复核记录时不得对外宣称已核实。"""
+        payload = server.session_payload(self.session_id)
+
+        self.assertFalse(payload["kb"]["KB-004"]["verified"])
+        self.assertFalse(payload["kb"]["KB-017"]["verified"])
+
 
 if __name__ == "__main__":
     unittest.main()

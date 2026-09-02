@@ -74,6 +74,20 @@ class TestMaterialStaging(unittest.TestCase):
         with self.assertRaises(server.UploadError):
             server.stage_material("notes.txt", encoded, "无", True)
 
+    def test_staging_rejects_a_file_when_nothing_can_be_extracted(self):
+        encoded = base64.b64encode(b"%PDF-1.4\nnot a real PDF\n%%EOF").decode("ascii")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(server.UploadError, "未提取到可复核内容"):
+                server.stage_material(
+                    "broken.pdf", encoded, "待复核的测试 PDF", True,
+                    incoming_dir=root / "incoming", staging_root=root / "staged",
+                )
+
+            self.assertEqual(1, len(list((root / "incoming").iterdir())))
+            self.assertFalse((root / "staged").exists())
+
 
 class TestShowcaseTemplate(unittest.TestCase):
     def test_ability_renderers_are_executable_javascript_not_css(self):

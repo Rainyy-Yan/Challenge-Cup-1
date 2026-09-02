@@ -10,14 +10,15 @@ import config
 
 
 MANIFEST_PATH = config.DATA / "demo_source_manifest.json"
+HUMAN_REVIEW_FIELDS = ("reviewer", "reviewed_on", "conclusion", "authorization")
 
 
 class DemoSourceManifestError(ValueError):
     """The published Demo source set and its review manifest disagree."""
 
 
-def manifest_source_ids(path: Path = MANIFEST_PATH) -> set[str]:
-    """Read manifest IDs and fail closed on malformed or duplicate records."""
+def manifest_records(path: Path = MANIFEST_PATH) -> list[dict]:
+    """Read manifest records and fail closed on malformed or duplicate IDs."""
     data = json.loads(path.read_text(encoding="utf-8"))
     records = data.get("records")
     if not isinstance(records, list):
@@ -31,7 +32,30 @@ def manifest_source_ids(path: Path = MANIFEST_PATH) -> set[str]:
 
     if len(ids) != len(set(ids)):
         raise DemoSourceManifestError("Demo 来源台账包含重复记录 ID")
-    return set(ids)
+    return records
+
+
+def manifest_source_ids(path: Path = MANIFEST_PATH) -> set[str]:
+    """Return all source IDs registered in the Demo manifest."""
+    return {record["id"] for record in manifest_records(path)}
+
+
+def publicly_verified_source_ids(path: Path = MANIFEST_PATH) -> set[str]:
+    """Return sources backed by a complete human verification record."""
+    verified: set[str] = set()
+    for record in manifest_records(path):
+        if record.get("review_status") != "human_verified":
+            continue
+        missing = [
+            field for field in HUMAN_REVIEW_FIELDS
+            if not isinstance(record.get(field), str) or not record[field].strip()
+        ]
+        if missing:
+            raise DemoSourceManifestError(
+                f"{record['id']} 声称 human_verified 但缺少人工复核字段：{', '.join(missing)}"
+            )
+        verified.add(record["id"])
+    return verified
 
 
 def validate_demo_source_manifest(source_ids: Iterable[str], *, artifact: str) -> None:
