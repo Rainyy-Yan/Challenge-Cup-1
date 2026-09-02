@@ -368,6 +368,9 @@ class TestInternGitHubGateway(unittest.TestCase):
             ("POST", f"{api}/issues/17/labels", b'{"labels":["triage"]}'),
             ("PATCH", f"{api}/issues/17/labels/status%3Ain-progress", b'{}'),
             ("POST", f"{api}/issues/17/comments", b'{"body":"ok","extra":true}'),
+            ("POST", f"{api}/issues/17/labels?ignored=1", b'{"labels":["status:in-progress"]}'),
+            ("PATCH", f"{api}/issues/17?ignored=1", b'{"state":"closed"}'),
+            ("DELETE", f"{api}/issues/17/labels/intern%3Aclaimable?ignored=1", None),
         ):
             with self.subTest(method=method, url=url), self.assertRaisesRegex(InternError, "invalid_request"):
                 gateway._request(method, url, body=body)

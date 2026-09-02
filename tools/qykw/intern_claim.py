@@ -682,6 +682,8 @@ def _intern_record_identity(record: InternRecord) -> tuple[object, ...]:
 
 def _intern_allowed_route(method: str, url: str, body: bytes | None, api_url: str, repository: str) -> None:
     parsed = urlsplit(url)
+    if method != "GET" and parsed.query:
+        raise InternError("invalid_request")
     if method == "GET" and body is None and url == f"{api_url}/user":
         return
     prefix = f"{api_url}/repos/{repository}/"
