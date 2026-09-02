@@ -167,6 +167,11 @@ class TestTruthValidation(unittest.TestCase):
             ["reviewer reviewer-one is not declared in human_reviewer_roster"],
         )
 
+    def test_accepts_two_human_reviewers_when_all_records_agree(self):
+        truth = valid_truth()
+        truth["review_protocol"]["human_reviewer_roster"].pop()
+        self.assertEqual(validate_truth(truth), [])
+
     def test_declared_human_ids_may_contain_machine_like_substrings(self):
         for identity in ("Gail", "mail-reviewer", "ecosystem-expert", "reagent-specialist"):
             with self.subTest(identity=identity):

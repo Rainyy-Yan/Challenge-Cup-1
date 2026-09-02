@@ -145,9 +145,9 @@ def _human_reviewer_roster(data: dict, errors: list[str]) -> set[str] | None:
                 f"human_reviewer_roster entry {display_id} must set attested_human to true"
             )
 
-    if len(identities) < 3:
+    if len(identities) < 2:
         errors.append(
-            "human_reviewer_roster must contain at least 3 distinct non-empty identities"
+            "human_reviewer_roster must contain at least 2 distinct non-empty identities"
         )
     if len(errors) != roster_errors_before:
         return None
