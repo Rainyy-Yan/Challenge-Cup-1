@@ -11,6 +11,7 @@ from pathlib import Path
 
 from core.demo_sources import (
     DemoSourceManifestError,
+    manifest_source_ids,
     publicly_verified_source_ids,
     validate_demo_source_manifest,
 )
@@ -147,6 +148,23 @@ class TestDemoSourceManifest(unittest.TestCase):
 
             with self.assertRaisesRegex(DemoSourceManifestError, "KB-BROKEN"):
                 publicly_verified_source_ids(path)
+
+    def test_missing_manifest_uses_the_domain_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.json"
+            with self.assertRaisesRegex(
+                DemoSourceManifestError, "无法读取 Demo 来源台账"
+            ):
+                manifest_source_ids(path)
+
+    def test_malformed_manifest_uses_the_domain_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text("{broken", encoding="utf-8")
+            with self.assertRaisesRegex(
+                DemoSourceManifestError, "无法读取 Demo 来源台账"
+            ):
+                manifest_source_ids(path)
 
     def test_source_unavailable_chunks_are_excluded_from_formal_demo(self):
         """失效的资料可留在原始库复核，但不能随正式 Demo 重新出现。"""

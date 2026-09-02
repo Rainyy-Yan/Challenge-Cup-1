@@ -150,6 +150,10 @@ class TestParity(unittest.TestCase):
             ("减速机润滑脂应当每运行三千小时更换一次。", "KB-022"),
             ("控制柜每运行500小时需要更换一次主控板电池。", None),
             ("工件坐标系可通过六点法标定。", "KB-999"),
+            ("机器人可在手动或自动模式下运行。所有工业机器人的手动模式只能通过"
+             "示教器操作，速度最高为250 mm/s。", "KB-004"),
+            ("工具或有效载荷数据未知时，使用负载辨识功能后无需再核对负载数据。",
+             "KB-024"),
         ]
         auditor = AuditAgent(MockLLM(), Retriever.from_jsonl(config.KB_PATH))
         js = run_js(f"""
@@ -162,6 +166,33 @@ class TestParity(unittest.TestCase):
             kept, dropped = auditor.review([Claim(text=text, source_id=src)])
             want = (kept + dropped)[0].verdict
             self.assertEqual(got, want, f"审核判定不一致：{text}")
+
+    def test_semantic_boundary_cases_match(self):
+        from agents.audit import semantic_boundary_issue
+        cases = [
+            ("所有工业机器人的手动速度都相同。",
+             "以所列控制器为例，具体机型应查阅机型手册。"),
+            ("使用辨识功能后无需再核对负载数据。",
+             "负载数据不正确时可能触发碰撞检测。"),
+            ("快速校对完成后会自动验证精度。",
+             "快速校对完成后必须验证精度。"),
+            ("快速校对不需要确认机器人是否移动。",
+             "快速校对仅在机器人未移动等前提满足时才适用。"),
+            ("快速校对完成后无需验证精度。",
+             "自动模式可用于生产；快速校对完成后必须验证精度。"),
+            ("查看错误信息无需打开附录。",
+             "维护需求记录在附录中，应用程序重新定义了错误信息格式。"),
+            ("自检完成后会自动验证精度。",
+             "自检完成后会自动验证精度。"),
+        ]
+        js = run_js(f"""
+        const C = {json.dumps(cases, ensure_ascii=False)};
+        console.log(JSON.stringify(C.map(([claim, evidence]) =>
+          Engine.semanticBoundaryIssue(claim, evidence))));
+        """)
+        want = [semantic_boundary_issue(claim, evidence)
+                for claim, evidence in cases]
+        self.assertEqual(js, want)
 
     def test_adaptive_selection_order_matches(self):
         """同一份背景、同一串对错，两边选出的题号序列必须完全一样。"""

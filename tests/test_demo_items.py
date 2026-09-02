@@ -105,14 +105,11 @@ class TestFormalDemoItems(unittest.TestCase):
                     "Q-016", "Q-019", "Q-021", "Q-022", "Q-023"},
             "P-C": {"Q-003", "Q-019", "Q-021"},
         }
-        items = formal_demo_items(
-            json.loads((ROOT / "data" / "pretest.json").read_text(encoding="utf-8"))["items"]
-        )
 
         for profile_id, expected_correct in expected.items():
             responses = load_profile(profile_id)["responses"]
             actual_correct = {
-                item["id"] for item in items
+                item["id"] for item in self.formal_items
                 if item["id"] in responses and responses[item["id"]] == item["answer"]
             }
             self.assertEqual(expected_correct, actual_correct, profile_id)

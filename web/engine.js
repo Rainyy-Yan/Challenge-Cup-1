@@ -673,6 +673,42 @@ function draftClaims(chunks, n) {
 /* ---------- 审核裁判：对应 agents/audit.py ---------- */
 
 const EVIDENCE_MIN = 0.42, MISATTRIB_MARGIN = 0.15;
+const SCOPE_EXPANSION_CUES = [
+  "所有", "任何情况下", "任何品牌", "一律", "无论", "都必须", "都使用"
+];
+const SCOPE_LIMIT_CUES = [
+  "为例", "仅适用", "仅在", "因控制器而异", "实际机型", "具体机型",
+  "机型手册", "现场规程", "通用数值标准"
+];
+const RELAXATION_CUES = [
+  "无需", "不必", "不需要", "不用", "完全替代", "可以省略"
+];
+const AUTOMATIC_COMPLETION_CUES = [
+  "自动验证", "自动核对", "自动确认", "自动校验"
+];
+const REQUIREMENT_CUES = [
+  "必须验证", "必须核对", "必须确认", "需要验证", "需要核对", "需要确认",
+  "应当验证", "应当核对", "应当确认", "仍需验证", "仍需核对", "仍需确认",
+  "另行验证", "前提满足"
+];
+const RISK_REQUIREMENT_RE = /(?:错误|不正确)(?:的)?[^，。；]{0,16}(?:时)?可能(?:导致|触发)/;
+
+function semanticBoundaryIssue(claimText, evidenceText) {
+  const expandsScope = SCOPE_EXPANSION_CUES.some(cue => claimText.includes(cue));
+  const limitsScope = SCOPE_LIMIT_CUES.some(cue => evidenceText.includes(cue));
+  const preservesScope = SCOPE_LIMIT_CUES.some(cue => claimText.includes(cue));
+  if (expandsScope && limitsScope && !preservesScope)
+    return "断言把资料限定的适用范围扩大成了无条件通用结论";
+
+  const relaxationCues = RELAXATION_CUES.concat(AUTOMATIC_COMPLETION_CUES);
+  const relaxation = relaxationCues.find(cue => claimText.includes(cue));
+  const evidenceRelaxes = relaxationCues.some(cue => evidenceText.includes(cue));
+  const hasRequirement = REQUIREMENT_CUES.some(cue => evidenceText.includes(cue)) ||
+    RISK_REQUIREMENT_RE.test(evidenceText);
+  if (relaxation && !evidenceRelaxes && hasRequirement)
+    return `断言用“${relaxation}”取消了资料明确保留的条件或步骤`;
+  return null;
+}
 
 function auditOne(claim, R) {
   if (!claim.source_id) return {verdict:"unsupported", note:"未给出知识库引用", ratio:0};
@@ -685,6 +721,10 @@ function auditOne(claim, R) {
   const extra = [...cn].filter(x => !kn.has(x));
   if (extra.length)
     return {verdict:"contradicted", note:`断言中的数值 ${extra.join("、")} 在所引切片中不存在`, ratio};
+
+  const boundaryIssue = semanticBoundaryIssue(claim.text, full);
+  if (boundaryIssue)
+    return {verdict:"contradicted", note:boundaryIssue, ratio};
 
   if (ratio < EVIDENCE_MIN)
     return {verdict:"unsupported", note:`与所引切片的证据覆盖率仅 ${ratio.toFixed(2)}`, ratio};
@@ -1072,7 +1112,7 @@ function clarify(bg) {
 
 global.Engine = {
   tokenize, overlapRatio, jaccard, numbersIn, cnToInt,
-  Retriever, BKT, Adaptive, debate, review, auditOne,
+  Retriever, BKT, Adaptive, debate, review, auditOne, semanticBoundaryIssue,
   luckProbability, masteryInterval, evidenceState, buildAbility,
   makeItem, vetItem, quantities, isNumericOption,
   runPipeline, parseIntake, clarify, learnerLevel, splitSentences, draftClaims

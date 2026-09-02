@@ -89,6 +89,16 @@ class TestMaterialStaging(unittest.TestCase):
             self.assertFalse((root / "staged").exists())
 
 
+class TestFormalExaminerBoundary(unittest.TestCase):
+    def test_examiner_only_uses_formal_demo_sources(self):
+        examiner = server._examiner()
+        if examiner is None:
+            self.skipTest("命题审核器未启用")
+
+        excluded = {"KB-015", "KB-016", "KB-018"}
+        self.assertFalse(excluded & {chunk.id for chunk in examiner.retriever.chunks})
+
+
 class TestShowcaseTemplate(unittest.TestCase):
     def test_ability_renderers_are_executable_javascript_not_css(self):
         template = Path("web/showcase.template.html").read_text(encoding="utf-8")

@@ -18,8 +18,15 @@ class DemoSourceManifestError(ValueError):
 
 
 def manifest_records(path: Path = MANIFEST_PATH) -> list[dict]:
-    """Read manifest records and fail closed on malformed or duplicate IDs."""
-    data = json.loads(path.read_text(encoding="utf-8"))
+    """Read manifest records and fail closed on unreadable or malformed data."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DemoSourceManifestError(
+            f"无法读取 Demo 来源台账 {path}：{exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise DemoSourceManifestError("Demo 来源台账根节点必须是对象")
     records = data.get("records")
     if not isinstance(records, list):
         raise DemoSourceManifestError("Demo 来源台账缺少 records 列表")
@@ -52,7 +59,8 @@ def publicly_verified_source_ids(path: Path = MANIFEST_PATH) -> set[str]:
         ]
         if missing:
             raise DemoSourceManifestError(
-                f"{record['id']} 声称 human_verified 但缺少人工复核字段：{', '.join(missing)}"
+                f"{record['id']} 声称 human_verified 但缺少人工复核字段："
+                f"{', '.join(missing)}"
             )
         verified.add(record["id"])
     return verified
