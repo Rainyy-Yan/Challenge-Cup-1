@@ -1201,6 +1201,38 @@ class TestInternPullLifecycle(unittest.TestCase):
                                     if item[0] in {"add_label", "remove_label", "close_issue"})
         self.assertLess(issue_marker_index, first_label_or_close)
 
+    def test_merged_close_replay_repairs_failed_marker_tail_without_issue_mutation(self) -> None:
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding(stage="pending")
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+        gateway.fail_next("update_comment")
+        service = self.service(gateway)
+
+        first = service.handle_pull_event(self.event("closed"))
+        issue_mutations = sum(item[0] in {"add_label", "remove_label", "close_issue"}
+                              for item in gateway.writes)
+        self.assertEqual(first.status, "failed")
+        self.assertEqual(gateway.issue.state, "closed")
+        self.assertEqual(gateway.records()[0].stage, "failed")
+        self.assertEqual(gateway.pull_record().stage, "failed")  # type: ignore[union-attr]
+
+        second = service.handle_pull_event(self.event("closed"))
+
+        self.assertEqual(second, InternOutcome(17, (9,), "reconciled"))
+        self.assertEqual(
+            sum(item[0] in {"add_label", "remove_label", "close_issue"}
+                for item in gateway.writes),
+            issue_mutations,
+        )
+        self.assertEqual(gateway.records()[0].stage, "reconciled")
+        self.assertEqual(gateway.pull_record().stage, "reconciled")  # type: ignore[union-attr]
+        writes = tuple(gateway.writes)
+
+        third = service.handle_pull_event(self.event("closed"))
+
+        self.assertEqual(third, InternOutcome(17, (), "noop"))
+        self.assertEqual(tuple(gateway.writes), writes)
+
     def test_closed_requires_exact_frozen_claimant_for_merged_and_unmerged(self) -> None:
         for merged in (False, True):
             for assignees in ((), ("bob",), ("alice", "bob")):

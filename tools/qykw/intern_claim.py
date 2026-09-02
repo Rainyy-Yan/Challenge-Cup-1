@@ -833,8 +833,22 @@ class InternClaimService:
                 return InternOutcome(record.issue_number, (), "failed")
 
         if pull.merged:
-            if issue.state == "closed" and "status:in-review" not in labels:
-                return InternOutcome(record.issue_number, (), "noop")
+            if issue.state == "closed" and not labels & {"status:in-progress", "status:in-review"}:
+                if issue_comment_id is None:
+                    return InternOutcome(record.issue_number, (), "conflict")
+                terminal = self._with_stage(record, "reconciled")
+                issue_stage = self._comment_stage(
+                    event, issue_comment_id, record, pull=False,
+                )
+                if record.stage == "reconciled" and issue_stage == "reconciled":
+                    return InternOutcome(record.issue_number, (), "noop")
+                if not self._set_marker_stage(event, issue_comment_id, terminal, pull=False):
+                    self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+                    return InternOutcome(record.issue_number, (), "failed")
+                if not self._set_marker_stage(event, pull_comment_id, terminal, pull=True):
+                    self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+                    return InternOutcome(record.issue_number, (), "failed")
+                return InternOutcome(record.issue_number, (event.pull_number,), "reconciled")
             if issue.state != "open" or labels & {"intern:claimable", "status:blocked"}:
                 return InternOutcome(record.issue_number, (), "conflict")
             if "status:in-progress" in labels:
