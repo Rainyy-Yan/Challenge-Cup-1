@@ -20,6 +20,7 @@ from tools.qykw.domain import (
 )
 from tools.qykw.github import HttpGitHubGateway
 from tools.qykw.policy import authorize_command
+from tools.qykw.prompts import estimate_trusted_rules_input_tokens
 from tools.qykw.provider import ProviderError, ResponsesInferenceProvider
 from tools.qykw.publish import ReviewPublisher, sanitize_public_text
 from tools.qykw.review import ReviewEngine
@@ -113,16 +114,18 @@ class ProductionPhaseController:
         except Exception:
             raise AnalyzePhaseError(AnalyzePhaseErrorCode.PROVIDER_SETUP_FAILED) from None
         try:
+            trusted_input_reserve = estimate_trusted_rules_input_tokens(run, snapshot.trusted_rules)
             plan = build_context_plan(snapshot, run_id=run.run_id, repository_id=run.repository_id,
                                       repository_limit=capabilities.context_window,
                                       backend_context_window=capabilities.context_window,
                                       output_reserve=capabilities.max_output_tokens,
                                       safety_reserve_ratio=config.context.safety_reserve_ratio,
-                                      max_chunk_ratio=config.context.max_chunk_ratio)
+                                      max_chunk_ratio=config.context.max_chunk_ratio,
+                                      trusted_input_reserve=trusted_input_reserve)
         except Exception:
             raise AnalyzePhaseError(AnalyzePhaseErrorCode.CONTEXT_BUILD_FAILED) from None
         if run.command.name in {CommandName.ANALYZE, CommandName.PLAN}:
-            result = AdvisoryService(provider).handle(run, plan, record)
+            result = AdvisoryService(provider).handle(run, plan, record, trusted_rules=snapshot.trusted_rules)
             return _analysis_artifact(run, {"kind": "advisory", "status": "completed", "advisory": _advisory_payload(result)})
         try:
             review = ReviewEngine(provider, max_findings=config.review.max_findings).review(run, snapshot, plan)

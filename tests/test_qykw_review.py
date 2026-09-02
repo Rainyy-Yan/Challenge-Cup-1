@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from tools.qykw.domain import (
-    ChangedLine, CommandMode, CommandName, CommandRequest, ContextChunk, ContextPlan,
+    ChangedLine, CommandMode, CommandName, CommandRequest, ContextChunk, ContextChunkKind, ContextPlan,
     CoverageReport, DiffSide, FileManifest, FindingCandidate, InferenceResponse,
-    InferenceUsage, ProviderCapabilities, PullSnapshot, RunContext, Severity,
+    InferenceUsage, ProviderCapabilities, PullSnapshot, RepositoryFile, RunContext, Severity,
 )
 
 
@@ -24,7 +25,7 @@ def plan() -> ContextPlan:
     identity = f"run_id={run().run_id}|repository_id=7|repository=owner/repo|pr=7|base_sha={'b' * 40}|base_ref=main|head_sha={'h' * 40}"
     prefix = f"P run={run().run_id} rid=7 repo=owner/repo pr=7 bs={'b' * 40} br=main hs={'h' * 40}"
     return ContextPlan("owner/repo", 7, "h" * 40, identity, FileManifest(("src/a.py", "src/b.py"), ("src/b.py", "src/a.py")),
-        (ContextChunk(f"{identity}|chunk=1", ("src/a.py",), f"{prefix} path=src/a.py\ncontext-a", 2), ContextChunk(f"{identity}|chunk=2", ("src/b.py",), f"{prefix} path=src/b.py\ncontext-b", 2)), coverage,
+        (ContextChunk(f"{identity}|chunk=1", ("src/a.py",), f"{prefix} path=src/a.py prev=- side=RIGHT old=- new=3-3\ncontext-a", 2), ContextChunk(f"{identity}|chunk=2", ("src/b.py",), f"{prefix} path=src/b.py prev=- side=RIGHT old=- new=9-9\ncontext-b", 2)), coverage,
         frozenset({ChangedLine("src/a.py", 3, DiffSide.RIGHT), ChangedLine("src/a.py", 2, DiffSide.LEFT), ChangedLine("src/b.py", 9, DiffSide.RIGHT)}), 1000, 20_000)
 
 
@@ -91,6 +92,66 @@ class TestFindingValidation(unittest.TestCase):
 
 
 class TestReviewEngine(unittest.TestCase):
+    def test_snapshot_bound_reference_chunks_are_not_candidate_sources(self) -> None:
+        from tools.qykw.review import ReviewEngine
+
+        rule = RepositoryFile("AGENTS.md", "b" * 40, "rule-sha", "review rules", "rules")
+        bound_snapshot = replace(snapshot(), trusted_rules=(rule,))
+        base_plan = plan()
+        prefix = (
+            f"P run={run().run_id} rid=7 repo=owner/repo pr=7 bs={'b' * 40} "
+            f"br=main hs={'h' * 40}"
+        )
+        reference = ContextChunk(
+            f"{base_plan.run_id}|chunk=3",
+            ("AGENTS.md",),
+            f"{prefix} path=AGENTS.md prev=- side=REFERENCE old=- new=1-1\n"
+            "REFERENCE purpose=rules\nreview rules",
+            3,
+            ContextChunkKind.REFERENCE,
+        )
+        bound_plan = replace(
+            base_plan,
+            manifest=FileManifest(
+                base_plan.manifest.paths + ("AGENTS.md",),
+                base_plan.manifest.risk_order + ("AGENTS.md",),
+            ),
+            chunks=base_plan.chunks + (reference,),
+            commentable_lines=base_plan.commentable_lines | frozenset({
+                ChangedLine("AGENTS.md", 1, DiffSide.RIGHT)
+            }),
+        )
+        provider = RecordingProvider([{"candidates": []}] * 2)
+
+        result = ReviewEngine(provider, max_findings=20).review(run(), bound_snapshot, bound_plan)
+
+        self.assertEqual(result.conclusion, "审查完成")
+        self.assertEqual(len(provider.calls), 2)
+        self.assertNotIn(reference.chunk_id, [
+            request.payload["untrusted"]["context"]["chunk_id"] for request in provider.calls
+        ])
+        for request in provider.calls:
+            self.assertEqual(request.payload["trusted"]["trusted_rules"][0]["path"], "AGENTS.md")
+
+    def test_reference_chunk_not_bound_to_snapshot_is_rejected(self) -> None:
+        from tools.qykw.review import ReviewEngine
+
+        base_plan = plan()
+        foreign = replace(base_plan.chunks[0], paths=("foreign.md",))
+        with self.assertRaisesRegex(ValueError, "invalid_plan_chunk_binding"):
+            ReviewEngine(RecordingProvider([]), max_findings=20).review(
+                run(), snapshot(), replace(base_plan, chunks=(foreign,))
+            )
+        disguised = replace(
+            base_plan.chunks[0],
+            text=base_plan.chunks[0].text.replace(" side=RIGHT ", " side=REFERENCE ")
+            + "\ncontent mentions side=RIGHT but cannot change its kind",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid_plan_chunk_binding"):
+            ReviewEngine(RecordingProvider([]), max_findings=20).review(
+                run(), snapshot(), replace(base_plan, chunks=(disguised,))
+            )
+
     def test_provider_capabilities_failure_propagates_without_public_result(self) -> None:
         from tools.qykw.review import ReviewEngine
         failure = RuntimeError("raw capability failure must stay internal")
