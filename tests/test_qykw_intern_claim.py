@@ -1,12 +1,13 @@
 """Tests for the strict qykw intern claim parser boundary."""
 
 from contextlib import redirect_stderr
-from io import StringIO
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import re
 import tempfile
 import traceback
+from urllib.error import HTTPError, URLError
 from collections.abc import Mapping
 import unittest
 from unittest import mock
@@ -1549,6 +1550,624 @@ class TestInternCli(unittest.TestCase):
             outcome=InternOutcome(17, (), "conflict"),
         )
         self.assertEqual((status, stderr, output), (0, "", ""))
+
+
+class TestInternCoverageBoundaries(unittest.TestCase):
+    REPOSITORY = "qiyuankaiwu/agentedu"
+    API = "https://api.github.test"
+
+    def test_record_and_marker_validation_rejects_malformed_identity(self) -> None:
+        valid = (42, self.REPOSITORY, 17, 101, "alice")
+        for tail, code in (
+            (("status", None, None, "unknown"), "invalid_stage"),
+            (("unassign", None, None, "pending"), "invalid_operation"),
+            (("pull", "alice", None, "pending"), "invalid_operation"),
+        ):
+            with self.subTest(tail=tail), self.assertRaisesRegex(InternError, code):
+                InternRecord(*valid, *tail)
+        with self.assertRaisesRegex(InternError, "invalid_record"):
+            intern_claim.encode_marker(object())
+
+        marker = InternRecord(*valid, "assign", "alice", None, "pending").marker()
+        malformed = marker.replace('"repository_id":42', '"repository_id":false')
+        self.assertIsNone(decode_marker(malformed))
+        self.assertIsNone(decode_marker(marker, repository="bad"))
+        self.assertIsNone(decode_marker("x" * (16 * 1024 + 1)))
+
+    def test_normalizers_and_closing_parser_fail_closed_on_wrong_shapes(self) -> None:
+        self.assertIsNone(parse_intern_command(17))  # type: ignore[arg-type]
+        self.assertIsNone(normalize_issue_comment_event([]))  # type: ignore[arg-type]
+        self.assertIsNone(normalize_issue_comment_event({"action": "created"}))
+        self.assertIsNone(normalize_pull_event([]))  # type: ignore[arg-type]
+        self.assertIsNone(normalize_pull_event({"action": "opened"}))
+        self.assertIsNone(parse_closing_issue(17))  # type: ignore[arg-type]
+        self.assertIsNone(parse_closing_issue("prefix #17 then Closes #17"))
+        for repository_url in (17, "http://api.github.com/repos/qiyuankaiwu/agentedu"):
+            payload = issue_comment()
+            payload["issue"] = {"number": 17, "repository_url": repository_url}
+            with self.subTest(repository_url=repository_url):
+                self.assertIsNone(normalize_issue_comment_event(payload))
+
+    def gateway(self, transport: object | None = None) -> intern_claim.HttpInternGateway:
+        return intern_claim.HttpInternGateway(
+            self.API, self.REPOSITORY, "intern-secret", transport=transport,  # type: ignore[arg-type]
+        )
+
+    def test_gateway_constructor_identity_issue_and_pull_fail_closed(self) -> None:
+        with self.assertRaisesRegex(InternError, "invalid_token"):
+            intern_claim.HttpInternGateway(self.API, self.REPOSITORY, "")
+        with mock.patch.object(intern_claim, "_intern_stdlib_transport") as transport:
+            self.assertIs(self.gateway().transport, transport)
+
+        api = f"{self.API}/repos/{self.REPOSITORY}"
+        cases = (
+            ("identity", f"{self.API}/user", {"login": "other", "id": 1}, "bot_identity_mismatch"),
+            ("issue", f"{api}/issues/17", {"number": 18, "state": "open", "labels": [], "assignees": []}, "issue_number_mismatch"),
+            ("pull", f"{api}/pulls/9", {"number": 10, "state": "open", "merged": False, "user": {"login": "alice"}, "body": "", "base": {"repo": {"full_name": self.REPOSITORY}}}, "pull_number_mismatch"),
+            ("pull", f"{api}/pulls/9", {"number": 9, "state": "open", "merged": False, "user": {"login": "alice"}, "body": "", "base": {"repo": {"full_name": "other/repo"}}}, "pull_repository_mismatch"),
+            ("pull", f"{api}/pulls/9", {"number": 9, "state": "open", "merged": "no", "user": {"login": "alice"}, "body": "", "base": {"repo": {"full_name": self.REPOSITORY}}}, "invalid_pull"),
+        )
+        for operation, url, payload, code in cases:
+            transport = InternQueueTransport()
+            transport.add("GET", url, payload)
+            gateway = self.gateway(transport)
+            with self.subTest(code=code), self.assertRaisesRegex(InternError, code):
+                gateway.assert_bot_identity() if operation == "identity" else (
+                    gateway.get_issue(17) if operation == "issue" else gateway.get_pull(9)
+                )
+
+        transport = InternQueueTransport()
+        transport.add("GET", f"{api}/pulls/9", {
+            "number": 9, "state": "open", "merged": False, "user": {"login": "alice"},
+            "body": None, "base": {"repo": {"full_name": self.REPOSITORY}},
+        })
+        with self.assertRaisesRegex(InternError, "invalid_pull"):
+            self.gateway(transport).get_pull(9)
+
+    def test_gateway_rejects_invalid_http_envelopes_and_exhausted_pagination(self) -> None:
+        issue_url = f"{self.API}/repos/{self.REPOSITORY}/issues/17"
+        bad_responses = (
+            (True, {"content-type": "application/json"}, b"{}"),
+            (200, [], b"{}"),
+            (503, {"content-type": "application/json"}, b"{}"),
+            (200, {"content-type": "text/plain"}, b"{}"),
+        )
+        for response in bad_responses:
+            gateway = self.gateway(lambda *_args, response=response: response)
+            with self.subTest(response=response), self.assertRaises(InternError):
+                gateway.get_issue(17)
+        with self.assertRaisesRegex(InternError, "request_too_large"):
+            self.gateway(lambda *_: (200, {}, b"{}"))._request(
+                "POST", f"{issue_url}/comments", body=b"x" * (1024 * 1024 + 1),
+            )
+        with self.assertRaisesRegex(InternError, "invalid_request"):
+            self.gateway()._repo_path("/issues/17")
+
+        transport = InternQueueTransport()
+        first = f"{issue_url}/comments?per_page=100"
+        for page in range(1, intern_claim._MAX_INTERN_PAGES + 1):
+            url = first if page == 1 else f"{first}&page={page}"
+            next_url = f"{first}&page={page + 1}"
+            transport.add("GET", url, [], headers={"link": f'<{next_url}>; rel="next"'})
+        with self.assertRaisesRegex(InternError, "unsafe_pagination"):
+            self.gateway(transport)._paginate(first)
+
+        transport = InternQueueTransport()
+        transport.add("GET", first, {"not": "a list"})
+        with self.assertRaisesRegex(InternError, "invalid_pagination"):
+            self.gateway(transport)._paginate(first)
+
+    def test_strict_request_payload_and_link_parser_reject_ambiguous_input(self) -> None:
+        for body in (None, b"\xff", b"[]"):
+            with self.subTest(body=body), self.assertRaisesRegex(InternError, "invalid_request"):
+                intern_claim._intern_request_payload(body)
+        for link in (17, "malformed", '<https://a.test/2>; rel="next", <https://a.test/3>; rel="next"'):
+            with self.subTest(link=link), self.assertRaisesRegex(InternError, "unsafe_pagination"):
+                intern_claim._intern_next_link(link)  # type: ignore[arg-type]
+        self.assertIsNone(intern_claim._intern_next_link('<https://a.test/1>; rel="prev"'))
+
+    def test_stdlib_transport_handles_success_http_error_and_network_error(self) -> None:
+        class Response:
+            status = 201
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read(_limit: int) -> bytes:
+                return b'{"ok":true}'
+
+        class Opener:
+            def __init__(self, value: object) -> None:
+                self.value = value
+
+            def open(self, _request: object, timeout: int) -> object:
+                self.timeout = timeout
+                if isinstance(self.value, BaseException):
+                    raise self.value
+                return self.value
+
+        values = (
+            (Response(), (201, {"Content-Type": "application/json"}, b'{"ok":true}')),
+            (HTTPError(self.API, 429, "rate", {"Retry-After": "1"}, BytesIO(b"limited")), (429, {"Retry-After": "1"}, b"limited")),
+        )
+        for value, expected in values:
+            with mock.patch.object(intern_claim, "build_opener", return_value=Opener(value)):
+                self.assertEqual(intern_claim._intern_stdlib_transport("GET", self.API, {}, None), expected)
+            if isinstance(value, HTTPError):
+                value.close()
+        with mock.patch.object(intern_claim, "build_opener", return_value=Opener(URLError("offline"))):
+            with self.assertRaisesRegex(InternError, "transport_failed"):
+                intern_claim._intern_stdlib_transport("GET", self.API, {}, None)
+        self.assertIsNone(intern_claim._InternNoRedirect().redirect_request(None, None, 302, "", None, self.API))
+
+    def test_cli_output_and_main_error_boundaries_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for output in ("", "relative-output.txt", str(root)):
+                with self.subTest(output=output), self.assertRaisesRegex(InternError, "invalid_output_file"):
+                    intern_claim._write_issue_output({"GITHUB_OUTPUT": output}, 17)
+            oversized = root / "oversized.txt"
+            oversized.write_bytes(b"x" * (intern_claim._MAX_OUTPUT_BYTES + 1))
+            with self.assertRaisesRegex(InternError, "invalid_output_file"):
+                intern_claim._write_issue_output({"GITHUB_OUTPUT": str(oversized)}, 17)
+
+        for outcome in (object(), InternOutcome(17, (), "unknown")):
+            with self.subTest(outcome=outcome), self.assertRaisesRegex(InternError, "invalid_outcome"):
+                intern_claim._cli_outcome_status(outcome)
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(intern_claim.main(["--bad"]), 1)
+        self.assertEqual(stderr.getvalue(), "::error title=qykw intern::invalid_phase\n")
+        stderr = StringIO()
+        with mock.patch.object(intern_claim, "_run_cli", side_effect=RuntimeError("secret")), redirect_stderr(stderr):
+            self.assertEqual(intern_claim.main(["--phase", "issue-command"], environment={}), 1)
+        self.assertEqual(stderr.getvalue(), "::error title=qykw intern::internal_error\n")
+
+    def test_gateway_payload_shapes_and_routes_reject_unsafe_values(self) -> None:
+        api = f"{self.API}/repos/{self.REPOSITORY}"
+        for payload, code in (
+            ({"number": 17, "state": "open", "labels": {}, "assignees": []}, "invalid_issue"),
+            ({"number": 17, "state": "open", "labels": [{"name": "x"}, {"name": "x"}], "assignees": []}, "invalid_issue"),
+            ({"number": 17, "state": "open", "labels": [], "assignees": {}}, "invalid_issue"),
+            ({"number": 17, "state": "open", "labels": [], "assignees": [{"login": "alice"}, {"login": "alice"}]}, "invalid_issue"),
+        ):
+            transport = InternQueueTransport()
+            transport.add("GET", f"{api}/issues/17", payload)
+            with self.subTest(payload=payload), self.assertRaisesRegex(InternError, code):
+                self.gateway(transport).get_issue(17)
+        self.assertIsNone(intern_claim._intern_optional_string(None, "invalid"))
+        gateway = self.gateway(lambda *_: (200, {"content-type": "application/json"}, b"{}"))
+        for url in (f"{self.API}/other", f"{api}/issues/17/events"):
+            with self.subTest(url=url), self.assertRaises(InternError):
+                gateway._request("GET", url, body=None)
+        for method, url, body, code in (
+            ("GET", f"{api}/issues/17?unexpected=1", None, "invalid_request"),
+            ("POST", f"{api}/issues/17/assignees", b'{"assignees":[]}', "invalid_request"),
+            ("POST", f"{api}/issues/comments/101/reactions", b'{"content":"heart"}', "invalid_request"),
+            ("PATCH", f"{api}/issues/comments/101", b'{"body":""}', "invalid_write_body"),
+        ):
+            with self.subTest(method=method, url=url), self.assertRaisesRegex(InternError, code):
+                gateway._request(method, url, body=body)
+        with self.assertRaisesRegex(InternError, "invalid_request"):
+            intern_claim._intern_allowed_route(
+                "GET", "https://api.github.test/repos/other/repo/issues/17", None,
+                self.API, self.REPOSITORY,
+            )
+        invalid_payload = InternQueueTransport()
+        invalid_payload.add("GET", f"{api}/issues/17", [])
+        with self.assertRaisesRegex(InternError, "invalid_issue"):
+            self.gateway(invalid_payload).get_issue(17)
+
+    def test_resolver_rejects_untrusted_event_gateway_and_pull_results(self) -> None:
+        event = PullLifecycleEvent(self.REPOSITORY, 42, 9, "opened")
+        gateway = mock.Mock(repository=self.REPOSITORY)
+        with self.assertRaisesRegex(InternError, "invalid_pull_event"):
+            intern_claim.resolve_pull_issue_number(object(), gateway)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(InternError, "event_repository_mismatch"):
+            intern_claim.resolve_pull_issue_number(event, mock.Mock(repository="other/repo"))
+        gateway.get_pull.return_value = PullSnapshot(10, "open", False, "alice", "Closes #17")
+        with self.assertRaisesRegex(InternError, "pull_number_mismatch"):
+            intern_claim.resolve_pull_issue_number(event, gateway)
+        gateway.get_pull.return_value = PullSnapshot(9, "open", False, "alice", "Closes #17")
+        gateway.list_pull_comments.return_value = (IssueComment(1, "mallory", "ignored", "now"),)
+        self.assertEqual(intern_claim.resolve_pull_issue_number(event, gateway), 17)
+
+    def test_cli_rejects_invalid_event_shapes_and_pull_payload(self) -> None:
+        cli = TestInternCli()
+        for payload, code in (
+            ({"repository": "bad"}, "invalid_event"),
+            ({"repository": {"full_name": 17}}, "invalid_event"),
+        ):
+            status, stderr, _ = cli.invoke("issue-command", json.dumps(payload).encode())
+            with self.subTest(payload=payload):
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr, f"::error title=qykw intern::{code}\n")
+        for payload in (
+            {**issue_comment(), "comment": None},
+            {**issue_comment(), "action": "edited"},
+        ):
+            status, stderr, _ = cli.invoke("issue-command", json.dumps(payload).encode())
+            with self.subTest(payload=payload):
+                self.assertEqual(status, 1)
+                self.assertIn("invalid_issue_event", stderr)
+        status, stderr, _ = cli.invoke("reconcile-pr", json.dumps(issue_comment()).encode())
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr, "::error title=qykw intern::invalid_pull_event\n")
+
+    def test_output_os_error_is_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.txt"
+            with mock.patch.object(Path, "open", side_effect=OSError("private path")):
+                with self.assertRaisesRegex(InternError, "invalid_output_file"):
+                    intern_claim._write_issue_output({"GITHUB_OUTPUT": str(output)}, 17)
+
+
+class TestInternCoverageReplays(unittest.TestCase):
+    REPOSITORY = "qiyuankaiwu/agentedu"
+
+    @staticmethod
+    def issue_event(command: InternCommand, *, actor: str = "alice", comment_id: int = 101) -> IssueCommentEvent:
+        return IssueCommentEvent("qiyuankaiwu/agentedu", 42, 17, comment_id, actor, command)
+
+    @staticmethod
+    def pull_event(action: str = "opened", *, repository: str = "qiyuankaiwu/agentedu") -> PullLifecycleEvent:
+        return PullLifecycleEvent(repository, 42, 9, action)
+
+    def test_issue_service_rejects_invalid_event_and_conflicting_history(self) -> None:
+        with self.assertRaisesRegex(InternError, "invalid_issue_event"):
+            InternClaimService(InternMemoryGateway()).handle_issue_event(object())  # type: ignore[arg-type]
+
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        pending = InternRecord(42, self.REPOSITORY, 17, 101, "alice", "assign", "alice", None, "pending")
+        gateway.record(InternClaimService._with_stage(pending, "reconciled"), comment_id=1000)
+        gateway.record(InternClaimService._with_stage(pending, "conflict"), comment_id=1001)
+        self.assertEqual(
+            InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.ASSIGN)),
+            InternOutcome(17, (), "conflict"),
+        )
+
+    def test_issue_command_read_failures_publish_replayable_failure(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        gateway.has_reaction = mock.Mock(side_effect=InternError("read_failed"))
+        self.assertEqual(InternClaimService(gateway).handle_issue_event(
+            self.issue_event(InternCommand.ASSIGN)), InternOutcome(17, (101,), "failed"))
+
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-unassign")
+        gateway.get_issue = mock.Mock(side_effect=InternError("read_failed"))
+        self.assertEqual(InternClaimService(gateway).handle_issue_event(
+            self.issue_event(InternCommand.UNASSIGN)), InternOutcome(17, (101,), "failed"))
+
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        gateway.get_issue = mock.Mock(side_effect=InternError("read_failed"))
+        outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.ASSIGN))
+        self.assertEqual(outcome, InternOutcome(17, (101,), "failed"))
+        self.assertEqual(gateway.records()[0].stage, "failed")
+
+    def test_failed_issue_marker_replay_can_fail_safely_again(self) -> None:
+        gateway = InternMemoryGateway(labels=("status:in-progress",), assignees=("alice",))
+        gateway.command(101, "alice", "/intern-assign")
+        failed = InternRecord(42, self.REPOSITORY, 17, 101, "alice", "assign", "alice", None, "failed")
+        gateway.record(failed, comment_id=1000)
+        gateway.fail_next("update_comment")
+        self.assertEqual(InternClaimService(gateway).handle_issue_event(
+            self.issue_event(InternCommand.ASSIGN)), InternOutcome(17, (101,), "failed"))
+
+    def test_assign_conflict_and_terminal_branches_preserve_issue_state(self) -> None:
+        cases = (
+            ("open", ("intern:claimable",), ("alice", "bob"), "conflict"),
+            ("open", ("status:in-review",), ("alice",), "reconciled"),
+            ("open", ("status:in-review",), (), "conflict"),
+        )
+        for state, labels, assignees, expected in cases:
+            gateway = InternMemoryGateway(state=state, labels=labels, assignees=assignees)
+            gateway.command(101, "alice", "/intern-assign")
+            before = gateway.issue
+            outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.ASSIGN))
+            with self.subTest(labels=labels, assignees=assignees):
+                self.assertEqual(outcome.status, expected)
+                self.assertEqual(gateway.issue, before)
+
+    def test_assign_and_release_report_nonconverging_state(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        gateway.add_assignee = lambda _issue, login: gateway.writes.append(("add_assignee_noop", login))
+        outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.ASSIGN))
+        self.assertEqual(outcome.status, "conflict")
+        self.assertIn("无法收敛", gateway.bot_body_for(101))
+
+        gateway = InternMemoryGateway(labels=("status:in-progress",), assignees=())
+        gateway.command(101, "alice", "/intern-unassign")
+        failed = InternRecord(42, self.REPOSITORY, 17, 101, "alice", "unassign", "alice", None, "failed")
+        gateway.record(failed, comment_id=1000)
+        gateway.remove_label = lambda _issue, label: gateway.writes.append(("remove_label_noop", label))
+        outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.UNASSIGN))
+        self.assertEqual(outcome.status, "conflict")
+        self.assertIn("无法收敛", gateway.bot_body_for(101))
+
+    def test_status_covers_closed_blocked_and_conflicting_states(self) -> None:
+        for state, labels, assignees, text, expected in (
+            ("closed", (), (), "已关闭", "reconciled"),
+            ("open", ("status:blocked",), (), "已阻塞", "reconciled"),
+            ("open", (), (), "状态冲突", "conflict"),
+        ):
+            gateway = InternMemoryGateway(state=state, labels=labels, assignees=assignees)
+            gateway.command(101, "alice", "/intern-status")
+            outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.STATUS))
+            with self.subTest(state=state, labels=labels):
+                self.assertEqual(outcome.status, expected)
+                self.assertIn(text, gateway.bot_body_for(101))
+
+    def test_mutation_read_failures_leave_failed_markers(self) -> None:
+        for fail_mutation in (True, False):
+            gateway = InternMemoryGateway()
+            gateway.command(101, "alice", "/intern-assign")
+            issue = gateway.issue
+            gateway.get_issue = mock.Mock(side_effect=[issue, InternError("read_failed")])
+            if fail_mutation:
+                gateway.fail_next("add_assignee")
+            outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.ASSIGN))
+            with self.subTest(fail_mutation=fail_mutation):
+                self.assertEqual(outcome.status, "failed")
+                self.assertEqual(gateway.records()[0].stage, "failed")
+
+    def test_pull_service_validates_context_and_maps_gateway_failures(self) -> None:
+        gateway = InternPullMemoryGateway()
+        service = InternClaimService(gateway)
+        with self.assertRaisesRegex(InternError, "invalid_pull_event"):
+            service.handle_pull_event(object())  # type: ignore[arg-type]
+        with self.assertRaisesRegex(InternError, "invalid_pull_event"):
+            service.handle_pull_event(self.pull_event("synchronize"))
+
+        self.assertEqual(
+            InternClaimService(InternPullMemoryGateway()).handle_pull_event(
+                self.pull_event(repository="other/repo")
+            ),
+            InternOutcome(0, (), "conflict"),
+        )
+        gateway = InternPullMemoryGateway()
+        gateway.assert_bot_identity = mock.Mock(side_effect=InternError("auth_failed"))
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, "failed")
+        for action in ("closed", "reopened"):
+            gateway = InternPullMemoryGateway()
+            with self.subTest(action=action):
+                self.assertEqual(InternClaimService(gateway).handle_pull_event(
+                    self.pull_event(action)), InternOutcome(0, (), "conflict"))
+
+    def test_pull_start_and_bound_read_failures_are_bounded(self) -> None:
+        for code, expected in (("pull_repository_mismatch", "conflict"), ("transport_failed", "failed")):
+            gateway = InternPullMemoryGateway()
+            gateway.get_pull = mock.Mock(side_effect=InternError(code))
+            with self.subTest(code=code):
+                self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, expected)
+
+        gateway = InternPullMemoryGateway()
+        gateway.get_issue = mock.Mock(side_effect=InternError("read_failed"))
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, "failed")
+
+        gateway = InternPullMemoryGateway()
+        gateway.fail_next("create_comment_9")
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, "failed")
+
+        gateway = InternPullMemoryGateway()
+        gateway.seed_binding()
+        gateway.get_issue = mock.Mock(side_effect=InternError("read_failed"))
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, "failed")
+
+    def test_active_pull_binding_failures_publish_failed_marker(self) -> None:
+        gateway = InternPullMemoryGateway()
+        gateway.seed_binding(issue_marker=False)
+        gateway.fail_next("create_comment_17")
+        outcome = InternClaimService(gateway).handle_pull_event(self.pull_event())
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(gateway.pull_record().stage, "failed")  # type: ignore[union-attr]
+
+        gateway = InternPullMemoryGateway()
+        gateway.seed_binding(issue_marker=False)
+        gateway.get_issue = mock.Mock(side_effect=[gateway.issue, InternError("read_failed")])
+        outcome = InternClaimService(gateway).handle_pull_event(self.pull_event())
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(gateway.pull_record().stage, "failed")  # type: ignore[union-attr]
+
+    def test_bound_pull_conflicts_on_live_number_author_state_and_labels(self) -> None:
+        cases = (
+            (PullSnapshot(10, "open", False, "alice", ""), ("status:in-review",), "conflict"),
+            (PullSnapshot(9, "open", False, "bob", ""), ("status:in-review",), "conflict"),
+            (PullSnapshot(9, "closed", False, "alice", ""), ("status:in-review",), "conflict"),
+            (PullSnapshot(9, "open", False, "alice", ""), ("intern:claimable",), "conflict"),
+        )
+        for pull, labels, expected in cases:
+            gateway = InternPullMemoryGateway(labels=labels)
+            gateway.seed_binding()
+            gateway.pull = pull
+            outcome = InternClaimService(gateway).handle_pull_event(self.pull_event())
+            with self.subTest(pull=pull, labels=labels):
+                self.assertEqual(outcome.status, expected)
+
+    def test_unmerged_close_without_issue_marker_is_idempotent(self) -> None:
+        gateway = InternPullMemoryGateway(labels=("status:in-progress",))
+        gateway.seed_binding(issue_marker=False)
+        gateway.pull = PullSnapshot(9, "closed", False, "alice", "")
+        self.assertEqual(
+            InternClaimService(gateway).handle_pull_event(self.pull_event("closed")),
+            InternOutcome(17, (), "noop"),
+        )
+
+    def test_bound_pull_expected_issue_and_read_errors_do_not_mutate_issue(self) -> None:
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding()
+        self.assertEqual(
+            InternClaimService(gateway).handle_pull_event(
+                self.pull_event(), expected_issue_number=18,
+            ),
+            InternOutcome(18, (), "conflict"),
+        )
+        for code, expected in (("pull_repository_mismatch", "conflict"), ("transport_failed", "failed")):
+            gateway = InternPullMemoryGateway(labels=("status:in-review",))
+            gateway.seed_binding()
+            gateway.get_pull = mock.Mock(side_effect=InternError(code))
+            with self.subTest(code=code):
+                self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, expected)
+
+    def test_active_pull_failure_points_mark_both_conversations_failed(self) -> None:
+        gateway = InternPullMemoryGateway(labels=())
+        gateway.seed_binding(issue_marker=False)
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event()).status, "conflict")
+
+        gateway = InternPullMemoryGateway()
+        gateway.seed_binding()
+        gateway.fail_next("remove_label")
+        outcome = InternClaimService(gateway).handle_pull_event(self.pull_event())
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(gateway.records()[0].stage, "failed")
+
+        gateway = InternPullMemoryGateway()
+        gateway.seed_binding()
+        gateway.get_issue = mock.Mock(side_effect=[gateway.issue, InternError("read_failed")])
+        outcome = InternClaimService(gateway).handle_pull_event(self.pull_event())
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(gateway.pull_record().stage, "failed")  # type: ignore[union-attr]
+
+        for failures in (["before"], ["ok", "before"]):
+            gateway = InternPullMemoryGateway()
+            gateway.seed_binding(stage="pending")
+            gateway.failures["update_comment"] = list(failures)
+            outcome = InternClaimService(gateway).handle_pull_event(self.pull_event())
+            with self.subTest(failures=failures):
+                self.assertEqual(outcome.status, "failed")
+
+    def test_closed_pull_failure_and_conflict_paths_are_replay_safe(self) -> None:
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding()
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+        gateway.get_issue = mock.Mock(side_effect=InternError("read_failed"))
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event("closed")).status, "failed")
+
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding(stage="pending", issue_marker=False)
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+        gateway.issue = IssueSnapshot(17, "closed", gateway.issue.labels, gateway.issue.assignees)
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event("closed")).status, "conflict")
+
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding(stage="pending", issue_marker=False)
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+        gateway.fail_next("create_comment_17")
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event("closed")).status, "failed")
+
+        gateway = InternPullMemoryGateway(labels=())
+        gateway.seed_binding(issue_marker=False)
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+        gateway.issue = IssueSnapshot(17, "closed", (), ("alice",))
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event("closed")).status, "conflict")
+
+    def test_unmerged_close_marker_clear_failure_is_replayable(self) -> None:
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding()
+        gateway.pull = PullSnapshot(9, "closed", False, "alice", "")
+        gateway.fail_next("update_comment")
+        outcome = InternClaimService(gateway).handle_pull_event(self.pull_event("closed"))
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(gateway.pull_record().stage, "failed")  # type: ignore[union-attr]
+
+    def test_binding_helpers_ignore_untrusted_comments_and_reject_identity_drift(self) -> None:
+        event = self.pull_event()
+        gateway = InternPullMemoryGateway()
+        service = InternClaimService(gateway)
+        pull_record = InternRecord(42, self.REPOSITORY, 17, 9, "alice", "pull", "alice", 9, "pending")
+        status_record = InternRecord(42, self.REPOSITORY, 17, 9, "alice", "status", None, None, "pending")
+
+        gateway.pull_comments = [IssueComment(1, "mallory", pull_record.marker(), "now")]
+        self.assertIsNone(service._pull_binding(event))
+        gateway.pull_comments = [IssueComment(1, "qykw", status_record.marker(), "now")]
+        self.assertIsNone(service._pull_binding(event))
+        drifted = InternRecord(43, self.REPOSITORY, 17, 9, "alice", "pull", "alice", 9, "pending")
+        gateway.pull_comments = [IssueComment(1, "qykw", drifted.marker(), "now")]
+        with self.assertRaisesRegex(InternError, "record_conflict"):
+            service._pull_binding(event)
+
+        self.assertIsNone(service._issue_binding(
+            event, pull_record, (IssueComment(1, "mallory", pull_record.marker(), "now"),),
+        ))
+        self.assertIsNone(service._issue_binding(
+            event, pull_record, (IssueComment(1, "qykw", status_record.marker(), "now"),),
+        ))
+        other = InternRecord(42, self.REPOSITORY, 18, 9, "alice", "pull", "alice", 9, "pending")
+        with self.assertRaisesRegex(InternError, "record_conflict"):
+            service._issue_binding(event, pull_record, (IssueComment(1, "qykw", other.marker(), "now"),))
+        with self.assertRaisesRegex(InternError, "record_conflict"):
+            service._issue_binding(event, pull_record, (
+                IssueComment(1, "qykw", pull_record.marker(), "now"),
+                IssueComment(2, "qykw", pull_record.marker(), "now"),
+            ))
+
+    def test_release_guards_are_terminal_without_issue_mutations(self) -> None:
+        for state, labels, assignees, expected in (
+            ("closed", ("status:in-progress",), ("alice",), "reconciled"),
+            ("open", ("status:blocked", "status:in-progress"), ("alice",), "reconciled"),
+            ("open", ("status:in-progress",), ("alice", "bob"), "conflict"),
+            ("open", (), ("alice",), "conflict"),
+        ):
+            gateway = InternMemoryGateway(state=state, labels=labels, assignees=assignees)
+            gateway.command(101, "alice", "/intern-unassign")
+            outcome = InternClaimService(gateway).handle_issue_event(self.issue_event(InternCommand.UNASSIGN))
+            with self.subTest(state=state, labels=labels, assignees=assignees):
+                self.assertEqual(outcome.status, expected)
+                self.assertFalse(any(write[0] in {"remove_assignee", "remove_label", "add_label"} for write in gateway.writes))
+
+    def test_partial_release_detects_read_failure_assignee_and_active_pull(self) -> None:
+        gateway = InternMemoryGateway(labels=("status:in-progress",), assignees=())
+        gateway.command(101, "alice", "/intern-unassign")
+        failed = InternRecord(42, self.REPOSITORY, 17, 101, "alice", "unassign", "alice", None, "failed")
+        gateway.record(failed, comment_id=1000)
+        gateway.get_issue = mock.Mock(side_effect=[gateway.issue, InternError("read_failed")])
+        self.assertEqual(InternClaimService(gateway).handle_issue_event(
+            self.issue_event(InternCommand.UNASSIGN)), InternOutcome(17, (101,), "failed"))
+
+        gateway = InternMemoryGateway(labels=("status:in-progress",), assignees=())
+        gateway.record(failed, comment_id=1000)
+        gateway.get_issue = mock.Mock(side_effect=[IssueSnapshot(17, "open", ("status:in-progress",), ("alice",))])
+        self.assertEqual(
+            InternClaimService(gateway)._continue_partial_release(
+                self.issue_event(InternCommand.UNASSIGN), gateway.issue, failed, 1000,
+            ),
+            "conflict",
+        )
+
+        gateway = InternMemoryGateway(labels=("status:in-progress",), assignees=())
+        gateway.record(failed, comment_id=1000)
+        pull_record = InternRecord(42, self.REPOSITORY, 17, 9, "alice", "pull", "alice", 9, "reconciled")
+        gateway.record(pull_record, comment_id=1001)
+        self.assertEqual(
+            InternClaimService(gateway)._continue_partial_release(
+                self.issue_event(InternCommand.UNASSIGN), gateway.issue, failed, 1000,
+            ),
+            "reconciled",
+        )
+
+    def test_merged_close_write_failures_are_bounded_and_replayable(self) -> None:
+        for method in ("remove_label", "add_label", "close_issue"):
+            gateway = InternPullMemoryGateway(labels=("status:in-progress",))
+            gateway.seed_binding()
+            gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+            gateway.fail_next(method)
+            outcome = InternClaimService(gateway).handle_pull_event(self.pull_event("closed"))
+            with self.subTest(method=method):
+                self.assertEqual(outcome.status, "failed")
+
+        gateway = InternPullMemoryGateway(labels=("status:in-review",))
+        gateway.seed_binding()
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+        gateway.issue = IssueSnapshot(17, "closed", ("status:in-review",), ("alice",))
+        self.assertEqual(InternClaimService(gateway).handle_pull_event(self.pull_event("closed")).status, "conflict")
 
 
 class TestInternWorkflow(unittest.TestCase):
