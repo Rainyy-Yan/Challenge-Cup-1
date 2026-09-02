@@ -101,7 +101,9 @@ PR Head。现有 `.github/workflows/qykw-review.yml` 继续负责同一 PR 事�
 ```
 
 引用、围栏/缩进/行内代码中的命令不会触发，PR 会话评论不会触发，编辑既有评论也
-不会触发。每个有效命令会先由 `qykw` 添加 😄 Reaction。对于领取和释放，Reaction
+不会触发。控制器要求 webhook 中 `created_at == updated_at`，执行前还会重读触发评论，
+核对作者、命令、创建时间且确认仍未编辑；因此先发普通文本再改成命令，或命令排队后
+被修改，都不会执行。每个有效命令会先由 `qykw` 添加 😄 Reaction。对于领取和释放，Reaction
 是后续写入的硬前置；失败时不修改 Assignee、标签或领取 marker。
 
 ## 状态与生命周期
@@ -118,9 +120,12 @@ PR Head。现有 `.github/workflows/qykw-review.yml` 继续负责同一 PR 事�
 | `/intern-unassign` | 由领取人或 `xyh202131` 发起，且没有活动 PR/审查 | 移除 Assignee 和 `status:in-progress`；恢复 `intern:claimable` |
 | 添加 `status:blocked` | 人工阻塞 | 新领取与释放停止；管理员排查并决定何时移除 |
 
-一个 Issue 同一时间只能有一个活动 PR。两个 PR 即使同时到达，也会按
-`repository_id + issue_number` 进入同一并发队列。两个不同 PR 不能用各自 PR 编号
-绕过 Issue 级互斥。
+一个 Issue 同一时间只能有一个活动 PR。工作流先以
+`repository_id + event_name + pull_number` 串行化同一 PR 的完整 `resolve_pr → reconcile_pr`
+流程，防止两个编辑事件在解析可变正文时交错；写入阶段再以
+`repository_id + issue_number` 与 Issue 命令共用第二层互斥。Issue 评论事件在第一层按
+Issue 编号、在写入层也按 Issue 编号排队。两个不同 PR 不能用各自 PR 编号绕过 Issue
+级互斥。
 
 ## PR 正文写法
 
@@ -142,6 +147,9 @@ Closes #17
 - `Closes owner/repo#17`、URL、Markdown 链接；
 - 引用或代码块中的 `Closes #17`；
 - 目标是 PR、另一仓库的 Issue、非领取人的 Issue，或已有另一活动 PR。
+
+PR 正文为 `null`、空字符串或不包含目标时属于无关 PR：只读解析成功但不输出 Issue
+编号，写入 job 跳过；其他非字符串正文按无效 API 数据拒绝。
 
 第一次合法关联后，绑定冻结为仓库、PR、Issue 和 PR 作者的组合。后续编辑 PR 正文
 不能换绑；未合并关闭后，原领取人可以新建另一个合法 PR 再次关联。
@@ -171,6 +179,7 @@ Issue 由 @用户名 提交，当前审查中。
 | --- | --- |
 | `Issue 的可领取与进度标签冲突，已停止写入。` | `intern:claimable` 是否与进度/审查标签并存，或两个进度标签是否并存 |
 | `Issue 的 Assignee 与领取状态冲突，已停止写入。` | Assignee 与领取/进度标签是否对应 |
+| `Issue 已存在未经 qykw 领取流程确认的人工 Assignee，已停止写入。` | 领取前是否有人手工添加了与命令作者相同的 Assignee；先恢复无 Assignee 的可领取初态，再发新命令 |
 | `Issue 存在多个 Assignee 冲突，已停止写入。` | 是否被人工设置了多个 Assignee |
 | `Issue 审查标签与 Assignee 冲突，已停止写入。` | `status:in-review` 是否缺少唯一领取人 |
 | `Issue 领取状态冲突，已停止写入。` | 领取中间状态是否被并发人工修改 |

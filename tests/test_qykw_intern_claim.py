@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import tempfile
 import traceback
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from collections.abc import Mapping
 import unittest
@@ -41,7 +42,13 @@ def issue_comment(body: str = "/intern-assign", **overrides: object) -> dict:
         "action": "created",
         "repository": {"full_name": "qiyuankaiwu/agentedu", "id": 42},
         "issue": {"number": 17, "repository_url": "https://api.github.com/repos/qiyuankaiwu/agentedu"},
-        "comment": {"id": 101, "body": body, "user": {"login": "alice"}},
+        "comment": {
+            "id": 101,
+            "body": body,
+            "user": {"login": "alice"},
+            "created_at": "2026-09-02T00:00:00Z",
+            "updated_at": "2026-09-02T00:00:00Z",
+        },
         "sender": {"login": "alice"},
     }
     payload.update(overrides)
@@ -84,10 +91,22 @@ class TestInternCommandParsing(unittest.TestCase):
         self.assertIsNone(parse_intern_command("    /intern-assign"))
 
 
+class TestPullSnapshotBody(unittest.TestCase):
+    def test_normalizes_null_and_empty_body_but_rejects_other_non_strings(self) -> None:
+        self.assertEqual(PullSnapshot(9, "open", False, "alice", None).body, "")  # type: ignore[arg-type]
+        self.assertEqual(PullSnapshot(9, "open", False, "alice", "").body, "")
+        for body in (17, False, [], {}):
+            with self.subTest(body=body), self.assertRaisesRegex(InternError, "invalid_pull"):
+                PullSnapshot(9, "open", False, "alice", body)  # type: ignore[arg-type]
+
+
 class TestInternEventNormalization(unittest.TestCase):
     def test_normalizes_issue_comment_event(self) -> None:
         event = normalize_issue_comment_event(issue_comment("/intern-unassign"))
-        self.assertEqual(event, IssueCommentEvent("qiyuankaiwu/agentedu", 42, 17, 101, "alice", InternCommand.UNASSIGN))
+        self.assertEqual(event, IssueCommentEvent(
+            "qiyuankaiwu/agentedu", 42, 17, 101, "alice", InternCommand.UNASSIGN,
+            "2026-09-02T00:00:00Z",
+        ))
 
     def test_rejects_invalid_issue_comment_context(self) -> None:
         cases = [
@@ -108,6 +127,12 @@ class TestInternEventNormalization(unittest.TestCase):
                     payload[key] = value
             with self.subTest(changes=changes):
                 self.assertIsNone(normalize_issue_comment_event(payload))
+
+    def test_rejects_created_event_when_comment_was_edited(self) -> None:
+        payload = issue_comment()
+        payload["comment"]["updated_at"] = "2026-09-02T00:01:00Z"
+
+        self.assertIsNone(normalize_issue_comment_event(payload))
 
     def test_normalizes_allowed_pull_lifecycle_actions(self) -> None:
         event = normalize_pull_event(pull_event("closed"))
@@ -137,9 +162,24 @@ class TestClosingIssueParsing(unittest.TestCase):
             "Closes #17suffix",
             "Closes #17 extra #18",
             "```\nCloses #17\n```",
+            "Before ``Closes #17`` after",
+            "Before ``\nCloses #17\n`` after",
+            "Before ```Closes #17``` after",
+            "<code>Closes #17</code>",
+            "<code class=\"language-text\">Closes #17</code>",
+            "<pre>\nCloses #17\n</pre>",
+            "<kbd>Closes #17</kbd>",
+            "<samp>Closes #17</samp>",
         ):
             with self.subTest(body=body):
                 self.assertIsNone(parse_closing_issue(body))
+
+    def test_ignores_code_targets_but_accepts_one_separate_visible_target(self) -> None:
+        body = "``hidden Closes #18``\n<code>Closes #19</code>\nCloses #17"
+        self.assertEqual(parse_closing_issue(body), 17)
+
+    def test_rejects_overly_large_pull_body_before_markdown_scanning(self) -> None:
+        self.assertIsNone(parse_closing_issue("x" * (256 * 1024) + "\nCloses #17"))
 
 
 if __name__ == "__main__":
@@ -277,13 +317,13 @@ class TestInternGitHubGateway(unittest.TestCase):
             "assignees": [{"login": "alice"}],
         })
         transport.add("GET", f"{api}/issues/17/comments?per_page=100", [
-            {"id": 1, "user": {"login": "alice"}, "body": "one", "updated_at": "now", "issue_url": f"{api}/issues/17"},
+            {"id": 1, "user": {"login": "alice"}, "body": "one", "created_at": "now", "updated_at": "now", "issue_url": f"{api}/issues/17"},
         ], headers={"link": f'<{api}/issues/17/comments?per_page=100&page=2>; rel="next"'})
         transport.add("GET", f"{api}/issues/17/comments?per_page=100&page=2", [
-            {"id": 2, "user": {"login": "qykw"}, "body": "two", "updated_at": "later", "issue_url": f"{api}/issues/17"},
+            {"id": 2, "user": {"login": "qykw"}, "body": "two", "created_at": "later", "updated_at": "later", "issue_url": f"{api}/issues/17"},
         ])
         transport.add("GET", f"{api}/issues/9/comments?per_page=100", [
-            {"id": 3, "user": {"login": "qykw"}, "body": "pull status", "updated_at": "later", "issue_url": f"{api}/issues/9"},
+            {"id": 3, "user": {"login": "qykw"}, "body": "pull status", "created_at": "later", "updated_at": "later", "issue_url": f"{api}/issues/9"},
         ])
         transport.add("GET", f"{api}/pulls/9", {
             "number": 9, "state": "open", "merged": False, "user": {"login": "alice"}, "body": "Closes #17",
@@ -705,6 +745,46 @@ class TestInternClaimService(unittest.TestCase):
     def service(self, gateway: InternMemoryGateway) -> InternClaimService:
         return InternClaimService(gateway)
 
+    @staticmethod
+    def timed_comment(comment_id: int, actor: str, body: str, *, edited: bool = False):
+        return SimpleNamespace(
+            comment_id=comment_id,
+            author_login=actor,
+            body=body,
+            created_at="2026-09-02T00:00:00Z",
+            updated_at=("2026-09-02T00:01:00Z" if edited else "2026-09-02T00:00:00Z"),
+        )
+
+    def test_trigger_comment_edit_or_operation_drift_cannot_execute_created_event(self) -> None:
+        for current_body in ("/intern-unassign", "ordinary discussion"):
+            gateway = InternMemoryGateway()
+            gateway.comments = [self.timed_comment(101, "alice", current_body, edited=True)]
+            event = IssueCommentEvent(
+                self.REPOSITORY, 42, 17, 101, "alice", InternCommand.ASSIGN,
+                "2026-09-02T00:00:00Z",
+            )
+            with self.subTest(current_body=current_body):
+                outcome = self.service(gateway).handle_issue_event(event)
+                self.assertEqual(outcome, InternOutcome(17, (), "noop"))
+                self.assertEqual(gateway.writes, [])
+
+    def test_delayed_run_skips_edited_older_command_and_processes_its_bound_trigger(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.comments = [
+            self.timed_comment(100, "mallory", "/intern-assign", edited=True),
+            self.timed_comment(101, "alice", "/intern-assign"),
+        ]
+        event = IssueCommentEvent(
+            self.REPOSITORY, 42, 17, 101, "alice", InternCommand.ASSIGN,
+            "2026-09-02T00:00:00Z",
+        )
+
+        outcome = self.service(gateway).handle_issue_event(event)
+
+        self.assertEqual(outcome.processed_comment_ids, (101,))
+        self.assertEqual(gateway.issue.assignees, ("alice",))
+        self.assertFalse(any(write[0] == "add_reaction" and write[1] == 100 for write in gateway.writes))
+
     def test_assign_reconciles_each_mutation_in_order_and_preserves_unrelated_labels(self) -> None:
         gateway = InternMemoryGateway(labels=("intern:claimable", "area:docs"))
         gateway.command(101, "alice", "/intern-assign")
@@ -717,6 +797,41 @@ class TestInternClaimService(unittest.TestCase):
         self.assertEqual([write[0] for write in gateway.writes], [
             "add_reaction", "create_comment", "add_assignee", "remove_label", "add_label", "update_comment",
         ])
+        self.assertEqual(gateway.records()[0].stage, "reconciled")
+        self.assertIn("@alice", gateway.bot_body_for(101))
+
+    def test_fresh_claim_cannot_adopt_a_manual_same_actor_assignee(self) -> None:
+        gateway = InternMemoryGateway(labels=("intern:claimable",), assignees=("alice",))
+        gateway.command(101, "alice", "/intern-assign")
+        before = gateway.issue
+
+        outcome = self.service(gateway).handle_issue_event(
+            self.event(101, "alice", InternCommand.ASSIGN),
+        )
+
+        self.assertEqual(outcome.status, "conflict")
+        self.assertEqual(gateway.issue, before)
+        self.assertFalse(any(write[0] in {"add_assignee", "remove_label", "add_label"}
+                             for write in gateway.writes))
+        self.assertIn("人工 Assignee", gateway.bot_body_for(101))
+
+    def test_existing_failed_claim_marker_can_recover_qykw_partial_assignee_write(self) -> None:
+        gateway = InternMemoryGateway(labels=("intern:claimable",), assignees=("alice",))
+        gateway.command(101, "alice", "/intern-assign")
+        failed = InternRecord(
+            42, self.REPOSITORY, 17, 101, "alice", "assign", "alice", None, "failed",
+        )
+        gateway.record(failed, comment_id=1000)
+
+        outcome = self.service(gateway).handle_issue_event(
+            self.event(101, "alice", InternCommand.ASSIGN),
+        )
+
+        self.assertEqual(outcome.status, "reconciled")
+        self.assertEqual(gateway.issue.assignees, ("alice",))
+        self.assertNotIn("intern:claimable", gateway.issue.labels)
+        self.assertIn("status:in-progress", gateway.issue.labels)
+        self.assertNotIn("add_assignee", [write[0] for write in gateway.writes])
         self.assertEqual(gateway.records()[0].stage, "reconciled")
         self.assertIn("@alice", gateway.bot_body_for(101))
 
@@ -1621,8 +1736,7 @@ class TestInternCoverageBoundaries(unittest.TestCase):
             "number": 9, "state": "open", "merged": False, "user": {"login": "alice"},
             "body": None, "base": {"repo": {"full_name": self.REPOSITORY}},
         })
-        with self.assertRaisesRegex(InternError, "invalid_pull"):
-            self.gateway(transport).get_pull(9)
+        self.assertEqual(self.gateway(transport).get_pull(9).body, "")
 
     def test_gateway_rejects_invalid_http_envelopes_and_exhausted_pagination(self) -> None:
         issue_url = f"{self.API}/repos/{self.REPOSITORY}/issues/17"
@@ -1864,7 +1978,7 @@ class TestInternCoverageReplays(unittest.TestCase):
     def test_assign_conflict_and_terminal_branches_preserve_issue_state(self) -> None:
         cases = (
             ("open", ("intern:claimable",), ("alice", "bob"), "conflict"),
-            ("open", ("status:in-review",), ("alice",), "reconciled"),
+            ("open", ("status:in-review",), ("alice",), "conflict"),
             ("open", ("status:in-review",), (), "conflict"),
         )
         for state, labels, assignees, expected in cases:
@@ -2213,6 +2327,21 @@ class TestInternWorkflow(unittest.TestCase):
         source = self.WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("qykw-review.yml", source)
         self.assertNotIn("synchronize", source)
+
+    def test_workflow_serializes_each_pr_before_resolution_without_deadlocking_issue_jobs(self) -> None:
+        workflow = self.workflow()
+        self.assertEqual(workflow["concurrency"], {
+            "group": (
+                "qykw-intern-event-${{ github.repository_id }}-${{ github.event_name }}-"
+                "${{ github.event.pull_request.number || github.event.issue.number }}"
+            ),
+            "cancel-in-progress": "false",
+            "queue": "max",
+        })
+        for job_name in ("issue_command", "reconcile_pr"):
+            group = str(self.jobs()[job_name]["concurrency"]["group"])
+            self.assertTrue(group.startswith("qykw-intern-${{"))
+            self.assertNotIn("qykw-intern-event-", group)
 
     def test_issue_and_reconcile_jobs_share_issue_keyed_fifo_concurrency_shape(self) -> None:
         jobs = self.jobs()

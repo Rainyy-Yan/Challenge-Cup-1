@@ -34,6 +34,14 @@ class IssueCommentEvent:
     comment_id: int
     actor_login: str
     command: InternCommand
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class InternIssueComment(IssueComment):
+    """Issue comment with immutable creation time for command eligibility."""
+
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,7 @@ _MAX_INTERN_WRITE_BYTES = 64 * 1024
 _MAX_INTERN_PAGES = 1000
 _MAX_EVENT_BYTES = 1024 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024
+_MAX_CLOSING_BODY_BYTES = 256 * 1024
 _MAX_ISSUE_NUMBER = 999_999_999_999_999_999
 _CLI_PHASES = frozenset({"issue-command", "resolve-pr", "reconcile-pr"})
 _GITHUB_ACTION = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -90,7 +99,13 @@ class PullSnapshot:
     state: str
     merged: bool
     author_login: str
-    body: str
+    body: str | None
+
+    def __post_init__(self) -> None:
+        if self.body is None:
+            object.__setattr__(self, "body", "")
+        elif not isinstance(self.body, str):
+            raise InternError("invalid_pull")
 
 
 @dataclass(frozen=True)
@@ -225,11 +240,11 @@ class HttpInternGateway:
         if type(merged) is not bool:
             raise InternError("invalid_pull")
         body = payload.get("body")
-        if body is None:
-            body = ""
+        if body is not None and not isinstance(body, str):
+            raise InternError("invalid_pull")
         return PullSnapshot(number, _intern_string(payload.get("state"), "invalid_pull"), merged,
                             _intern_login(_intern_mapping(payload.get("user"), "invalid_pull").get("login")),
-                            _intern_string(body, "invalid_pull"))
+                            body)
 
     def has_reaction(self, comment_id: int, actor: str = "qykw", content: str = "laugh") -> bool:
         comment_id = _intern_positive(comment_id, "invalid_comment_id")
@@ -303,11 +318,12 @@ class HttpInternGateway:
         comments: list[IssueComment] = []
         for value in payloads:
             _intern_comment_locator(value.get("issue_url"), self.api_url, self.repository, number)
-            comments.append(IssueComment(
+            comments.append(InternIssueComment(
                 _intern_positive(value.get("id"), "invalid_issue_comment"),
                 _intern_login(_intern_mapping(value.get("user"), "invalid_issue_comment").get("login")),
                 _intern_optional_string(value.get("body"), "invalid_issue_comment") or "",
                 _intern_string(value.get("updated_at"), "invalid_issue_comment"),
+                _intern_string(value.get("created_at"), "invalid_issue_comment"),
             ))
         return tuple(comments)
 
@@ -429,7 +445,12 @@ def normalize_issue_comment_event(payload: Mapping[str, object]) -> IssueComment
     actor = comment.get("user", {})
     actor_login = _login(actor)
     sender_login = _login(sender)
+    created_at = comment.get("created_at")
+    updated_at = comment.get("updated_at")
     if not isinstance(name, str) or not name or not actor_login or actor_login.casefold() != sender_login.casefold():
+        return None
+    if (not isinstance(created_at, str) or not created_at
+            or not isinstance(updated_at, str) or created_at != updated_at):
         return None
     issue_url = issue.get("repository_url")
     issue_repo = _issue_repo_from_url(issue_url)
@@ -438,7 +459,7 @@ def normalize_issue_comment_event(payload: Mapping[str, object]) -> IssueComment
     command = parse_intern_command(comment.get("body"))
     if None in (repository_id, issue_number, comment_id) or command is None:
         return None
-    return IssueCommentEvent(name, repository_id, issue_number, comment_id, actor_login, command)
+    return IssueCommentEvent(name, repository_id, issue_number, comment_id, actor_login, command, created_at)
 
 
 def normalize_pull_event(payload: Mapping[str, object]) -> PullLifecycleEvent | None:
@@ -465,9 +486,12 @@ def normalize_pull_event(payload: Mapping[str, object]) -> PullLifecycleEvent | 
 def parse_closing_issue(body: str) -> int | None:
     """Return the sole visible canonical ``Closes #N`` target, if present."""
 
-    if not isinstance(body, str):
+    if not isinstance(body, str) or len(body.encode("utf-8")) > _MAX_CLOSING_BODY_BYTES:
         return None
-    text = "\n".join(_visible_lines(body, preserve_inline_code=False))
+    without_html_code = _strip_html_code(body)
+    if without_html_code is None:
+        return None
+    text = "\n".join(_visible_lines(without_html_code, preserve_inline_code=False))
     matches = list(_CLOSING.finditer(text))
     references = list(_ISSUE_REF.finditer(text))
     if len(matches) != 1 or len(references) != 1:
@@ -538,6 +562,19 @@ def _issue_repo_from_url(value: object) -> str | None:
     return "/".join(pieces[:2]) if len(pieces) == 2 and all(pieces) else None
 
 
+def _unchanged_created_comment(comment: object, required_created_at: str = "") -> bool:
+    """Accept legacy in-memory comments only for legacy timestamp-free tests."""
+
+    created_at = getattr(comment, "created_at", None)
+    updated_at = getattr(comment, "updated_at", None)
+    if created_at is None:
+        return not required_created_at and isinstance(updated_at, str)
+    if (not isinstance(created_at, str) or not created_at
+            or not isinstance(updated_at, str) or created_at != updated_at):
+        return False
+    return not required_created_at or created_at == required_created_at
+
+
 def _visible_lines(body: str, *, preserve_inline_code: bool) -> list[str]:
     body = re.sub(r"<!--[\s\S]*?-->", "", body)
     visible: list[str] = []
@@ -565,8 +602,81 @@ def _visible_lines(body: str, *, preserve_inline_code: bool) -> list[str]:
             marker = opening.group(1)
             fence = (marker[0], len(marker))
             continue
-        visible.append(raw if preserve_inline_code else re.sub(r"`[^`]*`", "", raw))
-    return visible
+        visible.append(raw)
+    if preserve_inline_code:
+        return visible
+    return _strip_inline_code("\n".join(visible)).split("\n")
+
+
+_HTML_CODE_TAG = re.compile(r"(?is)<\s*(/?)\s*(code|pre|kbd|samp)\b[^>]{0,1024}>")
+_HTML_CODE_PREFIX = re.compile(r"(?is)<\s*/?\s*(code|pre|kbd|samp)\b")
+
+
+def _strip_html_code(body: str) -> str | None:
+    """Remove bounded raw-HTML code elements; reject malformed code markup."""
+
+    output: list[str] = []
+    stack: list[str] = []
+    cursor = 0
+    for match in _HTML_CODE_TAG.finditer(body):
+        between = body[cursor:match.start()]
+        if not stack:
+            output.append(between)
+        else:
+            output.append("\n" * between.count("\n"))
+        closing = bool(match.group(1))
+        tag = match.group(2).casefold()
+        if closing:
+            if not stack or stack[-1] != tag:
+                return None
+            stack.pop()
+        else:
+            stack.append(tag)
+        output.append("\n" * match.group(0).count("\n"))
+        cursor = match.end()
+    tail = body[cursor:]
+    if stack:
+        return None
+    output.append(tail)
+    result = "".join(output)
+    if _HTML_CODE_PREFIX.search(result):
+        return None
+    return result
+
+
+def _strip_inline_code(line: str) -> str:
+    """Remove CommonMark-style backtick spans in one linear bounded pass."""
+
+    output: list[str] = []
+    cursor = 0
+    length = len(line)
+    while cursor < length:
+        opening = line.find("`", cursor)
+        if opening < 0:
+            output.append(line[cursor:])
+            break
+        output.append(line[cursor:opening])
+        opening_end = opening
+        while opening_end < length and line[opening_end] == "`":
+            opening_end += 1
+        width = opening_end - opening
+        scan = opening_end
+        closing_end = -1
+        while scan < length:
+            candidate = line.find("`", scan)
+            if candidate < 0:
+                break
+            candidate_end = candidate
+            while candidate_end < length and line[candidate_end] == "`":
+                candidate_end += 1
+            if candidate_end - candidate == width:
+                closing_end = candidate_end
+                break
+            scan = candidate_end
+        if closing_end < 0:
+            break
+        cursor = closing_end
+    return "".join(output)
 
 
 def encode_marker(record: InternRecord) -> str:
@@ -662,6 +772,14 @@ class InternClaimService:
             raise InternError("invalid_issue_event")
         self.gateway.assert_bot_identity()
         comments = self.gateway.list_issue_comments(event.issue_number)
+        triggers = [comment for comment in comments if comment.comment_id == event.comment_id]
+        if len(triggers) != 1:
+            return InternOutcome(event.issue_number, (), "noop")
+        trigger = triggers[0]
+        if (trigger.author_login.casefold() != event.actor_login.casefold()
+                or not _unchanged_created_comment(trigger, event.created_at)
+                or parse_intern_command(trigger.body) is not event.command):
+            return InternOutcome(event.issue_number, (), "noop")
         try:
             records = reduce_records(
                 comments,
@@ -675,6 +793,8 @@ class InternClaimService:
         record_by_key = {record.operation_key: record for record in records}
         commands: list[tuple[IssueComment, InternCommand]] = []
         for comment in comments:
+            if not _unchanged_created_comment(comment):
+                continue
             command = parse_intern_command(comment.body)
             if command is not None:
                 commands.append((comment, command))
@@ -1166,13 +1286,17 @@ class InternClaimService:
         record = current
 
         if command is InternCommand.ASSIGN:
-            return self._reconcile_assign(event, issue, record, marker_comment_id)
+            return self._reconcile_assign(
+                event, issue, record, marker_comment_id,
+                allow_existing_actor_assignee=existing is not None,
+            )
         if command is InternCommand.UNASSIGN:
             return self._reconcile_release(event, issue, records, record, marker_comment_id)
         return self._publish_status(event, issue, record, marker_comment_id)
 
     def _reconcile_assign(self, event: IssueCommentEvent, issue: IssueSnapshot,
-                          record: InternRecord, marker_comment_id: int) -> str:
+                          record: InternRecord, marker_comment_id: int, *,
+                          allow_existing_actor_assignee: bool) -> str:
         for _ in range(4):
             labels = set(issue.labels)
             assignees = issue.assignees
@@ -1192,6 +1316,13 @@ class InternClaimService:
                 return self._finish(marker_comment_id, record, "Issue 的 Assignee 与领取状态冲突，已停止写入。", "conflict")
             if len(assignees) > 1:
                 return self._finish(marker_comment_id, record, "Issue 存在多个 Assignee 冲突，已停止写入。", "conflict")
+            if (len(assignees) == 1
+                    and assignees[0].casefold() == record.actor_login.casefold()
+                    and not allow_existing_actor_assignee):
+                return self._finish(
+                    marker_comment_id, record,
+                    "Issue 已存在未经 qykw 领取流程确认的人工 Assignee，已停止写入。", "conflict",
+                )
             if "status:in-review" in labels:
                 if len(assignees) == 1:
                     return self._finish(
@@ -1209,7 +1340,8 @@ class InternClaimService:
             if assignees and assignees != (record.actor_login,):
                 return self._finish(marker_comment_id, record, "Issue 的 Assignee 与领取状态冲突，已停止写入。", "conflict")
 
-            if not assignees:
+            adding_assignee = not assignees
+            if adding_assignee:
                 mutation = lambda: self.gateway.add_assignee(event.issue_number, record.actor_login)
             elif "intern:claimable" in labels:
                 mutation = lambda: self.gateway.remove_label(event.issue_number, "intern:claimable")
@@ -1220,6 +1352,8 @@ class InternClaimService:
             failed, issue = self._mutate_and_read(event, marker_comment_id, record, mutation)
             if failed:
                 return "failed"
+            if adding_assignee:
+                allow_existing_actor_assignee = True
         return self._finish(marker_comment_id, record, "Issue 领取状态无法收敛。", "conflict")
 
     def _reconcile_release(self, event: IssueCommentEvent, issue: IssueSnapshot,
@@ -1698,6 +1832,7 @@ def _normalize_cli_issue_event(payload: Mapping[str, object]) -> IssueCommentEve
         validated.comment_id,
         validated.actor_login,
         command,
+        validated.created_at,
     )
 
 

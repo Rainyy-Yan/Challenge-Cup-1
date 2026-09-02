@@ -11,6 +11,14 @@ on:
 permissions:
   contents: none
 
+# A PR-number lock begins before resolve_pr, so two edited/opened/closed events for
+# the same PR cannot resolve mutable bodies concurrently. Issue events use their
+# Issue number here and still share the narrower mutation lock below.
+concurrency:
+  group: qykw-intern-event-${{ github.repository_id }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   issue_command:
     if: github.event_name == 'issue_comment' && !github.event.issue.pull_request
