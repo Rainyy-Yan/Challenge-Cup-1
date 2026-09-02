@@ -2,6 +2,8 @@ FROM node:24.7.0-bookworm-slim@sha256:0104d9447ea3ddf7373643be7f9915fc7b7c896e41
 
 FROM python:3.11.13-slim-bookworm@sha256:86adf8dbadc3d6e82ee5dd2c74bec2e1c2467cdad47886280501df722372d2e1
 
+LABEL org.opencontainers.image.source=https://github.com/qiyuankaiwu/Challenge-Cup
+
 RUN printf '%s\n' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20251020T000000Z bookworm main' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20251020T000000Z bookworm-security main' \

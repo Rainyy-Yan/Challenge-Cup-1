@@ -734,6 +734,10 @@ class TestVerificationDockerfile(unittest.TestCase):
         self.assertNotIn("latest", lowered)
         self.assertNotRegex(lowered, r"curl\s.*\|\s*(?:ba)?sh")
         self.assertNotRegex(lowered, r"\b(?:pip|npm|yarn|pnpm)\s+install\b")
+        self.assertIn(
+            "LABEL org.opencontainers.image.source=https://github.com/qiyuankaiwu/Challenge-Cup",
+            dockerfile,
+        )
         copy_lines = [line for line in dockerfile.splitlines() if line.startswith("COPY ")]
         self.assertTrue(any("--from=node_runtime" in line for line in copy_lines))
         self.assertIn("COPY tools/qykw/verify_smoke.py /opt/qykw/verify_smoke.py", copy_lines)
