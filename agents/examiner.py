@@ -61,6 +61,21 @@ _SYNTH_SYS = (
     "不要重复数字，不要给出鼓励性套话，不要编造数据里没有的结论。"
 )
 
+_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED_THINK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
+
+
+def _clean_narrative(raw: str, patterns: list[str]) -> str:
+    text = _THINK_BLOCK.sub("", raw or "")
+    text = _UNCLOSED_THINK.sub("", text).strip()
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text).strip()
+    if text:
+        return text
+    if patterns:
+        return "；".join(pattern.rstrip("。") for pattern in patterns[:3]) + "。"
+    return "已根据你的实际作答生成学习建议，请按推荐顺序开始学习。"
+
 
 class ItemRejected(Exception):
     pass
@@ -405,7 +420,7 @@ class ExaminerAgent:
             )
         except Exception:                                   # noqa: BLE001
             raw = ""
-        return {"narrative": (raw or "").strip(), "patterns": patterns}
+        return {"narrative": _clean_narrative(raw, patterns), "patterns": patterns}
 
     def _patterns(self, diagnosis, log: list[dict]) -> list[str]:
         """规则统计出的作答模式。这些是给模型的原料，也是可复算的证据。"""

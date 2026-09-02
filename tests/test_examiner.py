@@ -194,6 +194,27 @@ class TestAnalyzeAndSynthesize(unittest.TestCase):
         self.assertIsInstance(out["patterns"], list)
         self.assertIn("narrative", out)
 
+    def test_reasoning_text_is_removed_from_narrative(self):
+        from agents.examiner import _clean_narrative
+
+        raw = "<think>internal chain of thought</think>\n建议先复习安全规程。"
+        self.assertEqual(_clean_narrative(raw, []), "建议先复习安全规程。")
+
+    def test_unclosed_reasoning_uses_rule_based_fallback(self):
+        from agents.examiner import _clean_narrative
+
+        cleaned = _clean_narrative("<think>internal chain of thought", ["安全题连续答错"])
+        self.assertEqual(cleaned, "安全题连续答错。")
+        self.assertNotIn("think", cleaned.lower())
+
+    def test_empty_model_narrative_has_readable_fallback(self):
+        from agents.examiner import _clean_narrative
+
+        self.assertEqual(
+            _clean_narrative("```text\n\n```", []),
+            "已根据你的实际作答生成学习建议，请按推荐顺序开始学习。",
+        )
+
     def test_patterns_flag_safety_weakness(self):
         """安全类题目错得多，必须单独点出来 —— 这一类错了后果最重。"""
         from agents.diagnose import DiagnoseAgent

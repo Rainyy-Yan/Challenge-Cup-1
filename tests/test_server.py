@@ -4,6 +4,7 @@ import base64
 import json
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 import config
@@ -98,12 +99,47 @@ class TestFormalExaminerBoundary(unittest.TestCase):
         self.assertFalse(excluded & {chunk.id for chunk in examiner.retriever.chunks})
 
 
-class TestOnlineFrontend(unittest.TestCase):
-    def test_source_links_are_rendered_from_verified_provenance_text(self):
-        index = Path("web/index.html").read_text(encoding="utf-8")
+class _LandmarkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids = []
+        self.elements = {}
 
-        self.assertIn("function sourceWithLink", index)
-        self.assertIn("sourceWithLink(kb.source)", index)
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if values.get("id"):
+            self.ids.append(values["id"])
+            self.elements[values["id"]] = (tag, values)
+
+
+class TestOnlineFrontend(unittest.TestCase):
+    def test_learner_flow_landmarks_follow_the_task_order(self):
+        parser = _LandmarkParser()
+        parser.feed(Path("web/index.html").read_text(encoding="utf-8"))
+        expected = [
+            "workflowProgress", "learnerRecord", "learningPlan", "learningPath",
+            "learningContent", "feedbackCard", "decisionPanel", "evidencePanel",
+        ]
+        self.assertEqual([item for item in parser.ids if item in expected], expected)
+
+    def test_source_links_are_rendered_from_verified_provenance_text(self):
+        path = Path("web/app.js")
+        controller = path.read_text(encoding="utf-8") if path.exists() else ""
+
+        self.assertIn("function sourceWithLink", controller)
+        self.assertIn("sourceWithLink(kb.source)", controller)
+
+    def test_async_alert_and_evidence_disclosure_have_accessible_defaults(self):
+        parser = _LandmarkParser()
+        parser.feed(Path("web/index.html").read_text(encoding="utf-8"))
+
+        alert_tag, alert_attrs = parser.elements["uiAlert"]
+        evidence_tag, evidence_attrs = parser.elements["evidencePanel"]
+        self.assertEqual(alert_tag, "div")
+        self.assertEqual(alert_attrs.get("role"), "alert")
+        self.assertEqual(evidence_tag, "details")
+        self.assertIn("hidden", evidence_attrs)
+        self.assertNotIn("open", evidence_attrs)
 
 
 if __name__ == "__main__":

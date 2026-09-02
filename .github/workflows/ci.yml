@@ -71,11 +71,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
       - name: Display Python version
         run: python --version
 
-      - name: Verify online frontend contract
-        run: python -m unittest tests.test_server.TestOnlineFrontend -v
+      - name: Verify learner frontend
+        run: |
+          node --check web/view-model.js
+          node --check web/app.js
+          node --test tests/frontend-ui.test.mjs
+          python -m unittest tests.test_server.TestOnlineFrontend -v
 
   smoke:
     name: Backend service smoke test
@@ -110,3 +119,6 @@ jobs:
 
           curl --fail --show-error --silent http://127.0.0.1:8765/ >"$RUNNER_TEMP/index.html"
           grep --ignore-case --quiet '<!doctype html>' "$RUNNER_TEMP/index.html"
+          curl --fail --silent http://127.0.0.1:8765/styles.css >/dev/null
+          curl --fail --silent http://127.0.0.1:8765/view-model.js >/dev/null
+          curl --fail --silent http://127.0.0.1:8765/app.js >/dev/null
