@@ -2,6 +2,7 @@
 
 import unittest
 import json
+import traceback
 from collections.abc import Mapping
 
 from tools.qykw.intern_claim import (
@@ -200,7 +201,41 @@ class TestInternMarkerCodec(unittest.TestCase):
             IssueComment(31, "mallory", earlier.marker(), "now"),
             IssueComment(30, "qykw", earlier.marker(), "now"),
         )
-        self.assertEqual(reduce_records(records), (earlier, later))
+        self.assertEqual(
+            reduce_records(records, repository_id=42, repository="qiyuankaiwu/agentedu", issue_number=17),
+            (earlier, later),
+        )
+
+    def test_reduction_rejects_duplicate_terminal_or_immutable_operation_drift(self) -> None:
+        from tools.qykw.intern_claim import InternError, InternRecord, IssueComment, reduce_records
+        record = self._record()
+        terminal = InternRecord(42, "qiyuankaiwu/agentedu", 17, 101, "alice", "assign", "alice", None, "reconciled")
+        cases = (
+            (terminal, InternRecord(42, "qiyuankaiwu/agentedu", 17, 101, "alice", "assign", "alice", None, "failed")),
+            (InternRecord(42, "qiyuankaiwu/agentedu", 17, 101, "bob", "assign", "bob", None, "pending"),),
+            (InternRecord(42, "qiyuankaiwu/agentedu", 17, 101, "alice", "assign", "alice", 9, "pending"),),
+        )
+        for extras in cases:
+            first = terminal if len(extras) == 2 else record
+            comments = (
+                *(IssueComment(index, "qykw", item.marker(), "now") for index, item in enumerate((first,) + extras, start=1)),
+            )
+            with self.subTest(extras=extras), self.assertRaisesRegex(InternError, "record_conflict"):
+                reduce_records(comments, repository_id=42, repository="qiyuankaiwu/agentedu", issue_number=17)
+
+    def test_reduction_discards_marker_bound_to_another_repository_id_or_issue(self) -> None:
+        from tools.qykw.intern_claim import InternRecord, IssueComment, reduce_records
+        for record in (
+            InternRecord(43, "qiyuankaiwu/agentedu", 17, 101, "alice", "assign", "alice", None, "pending"),
+            InternRecord(42, "qiyuankaiwu/other", 17, 101, "alice", "assign", "alice", None, "pending"),
+            InternRecord(42, "qiyuankaiwu/agentedu", 18, 101, "alice", "assign", "alice", None, "pending"),
+        ):
+            with self.subTest(record=record):
+                self.assertEqual(
+                    reduce_records((IssueComment(1, "qykw", record.marker(), "now"),), repository_id=42,
+                                   repository="qiyuankaiwu/agentedu", issue_number=17),
+                    (),
+                )
 
 
 class TestInternGitHubGateway(unittest.TestCase):
@@ -222,13 +257,13 @@ class TestInternGitHubGateway(unittest.TestCase):
             "assignees": [{"login": "alice"}],
         })
         transport.add("GET", f"{api}/issues/17/comments?per_page=100", [
-            {"id": 1, "user": {"login": "alice"}, "body": "one", "updated_at": "now"},
+            {"id": 1, "user": {"login": "alice"}, "body": "one", "updated_at": "now", "issue_url": f"{api}/issues/17"},
         ], headers={"link": f'<{api}/issues/17/comments?per_page=100&page=2>; rel="next"'})
         transport.add("GET", f"{api}/issues/17/comments?per_page=100&page=2", [
-            {"id": 2, "user": {"login": "qykw"}, "body": "two", "updated_at": "later"},
+            {"id": 2, "user": {"login": "qykw"}, "body": "two", "updated_at": "later", "issue_url": f"{api}/issues/17"},
         ])
         transport.add("GET", f"{api}/issues/9/comments?per_page=100", [
-            {"id": 3, "user": {"login": "qykw"}, "body": "pull status", "updated_at": "later"},
+            {"id": 3, "user": {"login": "qykw"}, "body": "pull status", "updated_at": "later", "issue_url": f"{api}/issues/9"},
         ])
         transport.add("GET", f"{api}/pulls/9", {
             "number": 9, "state": "open", "merged": False, "user": {"login": "alice"}, "body": "Closes #17",
@@ -257,7 +292,7 @@ class TestInternGitHubGateway(unittest.TestCase):
         self.identity(transport)
         transport.add("DELETE", f"{api}/issues/17/labels/intern%3Aclaimable", {})
         self.identity(transport)
-        transport.add("POST", f"{api}/issues/17/comments", {"id": 801})
+        transport.add("POST", f"{api}/issues/17/comments", {"id": 801, "issue_url": f"{api}/issues/17"})
         self.identity(transport)
         transport.add("PATCH", f"{api}/issues/comments/801", {})
         self.identity(transport)
@@ -299,17 +334,58 @@ class TestInternGitHubGateway(unittest.TestCase):
         self.assertFalse(hasattr(gateway, "delete"))
         self.assertFalse(hasattr(gateway, "request"))
 
+    def test_rejects_changed_collection_query_parameters_before_following_links(self) -> None:
+        from tools.qykw.intern_claim import InternError
+        api = f"{self.API}/repos/{self.REPOSITORY}"
+        for query in ("per_page=100&since=1&page=2", "per_page=100&page=3", "per_page=99&page=2", "per_page=100&page=2&page=2"):
+            transport = InternQueueTransport()
+            transport.add("GET", f"{api}/issues/17/comments?per_page=100", [], headers={"link": f'<{api}/issues/17/comments?{query}>; rel="next"'})
+            with self.subTest(query=query), self.assertRaisesRegex(InternError, "unsafe_pagination"):
+                self.gateway(transport).list_issue_comments(17)
+
     def test_redacts_token_and_body_from_gateway_errors_and_repr(self) -> None:
         from tools.qykw.intern_claim import InternError
+        for transport_error in (RuntimeError("intern-secret private-body"), InternError("intern-secret private-body")):
+            transport = InternQueueTransport()
+            transport.add("GET", f"{self.API}/repos/{self.REPOSITORY}/issues/17", transport_error)
+            gateway = self.gateway(transport)
+            with self.subTest(transport_error=transport_error), self.assertRaises(InternError) as caught:
+                gateway.get_issue(17)
+            self.assertEqual(caught.exception.code, "transport_failed")
+            self.assertNotIn("intern-secret", str(caught.exception))
+            self.assertNotIn("private-body", repr(caught.exception))
+            self.assertNotIn("intern-secret", repr(gateway))
+            formatted = "".join(traceback.format_exception(caught.exception))
+            self.assertNotIn("intern-secret", formatted)
+            self.assertNotIn("private-body", formatted)
+
+    def test_rejects_private_route_matrix_bypasses(self) -> None:
+        from tools.qykw.intern_claim import InternError
+        gateway = self.gateway(InternQueueTransport())
+        api = f"{self.API}/repos/{self.REPOSITORY}"
+        for method, url, body in (
+            ("DELETE", f"{api}/issues/comments/101", None),
+            ("POST", f"{api}/issues/17/labels", b'{"labels":["triage"]}'),
+            ("PATCH", f"{api}/issues/17/labels/status%3Ain-progress", b'{}'),
+            ("POST", f"{api}/issues/17/comments", b'{"body":"ok","extra":true}'),
+        ):
+            with self.subTest(method=method, url=url), self.assertRaisesRegex(InternError, "invalid_request"):
+                gateway._request(method, url, body=body)
+
+    def test_rejects_comment_and_create_response_with_wrong_issue_locator(self) -> None:
+        from tools.qykw.intern_claim import InternError
+        api = f"{self.API}/repos/{self.REPOSITORY}"
         transport = InternQueueTransport()
-        transport.add("GET", f"{self.API}/repos/{self.REPOSITORY}/issues/17", RuntimeError("intern-secret private-body"))
-        gateway = self.gateway(transport)
-        with self.assertRaises(InternError) as caught:
-            gateway.get_issue(17)
-        self.assertEqual(caught.exception.code, "transport_failed")
-        self.assertNotIn("intern-secret", str(caught.exception))
-        self.assertNotIn("private-body", repr(caught.exception))
-        self.assertNotIn("intern-secret", repr(gateway))
+        transport.add("GET", f"{api}/issues/17/comments?per_page=100", [
+            {"id": 1, "user": {"login": "qykw"}, "body": "marker", "updated_at": "now", "issue_url": f"{api}/issues/18"},
+        ])
+        with self.assertRaisesRegex(InternError, "comment_repository_mismatch"):
+            self.gateway(transport).list_issue_comments(17)
+        transport = InternQueueTransport()
+        self.identity(transport)
+        transport.add("POST", f"{api}/issues/17/comments", {"id": 801, "issue_url": f"{api}/issues/18"})
+        with self.assertRaisesRegex(InternError, "comment_repository_mismatch"):
+            self.gateway(transport).create_comment(17, "status")
 
     def test_rejects_invalid_write_identifiers_before_authentication_or_transport(self) -> None:
         from tools.qykw.intern_claim import InternError

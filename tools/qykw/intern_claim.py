@@ -242,7 +242,9 @@ class HttpInternGateway:
         body = _intern_write_body(body)
         self.assert_bot_identity()
         payload = _intern_mapping(self._write_json("POST", self._repo_path(f"issues/{issue_number}/comments"), {"body": body}), "invalid_comment_response")
-        return _intern_positive(payload.get("id"), "invalid_comment_response")
+        comment_id = _intern_positive(payload.get("id"), "invalid_comment_response")
+        _intern_comment_locator(payload.get("issue_url"), self.api_url, self.repository, issue_number)
+        return comment_id
 
     def update_comment(self, comment_id: int, body: str) -> None:
         comment_id = _intern_positive(comment_id, "invalid_comment_id")
@@ -257,16 +259,21 @@ class HttpInternGateway:
 
     def _comments(self, number: int) -> tuple[IssueComment, ...]:
         payloads = self._paginate(self._repo_path(f"issues/{number}/comments?per_page=100"))
-        return tuple(IssueComment(
-            _intern_positive(value.get("id"), "invalid_issue_comment"),
-            _intern_login(_intern_mapping(value.get("user"), "invalid_issue_comment").get("login")),
-            _intern_optional_string(value.get("body"), "invalid_issue_comment") or "",
-            _intern_string(value.get("updated_at"), "invalid_issue_comment"),
-        ) for value in payloads)
+        comments: list[IssueComment] = []
+        for value in payloads:
+            _intern_comment_locator(value.get("issue_url"), self.api_url, self.repository, number)
+            comments.append(IssueComment(
+                _intern_positive(value.get("id"), "invalid_issue_comment"),
+                _intern_login(_intern_mapping(value.get("user"), "invalid_issue_comment").get("login")),
+                _intern_optional_string(value.get("body"), "invalid_issue_comment") or "",
+                _intern_string(value.get("updated_at"), "invalid_issue_comment"),
+            ))
+        return tuple(comments)
 
     def _paginate(self, url: str) -> tuple[Mapping[str, object], ...]:
         initial = self._validate_url(url)
         expected_path = urlsplit(initial).path
+        current_page = _intern_collection_page(initial)
         current = initial
         visited: set[str] = set()
         values: list[Mapping[str, object]] = []
@@ -283,11 +290,15 @@ class HttpInternGateway:
                 return tuple(values)
             try:
                 candidate = self._validate_url(next_url)
-            except InternError as error:
-                raise InternError("unsafe_pagination") from error
+            except InternError:
+                raise InternError("unsafe_pagination") from None
             if urlsplit(candidate).path != expected_path:
                 raise InternError("unsafe_pagination")
+            candidate_page = _intern_collection_page(candidate)
+            if candidate_page != current_page + 1:
+                raise InternError("unsafe_pagination")
             current = candidate
+            current_page = candidate_page
         raise InternError("unsafe_pagination")
 
     def _read_json(self, url: str) -> object:
@@ -300,21 +311,18 @@ class HttpInternGateway:
         return payload
 
     def _request(self, method: str, url: str, *, body: bytes | None) -> tuple[object, Mapping[str, str]]:
-        if method not in {"GET", "POST", "PATCH", "DELETE"}:
-            raise InternError("invalid_request")
         safe_url = self._validate_url(url)
         if body is not None and len(body) > _MAX_INTERN_WRITE_BYTES:
             raise InternError("request_too_large")
+        _intern_allowed_route(method, safe_url, body, self.api_url, self.repository)
         headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}", "X-GitHub-Api-Version": "2022-11-28"}
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
         try:
             assert self.transport is not None
             status, response_headers, response_body = self.transport(method, safe_url, headers, body)
-        except InternError:
-            raise
-        except Exception as error:
-            raise InternError("transport_failed") from error
+        except Exception:
+            raise InternError("transport_failed") from None
         if type(status) is not int or not isinstance(response_body, bytes) or len(response_body) > _MAX_INTERN_RESPONSE_BYTES:
             raise InternError("invalid_response")
         if not isinstance(response_headers, Mapping):
@@ -542,17 +550,31 @@ def decode_marker(body: str, *, repository: str | None = None) -> InternRecord |
     return record
 
 
-def reduce_records(records: tuple[IssueComment, ...], *, repository: str | None = None) -> tuple[InternRecord, ...]:
-    """Read trusted status comments in deterministic GitHub comment-id order."""
+def reduce_records(records: tuple[IssueComment, ...], *, repository_id: int, repository: str,
+                   issue_number: int) -> tuple[InternRecord, ...]:
+    """Reduce trusted, repository-bound records to one state per operation key."""
 
-    accepted: list[InternRecord] = []
+    repository_id = _intern_positive(repository_id, "invalid_repository_id")
+    repository = _intern_repository(repository)
+    issue_number = _intern_positive(issue_number, "invalid_issue_number")
+    grouped: dict[tuple[int, int, int, str], list[InternRecord]] = {}
     for comment in sorted(records, key=lambda item: item.comment_id):
         if not isinstance(comment, IssueComment) or comment.author_login != "qykw":
             continue
         record = decode_marker(comment.body, repository=repository)
-        if record is not None:
-            accepted.append(record)
-    return tuple(accepted)
+        if record is None or (record.repository_id, record.issue_number) != (repository_id, issue_number):
+            continue
+        grouped.setdefault(record.operation_key, []).append(record)
+    reduced: list[InternRecord] = []
+    for same_operation in grouped.values():
+        first = same_operation[0]
+        if any(_intern_record_identity(record) != _intern_record_identity(first) for record in same_operation[1:]):
+            raise InternError("record_conflict")
+        terminal = [record for record in same_operation if record.stage != "pending"]
+        if len(terminal) > 1:
+            raise InternError("record_conflict")
+        reduced.append(terminal[0] if terminal else first)
+    return tuple(reduced)
 
 
 def _intern_origin(value: str) -> str:
@@ -635,11 +657,93 @@ def _intern_write_body(value: object) -> str:
     return value
 
 
+def _intern_comment_locator(value: object, api_url: str, repository: str, issue_number: int) -> None:
+    expected = f"{api_url}/repos/{repository}/issues/{issue_number}"
+    if value != expected:
+        raise InternError("comment_repository_mismatch")
+
+
+def _intern_collection_page(url: str) -> int:
+    query = urlsplit(url).query
+    if query == "per_page=100":
+        return 1
+    match = re.fullmatch(r"per_page=100&page=([2-9][0-9]*)", query)
+    if match is None:
+        raise InternError("unsafe_pagination")
+    return int(match.group(1))
+
+
+def _intern_record_identity(record: InternRecord) -> tuple[object, ...]:
+    return (
+        record.repository_id, record.repository, record.issue_number, record.trigger_comment_id,
+        record.actor_login, record.operation, record.claimant_login, record.pull_number,
+    )
+
+
+def _intern_allowed_route(method: str, url: str, body: bytes | None, api_url: str, repository: str) -> None:
+    parsed = urlsplit(url)
+    if method == "GET" and body is None and url == f"{api_url}/user":
+        return
+    prefix = f"{api_url}/repos/{repository}/"
+    if not url.startswith(prefix):
+        raise InternError("invalid_request")
+    path = parsed.path[len(urlsplit(prefix).path):]
+    number = r"([1-9][0-9]*)"
+    if method == "GET" and body is None:
+        if re.fullmatch(rf"issues/{number}", path) or re.fullmatch(rf"pulls/{number}", path):
+            if not parsed.query:
+                return
+        if re.fullmatch(rf"issues/{number}/comments", path):
+            _intern_collection_page(url)
+            return
+        raise InternError("invalid_request")
+    if method == "DELETE" and body is None:
+        match = re.fullmatch(rf"issues/{number}/labels/([^/]+)", path)
+        if match is not None and match.group(2) in {quote(label, safe="") for label in _INTERN_LABELS}:
+            return
+        raise InternError("invalid_request")
+    payload = _intern_request_payload(body)
+    if method in {"POST", "DELETE"} and re.fullmatch(rf"issues/{number}/assignees", path):
+        if set(payload) == {"assignees"} and isinstance(payload["assignees"], list) and len(payload["assignees"]) == 1:
+            _intern_login(payload["assignees"][0])
+            return
+    if method == "POST" and re.fullmatch(rf"issues/{number}/labels", path):
+        if (set(payload) == {"labels"} and isinstance(payload["labels"], list)
+                and len(payload["labels"]) == 1 and payload["labels"][0] in _INTERN_LABELS):
+            return
+    if method == "POST" and re.fullmatch(rf"issues/comments/{number}/reactions", path):
+        if payload == {"content": "laugh"}:
+            return
+    if method == "POST" and re.fullmatch(rf"issues/{number}/comments", path):
+        if set(payload) == {"body"}:
+            _intern_write_body(payload["body"])
+            return
+    if method == "PATCH" and re.fullmatch(rf"issues/comments/{number}", path):
+        if set(payload) == {"body"}:
+            _intern_write_body(payload["body"])
+            return
+    if method == "PATCH" and re.fullmatch(rf"issues/{number}", path) and payload == {"state": "closed"}:
+        return
+    raise InternError("invalid_request")
+
+
+def _intern_request_payload(body: bytes | None) -> Mapping[str, object]:
+    if not isinstance(body, bytes):
+        raise InternError("invalid_request")
+    try:
+        payload = json.loads(body.decode("utf-8"), object_pairs_hook=_intern_no_duplicates)
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise InternError("invalid_request") from None
+    if not isinstance(payload, Mapping):
+        raise InternError("invalid_request")
+    return payload
+
+
 def _intern_json(value: bytes) -> object:
     try:
         return json.loads(value.decode("utf-8"), object_pairs_hook=_intern_no_duplicates)
-    except (UnicodeDecodeError, ValueError, TypeError) as error:
-        raise InternError("invalid_response") from error
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise InternError("invalid_response") from None
 
 
 def _intern_json_or_none(value: str) -> object | None:
@@ -688,5 +792,5 @@ def _intern_stdlib_transport(method: str, url: str, headers: Mapping[str, str], 
             return response.status, dict(response.headers.items()), response.read(_MAX_INTERN_RESPONSE_BYTES + 1)
     except HTTPError as error:
         return error.code, dict(error.headers.items()) if error.headers else {}, error.read(_MAX_INTERN_RESPONSE_BYTES + 1)
-    except URLError as error:
-        raise InternError("transport_failed") from error
+    except URLError:
+        raise InternError("transport_failed") from None
