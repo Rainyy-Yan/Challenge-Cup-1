@@ -18,6 +18,20 @@
       "limitations": "仓库内冻结验收基线；正式比赛方案仍须使用稳定且获授权的评审路径。"
     },
     {
+      "id": "EV-G0-TASKBOOK-MAP-001",
+      "gate": "G0",
+      "category": "specification",
+      "title": "官方任务书落地矩阵",
+      "path": "docs/官方任务书落地矩阵.md",
+      "status": "working",
+      "owner": "xyh202131",
+      "related_issues": [65],
+      "source": "official taskbook pages 4-10 and repository evidence index",
+      "repo_commit": null,
+      "visibility": "public",
+      "limitations": "实现证据为当前工作稿；外部人工签核和提交回执尚未形成，不能据此宣称官方验收完成。"
+    },
+    {
       "id": "EV-G1-ONLINE-DEMO-001",
       "gate": "G1",
       "category": "runtime-artifact",

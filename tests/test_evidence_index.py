@@ -16,6 +16,26 @@ class TestEvidenceIndex(unittest.TestCase):
     def test_repository_index_is_valid(self):
         self.assertEqual(validate_index(load_index(), ROOT), [])
 
+    def test_taskbook_matrix_is_registered_as_working_g0_evidence(self):
+        entry = next(
+            item for item in load_index()["entries"]
+            if item["id"] == "EV-G0-TASKBOOK-MAP-001"
+        )
+        self.assertEqual(entry["gate"], "G0")
+        self.assertEqual(entry["status"], "working")
+        self.assertEqual(entry["owner"], "xyh202131")
+        self.assertEqual(entry["related_issues"], [65])
+        self.assertIn("外部", entry["limitations"])
+
+    def test_taskbook_matrix_keeps_status_vocabulary_and_role_boundary(self):
+        matrix = (ROOT / "docs" / "官方任务书落地矩阵.md").read_text(encoding="utf-8")
+        self.assertIn("官方要求（原文口径）", matrix)
+        self.assertIn("内部强化/解释（非官方要求）", matrix)
+        self.assertIn("独立领域评分者、来源复核者和仲裁者目前均为 `unassigned`", matrix)
+        statuses = {line.rsplit("|", 2)[1].strip() for line in matrix.splitlines() if line.startswith("| O-")}
+        self.assertTrue(statuses <= {"met", "partial", "missing", "external"})
+        self.assertTrue(statuses)
+
     def test_generated_markdown_is_current(self):
         self.assertEqual(
             DEFAULT_MARKDOWN.read_text(encoding="utf-8"),
