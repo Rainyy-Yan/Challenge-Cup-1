@@ -1,0 +1,240 @@
+"""Immutable contracts for qykw's authorized change channel."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Protocol
+
+from tools.qykw.domain import PullSnapshot, RunContext
+from tools.qykw.state import RunStateStore
+
+
+class ChangeKind(str, Enum):
+    FIX = "fix"
+    IMPLEMENT = "implement"
+
+
+@dataclass(frozen=True)
+class ChangeRequest:
+    context: RunContext
+    kind: ChangeKind
+    instruction: str
+    source_repository: str
+    target_repository: str
+    source_head_sha: str
+    target_base_sha: str
+    target_base_ref: str
+    verification_profile: str
+
+
+@dataclass(frozen=True)
+class TextEdit:
+    before: str
+    after: str
+
+
+@dataclass(frozen=True)
+class FilePatch:
+    path: str
+    base_sha256: str | None
+    create: bool
+    edits: tuple[TextEdit, ...]
+
+
+@dataclass(frozen=True)
+class PatchManifest:
+    schema_version: int
+    run_id: str
+    source_repository: str
+    target_repository: str
+    source_pr_number: int
+    source_head_sha: str
+    target_base_sha: str
+    target_base_ref: str
+    verification_profile: str
+    files: tuple[FilePatch, ...]
+    digest: str
+
+
+@dataclass(frozen=True)
+class FileDigest:
+    path: str
+    mode: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class PreparedWorkspace:
+    root: Path
+    source_head_sha: str
+    source_files: tuple[FileDigest, ...]
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    name: str
+    argv_digest: str
+    exit_code: int | None
+    timed_out: bool
+    duration_ms: int
+    output_digest: str
+    output_excerpt: str
+
+
+@dataclass(frozen=True)
+class VerificationAttestation:
+    schema_version: int
+    workflow_run_id: int
+    run_id: str
+    source_repository: str
+    source_head_sha: str
+    target_repository: str
+    target_base_sha: str
+    target_base_ref: str
+    manifest_digest: str
+    profile: str
+    image_digest: str
+    output_tree_digest: str
+    workspace_tree_digest: str
+    output_files: tuple[FileDigest, ...]
+    success: bool
+    canceled: bool
+    results: tuple[CommandResult, ...]
+
+
+@dataclass(frozen=True)
+class AppliedPatch:
+    files: tuple[FileDigest, ...]
+    output_tree_digest: str
+    workspace_tree_digest: str
+
+
+@dataclass(frozen=True)
+class CommitIdentity:
+    login: str
+    name: str
+    email: str
+
+
+@dataclass(frozen=True)
+class SourceBlob:
+    path: str
+    mode: str
+    content: bytes
+    git_sha: str
+
+
+@dataclass(frozen=True)
+class SourceTreeEntry:
+    path: str
+    mode: str
+    kind: str
+    git_sha: str
+
+
+@dataclass(frozen=True)
+class PublishedFile:
+    path: str
+    mode: str
+    content: bytes
+    sha256: str
+
+
+@dataclass(frozen=True)
+class GitTreeEntry:
+    path: str
+    mode: str
+    blob_sha: str
+
+
+class WriteState(str, Enum):
+    NOT_CREATED = "not_created"
+    CREATED = "created"
+    UNKNOWN = "unknown"
+
+
+class PublicationStage(str, Enum):
+    PREFLIGHT = "preflight"
+    BLOBS = "blobs"
+    TREE = "tree"
+    COMMIT = "commit"
+    REF = "ref"
+    PULL = "pull"
+    COMPLETED = "completed"
+
+
+class WriteKind(str, Enum):
+    BLOB = "blob"
+    TREE = "tree"
+    COMMIT = "commit"
+    REF = "ref"
+    PULL = "pull"
+
+
+@dataclass(frozen=True)
+class WriteReceipt:
+    kind: WriteKind
+    target: str
+    object_id: str | None
+    state: WriteState
+
+
+@dataclass(frozen=True)
+class PublishedCommit:
+    commit_sha: str
+    tree_sha: str
+
+
+@dataclass(frozen=True)
+class PublicationRequest:
+    change: ChangeRequest
+    manifest: PatchManifest
+    attestation: VerificationAttestation
+    branch_name: str
+    title: str
+    body: str
+
+
+@dataclass(frozen=True)
+class ChangePublication:
+    stage: PublicationStage
+    branch_name: str
+    branch_state: WriteState
+    pull_state: WriteState
+    commit_sha: str | None
+    pull_number: int | None
+    receipts: tuple[WriteReceipt, ...]
+    partial: bool
+    error_code: str | None
+
+
+class PatchGenerator(Protocol):
+    def generate(
+        self,
+        request: ChangeRequest,
+        snapshot: PullSnapshot,
+        state_store: RunStateStore,
+    ) -> PatchManifest: ...
+
+
+class SandboxVerifier(Protocol):
+    def verify(
+        self,
+        request: ChangeRequest,
+        manifest: PatchManifest,
+        workspace: PreparedWorkspace,
+    ) -> VerificationAttestation: ...
+
+
+class ChangePublisher(Protocol):
+    def publish(self, request: PublicationRequest) -> ChangePublication: ...
+
+
+class ChangePolicy(Protocol):
+    def validate_request(self, request: ChangeRequest, snapshot: PullSnapshot) -> None: ...
+
+    def validate_manifest(
+        self, request: ChangeRequest, manifest: PatchManifest
+    ) -> None: ...
