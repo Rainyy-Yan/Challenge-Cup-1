@@ -240,7 +240,7 @@ jobs:
 
   record_result:
     needs: [authorize, prepare, verify, publish]
-    if: ${{ always() }}
+    if: ${{ always() && needs.authorize.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

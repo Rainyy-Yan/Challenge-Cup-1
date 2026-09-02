@@ -88,7 +88,10 @@ class TestQykwChangeWorkflow(unittest.TestCase):
             workflow_jobs["record_result"]["needs"],
             ["authorize", "prepare", "verify", "publish"],
         )
-        self.assertEqual(workflow_jobs["record_result"]["if"], "${{ always() }}")
+        self.assertEqual(
+            workflow_jobs["record_result"]["if"],
+            "${{ always() && needs.authorize.result == 'success' }}",
+        )
         for job, phase in {
             "authorize": "authorize-change",
             "prepare": "prepare-change",
@@ -204,6 +207,24 @@ class TestQykwChangeWorkflow(unittest.TestCase):
             },
         )
         self.assertNotIn("toJSON(needs)", str(record))
+
+    def test_record_result_skips_without_an_authorized_run_but_survives_downstream_results(self) -> None:
+        condition = str(jobs(CHANGE)["record_result"]["if"])
+        self.assertEqual(
+            condition,
+            "${{ always() && needs.authorize.result == 'success' }}",
+        )
+        for authorize_result, expected in (
+            ("success", True),
+            ("failure", False),
+            ("cancelled", False),
+            ("skipped", False),
+        ):
+            with self.subTest(authorize_result=authorize_result):
+                self.assertEqual(authorize_result == "success", expected)
+        for downstream in ("prepare", "verify", "publish"):
+            with self.subTest(downstream=downstream):
+                self.assertNotIn(f"needs.{downstream}.result == 'success'", condition)
 
     def test_verify_is_networkless_and_mounts_no_sensitive_host_path(self) -> None:
         block = job_source("verify")
