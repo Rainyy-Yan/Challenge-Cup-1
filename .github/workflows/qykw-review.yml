@@ -8,17 +8,34 @@ on:
   pull_request_review_comment:
     types: [created, edited]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number (1 to 999999999999999999)
+        required: true
+        type: number
+      command:
+        description: Read-only qykw command
+        required: true
+        type: choice
+        options: [帮助, 分析, 计划, 审查, 复审, 状态, 总结]
 
 permissions:
   contents: none
 
 concurrency:
-  group: qykw-${{ github.repository_id }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: qykw-${{ github.repository_id }}-pr-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
   cancel-in-progress: false
   queue: max
 
 jobs:
   authorize:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@qykw')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@qykw'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -57,6 +74,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      checks: read
     steps:
       - name: Check out trusted controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

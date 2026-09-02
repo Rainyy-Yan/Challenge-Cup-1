@@ -7,6 +7,10 @@ from pathlib import Path
 import re
 import tomllib
 import unittest
+import yaml
+
+from tools.qykw.domain import CommandName
+from tools.qykw.triggers import normalize_event
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +38,38 @@ def job_blocks(source: str) -> dict[str, str]:
 def concurrency_block(source: str) -> str:
     match = re.search(r"^concurrency:\n(?P<body>(?:  [^\n]*\n)+)", source, re.MULTILINE)
     return match.group("body") if match is not None else ""
+
+
+def workflow_mapping(path: Path) -> dict[str, object]:
+    """Parse the active YAML structure without treating comments as configuration."""
+    value = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert isinstance(value, dict)
+    return value
+
+
+def workflow_jobs(path: Path) -> dict[str, dict[str, object]]:
+    jobs = workflow_mapping(path).get("jobs")
+    assert isinstance(jobs, dict)
+    assert all(isinstance(job, dict) for job in jobs.values())
+    return jobs
+
+
+def review_prefilter(event_name: str, *, pull_request: bool, body: str) -> bool:
+    return event_name in {"pull_request_target", "workflow_dispatch"} or (
+        event_name == "issue_comment" and pull_request and "@qykw" in body
+    ) or (event_name == "pull_request_review_comment" and "@qykw" in body)
+
+
+def control_prefilter(event_name: str, *, pull_request: bool, body: str) -> bool:
+    return (
+        event_name == "issue_comment" and pull_request and "@qykw" in body and "停止" in body
+    ) or (
+        event_name == "pull_request_review_comment" and "@qykw" in body and "停止" in body
+    )
+
+
+def compact_expression(value: object) -> str:
+    return " ".join(str(value).split())
 
 
 class QueuedRuns:
@@ -75,19 +111,55 @@ class TestQykwWorkflow(unittest.TestCase):
         })
 
     def test_review_subscribes_only_to_initial_pr_events_and_allowed_comment_events(self) -> None:
-        source = REVIEW.read_text(encoding="utf-8")
-        for required in ("pull_request_target:", "opened", "ready_for_review", "reopened", "issue_comment:", "pull_request_review_comment:", "workflow_dispatch:", "created", "edited"):
-            self.assertIn(required, source)
-        self.assertNotIn("synchronize", source)
-        self.assertNotIn("pull_request:", source)
+        triggers = workflow_mapping(REVIEW)["on"]
+        self.assertEqual(set(triggers), {
+            "pull_request_target", "issue_comment", "pull_request_review_comment", "workflow_dispatch",
+        })
+        self.assertEqual(triggers["pull_request_target"]["types"], ["opened", "ready_for_review", "reopened"])
+        self.assertEqual(triggers["issue_comment"]["types"], ["created", "edited"])
+        self.assertEqual(triggers["pull_request_review_comment"]["types"], ["created", "edited"])
+
+    def test_manual_inputs_are_active_bounded_read_only_choices_and_share_the_pr_queue(self) -> None:
+        workflow = workflow_mapping(REVIEW)
+        dispatch = workflow["on"]["workflow_dispatch"]
+        self.assertIsInstance(dispatch, dict)
+        inputs = dispatch["inputs"]
+        self.assertEqual(inputs["pr_number"], {
+            "description": "Pull request number (1 to 999999999999999999)",
+            "required": "true",
+            "type": "number",
+        })
+        self.assertEqual(inputs["command"], {
+            "description": "Read-only qykw command",
+            "required": "true",
+            "type": "choice",
+            "options": ["帮助", "分析", "计划", "审查", "复审", "状态", "总结"],
+        })
+        concurrency = concurrency_block(REVIEW.read_text(encoding="utf-8"))
+        self.assertIn("github.event.pull_request.number || github.event.issue.number || inputs.pr_number", concurrency)
+        self.assertNotIn("修复", REVIEW.read_text(encoding="utf-8"))
+        self.assertNotIn("实现", REVIEW.read_text(encoding="utf-8"))
+
+    def test_manual_workflow_input_normalizes_to_the_selected_pr_and_read_only_command(self) -> None:
+        event = normalize_event(
+            "workflow_dispatch",
+            {"inputs": {"pr_number": "23", "command": "复审"}, "sender": {"login": "maintainer"}},
+            repository_id=7,
+            repository="owner/repository",
+            workflow_run_id=812,
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event.pr_number if event else None, 23)
+        self.assertEqual(event.command.name if event else None, CommandName.REREVIEW)
+        self.assertEqual(event.command.mode.value if event else None, "read_only")
 
     def test_review_uses_the_shared_pr_queue_without_cancellation(self) -> None:
-        source = REVIEW.read_text(encoding="utf-8")
-        concurrency = concurrency_block(source)
-        self.assertIn("qykw-${{ github.repository_id }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}", concurrency)
-        self.assertIn("cancel-in-progress: false", concurrency)
-        self.assertRegex(concurrency, re.compile(r"^  queue: max$", re.MULTILINE))
-        self.assertNotIn("# queue:", concurrency)
+        concurrency = workflow_mapping(REVIEW)["concurrency"]
+        self.assertEqual(concurrency, {
+            "group": "qykw-${{ github.repository_id }}-pr-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}",
+            "cancel-in-progress": "false",
+            "queue": "max",
+        })
         queue = QueuedRuns()
         queue.submit("occupied")
         queue.submit("review-noop")
@@ -98,18 +170,35 @@ class TestQykwWorkflow(unittest.TestCase):
         self.assertEqual(queue.completed, ["occupied", "review-noop", "change"])
 
     def test_control_isolated_to_comment_stop_lane(self) -> None:
-        source = CONTROL.read_text(encoding="utf-8")
-        self.assertIn("issue_comment:", source)
-        self.assertIn("pull_request_review_comment:", source)
-        self.assertNotIn("pull_request_target:", source)
-        self.assertNotIn("workflow_dispatch:", source)
-        concurrency = concurrency_block(source)
-        self.assertIn("qykw-control-${{ github.repository_id }}-comment-${{ github.event.comment.id }}", concurrency)
-        self.assertIn("cancel-in-progress: false", concurrency)
-        self.assertRegex(concurrency, re.compile(r"^  queue: max$", re.MULTILINE))
-        self.assertNotIn("# queue:", concurrency)
-        self.assertIn("--phase control", source)
-        self.assertIn("停止", source)
+        workflow = workflow_mapping(CONTROL)
+        self.assertEqual(set(workflow["on"]), {"issue_comment", "pull_request_review_comment"})
+        self.assertEqual(workflow["on"]["issue_comment"]["types"], ["created", "edited"])
+        self.assertEqual(workflow["on"]["pull_request_review_comment"]["types"], ["created", "edited"])
+        self.assertEqual(workflow["concurrency"], {
+            "group": "qykw-control-${{ github.repository_id }}-comment-${{ github.event.comment.id }}",
+            "cancel-in-progress": "false",
+            "queue": "max",
+        })
+        self.assertEqual(compact_expression(workflow_jobs(CONTROL)["control"]["if"]), "(github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@qykw') && contains(github.event.comment.body, '停止')) || (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@qykw') && contains(github.event.comment.body, '停止'))")
+
+    def test_active_comment_prefilters_skip_ordinary_issues_mentions_and_non_stop_commands(self) -> None:
+        review = workflow_jobs(REVIEW)["authorize"]["if"]
+        control = workflow_jobs(CONTROL)["control"]["if"]
+        for expression in (review, control):
+            self.assertIn("github.event.comment.body", expression)
+        self.assertIn("github.event.issue.pull_request", review)
+        self.assertIn("github.event.issue.pull_request", control)
+        self.assertIn("contains(github.event.comment.body, '@qykw')", review)
+        self.assertIn("contains(github.event.comment.body, '@qykw')", control)
+        self.assertIn("contains(github.event.comment.body, '停止')", control)
+        self.assertTrue(review_prefilter("pull_request_target", pull_request=False, body=""))
+        self.assertTrue(review_prefilter("workflow_dispatch", pull_request=False, body=""))
+        self.assertFalse(review_prefilter("issue_comment", pull_request=False, body="@qykw 审查"))
+        self.assertFalse(review_prefilter("issue_comment", pull_request=True, body="请审查"))
+        self.assertFalse(control_prefilter("issue_comment", pull_request=True, body="@qykw 审查"))
+        self.assertFalse(control_prefilter("issue_comment", pull_request=True, body="停止"))
+        self.assertFalse(control_prefilter("issue_comment", pull_request=False, body="@qykw 停止"))
+        self.assertTrue(control_prefilter("pull_request_review_comment", pull_request=True, body="@qykw 停止"))
 
     def test_root_phases_create_outputs_without_impossible_input_artifacts(self) -> None:
         review = job_blocks(REVIEW.read_text(encoding="utf-8"))
@@ -175,6 +264,16 @@ class TestQykwWorkflow(unittest.TestCase):
         self.assertNotIn("QYKW_INFERENCE_", CONTROL.read_text(encoding="utf-8"))
         self.assertIn("QYKW_REVIEW_TOKEN", CONTROL.read_text(encoding="utf-8"))
 
+    def test_job_permissions_are_complete_read_only_and_do_not_gain_unneeded_scopes(self) -> None:
+        review = workflow_jobs(REVIEW)
+        self.assertEqual(review["authorize"]["permissions"], {"contents": "read"})
+        self.assertEqual(review["analyze"]["permissions"], {
+            "contents": "read", "pull-requests": "read", "checks": "read",
+        })
+        self.assertEqual(review["publish"]["permissions"], {"contents": "read"})
+        self.assertEqual(review["record_failure"]["permissions"], {"contents": "read"})
+        self.assertEqual(workflow_jobs(CONTROL)["control"]["permissions"], {"contents": "read"})
+
     def test_artifact_handoffs_use_real_output_names_and_failure_uses_available_predecessors(self) -> None:
         review = job_blocks(REVIEW.read_text(encoding="utf-8"))
         self.assertIn('name: qykw-${{ github.run_id }}-authorize-v1', review["authorize"])
@@ -195,8 +294,7 @@ class TestQykwWorkflow(unittest.TestCase):
             source = workflow.read_text(encoding="utf-8")
             self.assertIn("retention-days: 1", source)
             self.assertIn("github.run_id", source)
-            self.assertNotIn("github.event.comment.body", source)
-            self.assertNotRegex(source, r"github\.event\.comment\.body.*(?:artifact|name)|(?:artifact|name).*github\.event\.comment\.body")
+            self.assertNotRegex(source, r"(?:run|path|name):[^\n]*github\.event\.comment\.body")
             self.assertNotIn("github.event.pull_request.head", source)
             self.assertNotIn("QYKW_PUBLISH_TOKEN", source)
             self.assertNotIn("pull-requests: write", job_blocks(REVIEW.read_text(encoding="utf-8")).get("analyze", ""))
