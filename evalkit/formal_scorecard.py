@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 import random
 import re
+from datetime import datetime
 from statistics import NormalDist
 
 
 HALLUCINATION_LABELS = {"yes", "no", "unassessable"}
 ADAPTATION_LABELS = {"correct", "incorrect", "unassessable"}
-MACHINE_OWNED_IDENTITIES = {"ai", "agent", "machine", "model", "system", "codex"}
+MACHINE_OWNED_IDENTITIES = {"ai", "auto", "bot", "codex", "llm", "machine", "model", "system"}
 
 
 def wilson_interval(
@@ -85,11 +86,11 @@ def cluster_bootstrap_interval(
     return (_linear_quantile(estimates, 0.025), _linear_quantile(estimates, 0.975))
 
 
-def _metric(records: list[dict], positive: set[str]) -> dict:
+def _metric(records: list[dict], positive: set[str], *, seed: int) -> dict:
     successes = sum(record["label"] in positive for record in records)
     total = len(records)
     wilson = wilson_interval(successes, total)
-    bootstrap = cluster_bootstrap_interval(records, positive, seed=20260903, samples=2000)
+    bootstrap = cluster_bootstrap_interval(records, positive, seed=seed, samples=10000)
     return {
         "numerator": successes,
         "denominator": total,
@@ -100,16 +101,38 @@ def _metric(records: list[dict], positive: set[str]) -> dict:
     }
 
 
+def _normalise_identity(identity: object) -> str | None:
+    if not isinstance(identity, str):
+        return None
+    normalised = identity.strip().casefold()
+    return normalised or None
+
+
 def _is_machine_owned(identity: object) -> bool:
-    return isinstance(identity, str) and identity.strip().casefold() in MACHINE_OWNED_IDENTITIES
+    normalised = _normalise_identity(identity)
+    if normalised is None:
+        return False
+    tokens = re.findall(r"[a-z0-9]+", normalised)
+    return any(token in MACHINE_OWNED_IDENTITIES for token in tokens)
 
 
-def _complete_labels(labels: object, allowed: dict[str, set[str]]) -> bool:
-    return (
-        isinstance(labels, dict)
-        and set(labels) == set(allowed)
-        and all(labels[name] in values for name, values in allowed.items())
-    )
+def _reviewer_values(
+    labels: object, reviewer_ids: list[str], allowed: set[str]
+) -> tuple[str, str] | None:
+    if not isinstance(labels, dict):
+        return None
+    normalised_labels: dict[str, object] = {}
+    for identity, label in labels.items():
+        normalised = _normalise_identity(identity)
+        if normalised is None or normalised in normalised_labels:
+            return None
+        normalised_labels[normalised] = label
+    if set(normalised_labels) != set(reviewer_ids):
+        return None
+    values = tuple(normalised_labels[reviewer] for reviewer in reviewer_ids)
+    if not all(value in allowed for value in values):
+        return None
+    return values  # type: ignore[return-value]
 
 
 def _cohen_kappa(left: list[str], right: list[str]) -> dict:
@@ -134,25 +157,106 @@ def _cohen_kappa(left: list[str], right: list[str]) -> dict:
     return {"n": total, "agreement": agreement, "value": value}
 
 
-def _kappa_from_cases(cases: list[dict], reviewers: list[str], metric: str) -> dict:
+def _kappa_from_records(records: list[dict], reviewers: list[str], allowed: set[str]) -> dict:
     left: list[str] = []
     right: list[str] = []
-    allowed = HALLUCINATION_LABELS if metric == "hallucination" else ADAPTATION_LABELS
-    for case in cases:
-        labels = case.get("labels") if isinstance(case, dict) else None
-        if not isinstance(labels, dict):
+    for record in records:
+        labels = record.get("labels") if isinstance(record, dict) else None
+        values = _reviewer_values(labels, reviewers, allowed)
+        if values is None:
             continue
-        first = labels.get(reviewers[0])
-        second = labels.get(reviewers[1])
-        if (
-            isinstance(first, dict)
-            and isinstance(second, dict)
-            and first.get(metric) in allowed
-            and second.get(metric) in allowed
-        ):
-            left.append(first[metric])
-            right.append(second[metric])
+        left.append(values[0])
+        right.append(values[1])
     return _cohen_kappa(left, right)
+
+
+def _valid_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _record_error_prefix(kind: str, record: dict, index: int) -> str:
+    record_id = record.get("id")
+    return record_id if isinstance(record_id, str) and record_id else str(index)
+
+
+def _validate_records(
+    data: dict,
+    key: str,
+    allowed: set[str],
+    reviewers: list[str] | None,
+    case_ids: set[str],
+    errors: list[str],
+) -> list[dict]:
+    records = data.get(key)
+    if not isinstance(records, list):
+        errors.append(f"{key} must be a list")
+        return []
+
+    accepted: list[dict] = []
+    record_ids: set[str] = set()
+    prohibited = {
+        "system_conclusion",
+        "machine_conclusion",
+        "model_conclusion",
+        "system_label",
+        "machine_label",
+        "model_label",
+    }
+    singular = key[:-1]
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            errors.append(f"{singular} {index} must be an object")
+            continue
+        display_id = _record_error_prefix(singular, record, index)
+        record_id = record.get("id")
+        if not isinstance(record_id, str) or not record_id:
+            errors.append(f"{singular} {index} needs a non-empty id")
+        elif record_id in record_ids:
+            errors.append(f"duplicate {singular} id: {record_id}")
+        else:
+            record_ids.add(record_id)
+
+        case_id = record.get("case_id")
+        if not isinstance(case_id, str) or not case_id or case_id not in case_ids:
+            errors.append(f"{singular} {display_id} references an unknown case_id")
+        if prohibited.intersection(record):
+            errors.append(f"{singular} {display_id} exposes a prohibited system conclusion")
+
+        if reviewers is None:
+            accepted.append(record)
+            continue
+        values = _reviewer_values(record.get("labels"), reviewers, allowed)
+        if values is None:
+            errors.append(f"{singular} {display_id} has incomplete reviewer labels")
+
+        final_label = record.get("final_label")
+        if final_label not in allowed:
+            errors.append(f"{singular} {display_id} has an invalid final_label")
+        if values is None or final_label not in allowed:
+            continue
+        adjudicator_present = "adjudicator_id" in record
+        adjudicator = _normalise_identity(record.get("adjudicator_id"))
+        if adjudicator_present and adjudicator is None:
+            errors.append(f"{singular} {display_id} adjudicator must be a non-empty identity")
+        if values[0] == values[1]:
+            if final_label != values[0]:
+                errors.append(f"{singular} {display_id} final_label must equal the common reviewer label")
+        else:
+            if adjudicator is None:
+                if not adjudicator_present:
+                    errors.append(f"{singular} {display_id} has unresolved reviewer disagreement")
+            elif adjudicator in reviewers:
+                errors.append(f"{singular} {display_id} adjudicator must be distinct from both reviewers")
+            elif _is_machine_owned(record.get("adjudicator_id")):
+                errors.append(f"{singular} {display_id} adjudicator must not be machine-owned")
+        accepted.append(record)
+    return accepted
 
 
 def validate_truth(data: dict) -> list[str]:
@@ -165,24 +269,40 @@ def validate_truth(data: dict) -> list[str]:
         errors.append("truth version must be 1")
     if data.get("status") != "frozen":
         errors.append("truth status must be frozen")
+    if not _valid_timestamp(data.get("frozen_at")):
+        errors.append("frozen_at must be an ISO-8601 timestamp")
+    seed = data.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        errors.append("seed must be a non-negative integer")
+    if data.get("blind_to_system_output") is not True:
+        errors.append("blind_to_system_output must be true")
+    if data.get("independent_ratings") is not True:
+        errors.append("independent_ratings must be true")
 
     provenance = data.get("provenance")
     sha = provenance.get("repository_sha") if isinstance(provenance, dict) else None
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         errors.append("provenance.repository_sha must be a 40-character lowercase hexadecimal SHA")
 
-    reviewers = data.get("reviewers")
+    raw_reviewers = data.get("reviewers")
+    reviewers = (
+        [_normalise_identity(reviewer) for reviewer in raw_reviewers]
+        if isinstance(raw_reviewers, list)
+        else []
+    )
     reviewers_valid = (
-        isinstance(reviewers, list)
-        and len(reviewers) == 2
-        and all(isinstance(reviewer, str) and reviewer.strip() for reviewer in reviewers)
+        len(reviewers) == 2
+        and all(reviewer is not None for reviewer in reviewers)
         and len(set(reviewers)) == 2
     )
     if not reviewers_valid:
         errors.append("reviewers must contain exactly two distinct non-empty identities")
-    elif any(_is_machine_owned(reviewer) for reviewer in reviewers):
+        reviewer_ids: list[str] | None = None
+    elif any(_is_machine_owned(reviewer) for reviewer in raw_reviewers):
         errors.append("reviewer identities must not be machine-owned")
-        reviewers_valid = False
+        reviewer_ids = None
+    else:
+        reviewer_ids = [reviewer for reviewer in reviewers if reviewer is not None]
 
     cases = data.get("cases")
     if not isinstance(cases, list):
@@ -199,7 +319,6 @@ def validate_truth(data: dict) -> list[str]:
         errors.append("at least 3 profiles are required")
 
     case_ids: set[str] = set()
-    assessable_cases = 0
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             errors.append(f"case {index} must be an object")
@@ -213,66 +332,15 @@ def validate_truth(data: dict) -> list[str]:
         else:
             case_ids.add(case_id)
 
-        prohibited = {
-            "system_conclusion",
-            "machine_conclusion",
-            "model_conclusion",
-            "system_label",
-            "machine_label",
-            "model_label",
-        }
-        if prohibited.intersection(case):
-            errors.append(f"case {display_id} exposes a prohibited system conclusion")
-
-        adjudicated = case.get("adjudicated_labels")
-        adjudicated_complete = _complete_labels(
-            adjudicated,
-            {
-                "hallucination": HALLUCINATION_LABELS,
-                "adaptation": ADAPTATION_LABELS,
-            },
-        )
-        if not adjudicated_complete:
-            errors.append(f"case {display_id} has incomplete adjudicated labels")
-        elif (
-            adjudicated["hallucination"] != "unassessable"
-            and adjudicated["adaptation"] != "unassessable"
-        ):
-            assessable_cases += 1
-
-        if not reviewers_valid:
-            continue
-        reviewer_labels = case.get("labels")
-        columns_complete = isinstance(reviewer_labels, dict) and set(reviewer_labels) == set(reviewers)
-        if columns_complete:
-            columns_complete = all(
-                _complete_labels(
-                    reviewer_labels[reviewer],
-                    {
-                        "hallucination": HALLUCINATION_LABELS,
-                        "adaptation": ADAPTATION_LABELS,
-                    },
-                )
-                for reviewer in reviewers
-            )
-        if not columns_complete:
-            errors.append(f"case {display_id} has incomplete reviewer labels")
-            continue
-
-        first = reviewer_labels[reviewers[0]]
-        second = reviewer_labels[reviewers[1]]
-        disagreement = any(first[metric] != second[metric] for metric in ("hallucination", "adaptation"))
-        if not disagreement:
-            continue
-        adjudicator = case.get("adjudicator_id")
-        if not isinstance(adjudicator, str) or not adjudicator.strip():
-            errors.append(f"case {display_id} has unresolved reviewer disagreement")
-        elif adjudicator in reviewers:
-            errors.append(f"case {display_id} adjudicator must be distinct from both reviewers")
-        elif _is_machine_owned(adjudicator):
-            errors.append(f"case {display_id} adjudicator must not be machine-owned")
-
-    if cases and assessable_cases / len(cases) < 0.90:
+    claims = _validate_records(
+        data, "claims", HALLUCINATION_LABELS, reviewer_ids, case_ids, errors
+    )
+    adaptations = _validate_records(
+        data, "adaptations", ADAPTATION_LABELS, reviewer_ids, case_ids, errors
+    )
+    all_records = claims + adaptations
+    assessable_records = sum(record.get("final_label") != "unassessable" for record in all_records)
+    if all_records and assessable_records / len(all_records) < 0.90:
         errors.append("assessable share is below 0.90")
 
     coverage = data.get("coverage_universe")
@@ -280,18 +348,34 @@ def validate_truth(data: dict) -> list[str]:
         errors.append("coverage_universe must be a list")
     else:
         valid_weight_total = 0.0
+        coverage_ids: set[str] = set()
         for index, point in enumerate(coverage):
             if not isinstance(point, dict):
                 errors.append(f"coverage point {index} must be an object")
                 continue
-            point_id = point.get("id")
-            display_id = point_id if isinstance(point_id, str) and point_id else str(index)
+            point_id = point.get("kp_id")
+            has_point_id = isinstance(point_id, str) and bool(point_id.strip())
+            display_id = point_id if has_point_id else str(index)
+            if not has_point_id:
+                errors.append(f"coverage point {index} needs a non-empty kp_id")
+            elif point_id in coverage_ids:
+                errors.append(f"duplicate coverage kp_id: {point_id}")
+            else:
+                coverage_ids.add(point_id)
             weight = point.get("weight")
-            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight <= 0:
+            if (
+                isinstance(weight, bool)
+                or not isinstance(weight, (int, float))
+                or not math.isfinite(weight)
+                or weight <= 0
+            ):
                 errors.append(f"coverage point {display_id} has an invalid weight")
             else:
                 valid_weight_total += weight
-            if point.get("covered") is True:
+            covered = point.get("covered")
+            if type(covered) is not bool:
+                errors.append(f"coverage point {display_id} covered must be a boolean")
+            if covered is True:
                 evidence_ids = point.get("evidence_ids")
                 if not (
                     isinstance(evidence_ids, list)
@@ -302,9 +386,12 @@ def validate_truth(data: dict) -> list[str]:
         if valid_weight_total <= 0:
             errors.append("coverage universe needs positive total weight")
 
-    if reviewers_valid:
-        for metric in ("hallucination", "adaptation"):
-            kappa = _kappa_from_cases(cases, reviewers, metric)["value"]
+    if reviewer_ids is not None:
+        for records, allowed, metric in (
+            (claims, HALLUCINATION_LABELS, "hallucination"),
+            (adaptations, ADAPTATION_LABELS, "adaptation"),
+        ):
+            kappa = _kappa_from_records(records, reviewer_ids, allowed)["value"]
             if kappa is None or kappa < 0.60:
                 errors.append(f"{metric} kappa is below 0.60 or undefined")
     return errors
@@ -316,28 +403,48 @@ def build_scorecard(data: dict) -> dict:
     if errors:
         raise ValueError("invalid formal truth: " + "; ".join(errors))
 
-    cases = data.get("cases", [])
+    claims = data["claims"]
+    adaptations = data["adaptations"]
     hallucination_records = [
-        {"case_id": case["id"], "label": case["adjudicated_labels"]["hallucination"]}
-        for case in cases
+        {"case_id": record["case_id"], "label": record["final_label"]}
+        for record in claims
+        if record["final_label"] != "unassessable"
     ]
     adaptation_records = [
-        {"case_id": case["id"], "label": case["adjudicated_labels"]["adaptation"]}
-        for case in cases
+        {"case_id": record["case_id"], "label": record["final_label"]}
+        for record in adaptations
+        if record["final_label"] != "unassessable"
     ]
     coverage = data.get("coverage_universe", [])
     covered_weight = sum(point["weight"] for point in coverage if point["covered"])
     total_weight = sum(point["weight"] for point in coverage)
     return {
-        "hallucination_rate": _metric(hallucination_records, {"yes"}),
-        "adaptation_accuracy": _metric(adaptation_records, {"correct"}),
+        "hallucination_rate": _metric(hallucination_records, {"yes"}, seed=data["seed"]),
+        "adaptation_accuracy": _metric(adaptation_records, {"correct"}, seed=data["seed"]),
         "coverage": {
             "numerator": covered_weight,
             "denominator": total_weight,
             "point_estimate": covered_weight / total_weight if total_weight else 0.0,
         },
         "kappa": {
-            "hallucination": _kappa_from_cases(cases, data["reviewers"], "hallucination"),
-            "adaptation": _kappa_from_cases(cases, data["reviewers"], "adaptation"),
+            "hallucination": _kappa_from_records(
+                claims,
+                [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
+                HALLUCINATION_LABELS,
+            ),
+            "adaptation": _kappa_from_records(
+                adaptations,
+                [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
+                ADAPTATION_LABELS,
+            ),
         },
+        "assessable_share": (
+            sum(
+                record["final_label"] != "unassessable"
+                for record in claims + adaptations
+            )
+            / len(claims + adaptations)
+            if claims or adaptations
+            else 0.0
+        ),
     }
