@@ -19,6 +19,7 @@ import uuid
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 
 import config
 from agents.examiner import ExaminerAgent
@@ -29,7 +30,7 @@ from core.demo_sources import (
     publicly_verified_source_ids,
     validate_demo_source_manifest,
 )
-from core.llm import build_llm
+from core.llm import MockLLM, build_llm
 from core.retrieval import Retriever
 from orchestrator import Orchestrator, load_profile
 from tools.ingest import ingest, quality_gate, write_stage
@@ -51,6 +52,29 @@ _ITEMS = formal_demo_items(
 )
 _KPS = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
 _KP_INDEX = {k["id"]: k for k in _KPS}
+_MODEL_CLIENT = None
+_MODEL_CLIENT_LOCK = Lock()
+
+
+def get_model_client():
+    global _MODEL_CLIENT
+    if _MODEL_CLIENT is None:
+        with _MODEL_CLIENT_LOCK:
+            if _MODEL_CLIENT is None:
+                _MODEL_CLIENT = build_llm()
+    return _MODEL_CLIENT
+
+
+def model_status_payload() -> dict:
+    client = get_model_client()
+    if isinstance(client, MockLLM):
+        return {
+            "mode": "offline",
+            "strategy": "deterministic-rules",
+            "models": [],
+            "router": {"fallbacks": 0, "all_models_failed": 0},
+        }
+    return client.model_status()
 
 
 class UploadError(ValueError):
@@ -175,7 +199,9 @@ def _examiner():
     if not config.EXAMINER_ENABLED:
         return None
     return ExaminerAgent(
-        build_llm(), Retriever.from_jsonl(config.KB_PATH, demo_only=True), _KP_INDEX
+        get_model_client(),
+        Retriever.from_jsonl(config.KB_PATH, demo_only=True),
+        _KP_INDEX,
     )
 
 
@@ -235,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
+        if path == "/api/model-status":
+            return self._json(model_status_payload())
         if path == "/api/profiles":
             return self._json(list_profiles())
         if path.startswith("/api/session/"):
@@ -269,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
                 profile = load_profile(pid)
             except FileNotFoundError:
                 return self._json({"error": f"没有画像 {pid}"}, 404)
-            orch = Orchestrator()
+            orch = Orchestrator(llm=get_model_client())
             session = orch.run(profile, max_kp=int(body.get("max_kp", 3)))
             sid = uuid.uuid4().hex[:12]
             SESSIONS[sid] = (orch, session)
@@ -281,7 +309,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "请至少写 8 个字符的学习情况"}, 400)
             if len(text) > 2000:
                 return self._json({"error": "学习情况不得超过 2000 个字符"}, 400)
-            agent = IntakeAgent(build_llm())
+            agent = IntakeAgent(get_model_client())
             bg = agent.parse(text)
             ex = _examiner()
             analysis = ex.analyze(bg, text) if ex else {}
@@ -332,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             profile = {"id": f"LIVE-{iid[:6]}", "name": "本次访谈",
                        "background": body.get("background", {}),
                        "responses": iv.responses()}
-            orch = Orchestrator()
+            orch = Orchestrator(llm=get_model_client())
             session = orch.run(profile, max_kp=int(body.get("max_kp", 4)))
             sid = uuid.uuid4().hex[:12]
             SESSIONS[sid] = (orch, session)

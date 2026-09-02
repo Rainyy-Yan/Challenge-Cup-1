@@ -46,15 +46,32 @@ python3 server.py
 ### 接真模型
 
 ```bash
-export AGENTEDU_API_KEY=sk-xxx
-export AGENTEDU_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export AGENTEDU_MODEL=qwen3.7-plus
+# Windows PowerShell
+Copy-Item .env.example .env
+
+# macOS / Linux
+cp .env.example .env
+
+# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key
 
 python3 -m evalkit.doctor        # 先体检，六项检查，不通过别跑全流程
 ```
 
-选型、按任务分档、省钱、以及客户端已经替你处理掉的坑，
+程序启动时会自动读取仓库根目录 `.env`；已经存在的系统环境变量优先于 `.env`。
+`.env` 已被 Git 忽略，修改配置后需要重启 `server.py`。
+
+双模型路由、自动降级、额度保护，以及客户端已经处理掉的坑，
 见 `docs/接入大模型.md`。
+
+路由在冷启动时按任务类型选择：命题优先强模型，其余任务优先默认模型；运行五个
+样本后才根据成功率和延迟重新排序。启动服务后，可以在本机检查只读、脱敏的状态：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/model-status
+```
+
+该接口只返回路由策略、两个模型的健康和统计信息，不返回密钥、请求头、提示词或
+模型响应。单元测试使用本地假端点和测试值，绝不读取真实 API Key。
 
 不配 key 会自动退回离线桩（MockLLM），系统照样跑完整闭环。这个设计是故意的：
 现场没网、key 过期、额度用尽，演示都不会挂。录视频前建议两种模式各跑一遍。
@@ -688,7 +705,7 @@ Python 和 JS，逐项比对分词、覆盖率、中文数字、BKT 更新、先
 ### 离线模式没有这一层
 
 `showcase.html` 双击打开时**只用固定题库**，因为浏览器里没有模型。
-命题、自述分析、综合诊断都需要 `AGENTEDU_API_KEY`，走 `server.py`。
+命题、自述分析、综合诊断需要两家模型各自的 API Key，走 `server.py`。
 演示时要说清楚这个区别，别让人以为离线也在现场命题。
 
 ## 八、题目质量：题不好，尺子就不准

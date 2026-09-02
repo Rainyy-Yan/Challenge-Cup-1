@@ -17,14 +17,51 @@ MockLLM 不是摆设。它承担三件事：
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Event, RLock
+
+from core.model_router import (
+    AUTH,
+    INVALID_RESPONSE,
+    MODEL_UNAVAILABLE,
+    NETWORK,
+    PROVIDER,
+    RATE_LIMIT,
+    REQUEST,
+    SmartModelRouter,
+    build_default_specs,
+)
 
 _SENT = re.compile(r"[^。！？；\n]+[。！？；]?")
+
+
+def _load_project_env(env_path: str | Path | None = None) -> None:
+    """Load local AgentEdu settings without overriding the process environment."""
+    env_path = (Path(env_path) if env_path is not None
+                else Path(__file__).resolve().parents[1] / ".env")
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if separator and key.startswith("AGENTEDU_"):
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -33,6 +70,129 @@ def split_sentences(text: str) -> list[str]:
 
 class LLMError(RuntimeError):
     pass
+
+
+@dataclass
+class ModelCallError(Exception):
+    kind: str
+    status: int | None
+    summary: str
+    latency_ms: int
+    code: str = ""
+
+    def __str__(self) -> str:
+        return self.summary
+
+
+@dataclass(frozen=True)
+class ModelResult:
+    content: str
+    tokens_in: int
+    tokens_out: int
+    latency_ms: int
+
+
+class _InFlightCall:
+    """One cache-key owner and the callers waiting for its terminal outcome."""
+
+    def __init__(self) -> None:
+        self.done = Event()
+        self.error: LLMError | None = None
+
+
+_INVALID_RESPONSE_SUMMARY = "响应结构或用量无效"
+_DEFAULT_MODEL_ID = "MiniMax-M3"
+_STRONG_MODEL_ID = "deepseek-v4-pro"
+
+
+def classify_http_error(status: int, body: str) -> str:
+    lower = body.lower()
+    unavailable_markers = (
+        "model_not_found",
+        "model does not exist",
+        "model not found",
+        "access denied for model",
+    )
+    if status == 401:
+        return AUTH
+    if status in (403, 404) or (
+            status == 400 and any(marker in lower for marker in unavailable_markers)):
+        return MODEL_UNAVAILABLE
+    if status == 429:
+        return RATE_LIMIT
+    if 500 <= status < 600:
+        return PROVIDER
+    return REQUEST
+
+
+class OpenAIAdapter:
+    def __init__(self, base_url: str, api_key: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+
+    def post(self, payload: dict, timeout: int) -> tuple[dict, int]:
+        started = time.perf_counter()
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "ignore")[:300]
+            except Exception:
+                body = ""
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            kind = classify_http_error(exc.code, body)
+            code = (
+                "response_format_unsupported"
+                if exc.code == 400 and "response_format" in body.lower()
+                else f"http_{exc.code}"
+            )
+            raise ModelCallError(
+                kind,
+                exc.code,
+                f"{kind}:{code}",
+                elapsed_ms,
+                code,
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            raise ModelCallError(
+                INVALID_RESPONSE,
+                None,
+                "响应不是合法 JSON",
+                elapsed_ms,
+                "malformed_json",
+            ) from exc
+        except http.client.HTTPException as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            raise ModelCallError(
+                NETWORK,
+                None,
+                "network:protocol_error",
+                elapsed_ms,
+                "protocol_error",
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            raise ModelCallError(
+                NETWORK,
+                None,
+                "network:transport_error",
+                elapsed_ms,
+                "transport_error",
+            ) from exc
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        return data, elapsed_ms
 
 
 # 按任务路由模型。贵的模型只用在真正需要判断力的地方。
@@ -81,22 +241,46 @@ class RealLLM:
     def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 60,
                  models: dict | None = None, retries: int = 3,
                  price_in: float = 0.0, price_out: float = 0.0,
-                 rpm: int = 0, budget_calls: int = 0, cache: bool = True):
+                 rpm: int = 0, budget_calls: int = 0, cache: bool = True, *,
+                 router: SmartModelRouter | None = None,
+                 adapter: OpenAIAdapter | None = None,
+                 adapters: dict[str, OpenAIAdapter] | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        # models 形如 {"strong": "...", "mid": "...", "light": "..."}，缺项回落到 model
-        self.models = models or {}
+        strong_model = (models or {"strong": _STRONG_MODEL_ID}).get(
+            "strong", "").strip()
+        self.models = {"strong": strong_model}
         self.timeout = timeout
         self.retries = retries
         self.price_in = price_in
         self.price_out = price_out
+        specs = build_default_specs(
+            model, strong_model, timeout, price_in, price_out)
+        self.router = router or SmartModelRouter(specs)
+        default_adapter = adapter or OpenAIAdapter(self.base_url, api_key)
+        self.adapters = (
+            dict(adapters)
+            if adapters is not None
+            else {model_id: default_adapter for model_id in self.router.specs}
+        )
+        if set(self.adapters) != set(self.router.specs):
+            raise ValueError("每个路由模型都必须配置一个请求适配器")
+        self.adapter = self.adapters[model]
+        self._json_mode_ok = {
+            spec.model_id: spec.supports_json_mode
+            for spec in self.router.specs.values()
+        }
+        self._state_lock = RLock()
+        self._inflight: dict[str, _InFlightCall] = {}
         self.calls = 0
+        self.http_attempts = 0
         self.failures = 0
         self.tokens_in = 0
         self.tokens_out = 0
         self.by_task: dict[str, dict] = {}
-        self._json_mode_ok = True     # 被拒一次后置 False，不再重试
+        self.by_model: dict[str, dict] = {}
+        self.fallbacks = 0
 
         # ---- 免费档位的三条现实约束 ----
         #
@@ -106,6 +290,7 @@ class RealLLM:
         self.rpm = rpm
         self._min_gap = 60.0 / rpm if rpm > 0 else 0.0
         self._last_call = 0.0
+        self._next_attempt_at = 0.0
 
         # budget_calls：整个进程的调用次数硬上限。免费额度用完之后，
         # 后续请求会全部失败，而系统会一路回退到规则版 —— 结果是"能跑但
@@ -122,7 +307,8 @@ class RealLLM:
         self.cache_hits = 0
 
     def model_for(self, task: str) -> str:
-        return self.models.get(TASK_TIER.get(task, "mid")) or self.model
+        candidates = self.router.ordered_candidates(task)
+        return candidates[0].model_id if candidates else self.model
 
     def cost(self) -> float:
         """按配置单价折算累计成本，单位元。
@@ -134,122 +320,273 @@ class RealLLM:
         return round(self.tokens_in / 1e6 * self.price_in
                      + self.tokens_out / 1e6 * self.price_out, 6)
 
-    def stats(self) -> dict:
-        return {"calls": self.calls, "failures": self.failures,
-                "tokens_in": self.tokens_in, "tokens_out": self.tokens_out,
-                "cost_cny": self.cost(), "by_task": self.by_task,
-                "json_mode": self._json_mode_ok,
-                "cache_hits": self.cache_hits,
-                "rpm_limit": self.rpm,
-                "budget_calls": self.budget_calls,
-                "budget_hit": self.budget_hit}
+    def model_status(self) -> dict:
+        snap = self.router.snapshot()
+        return {
+            "mode": "real",
+            "strategy": snap["strategy"],
+            "models": snap["models"],
+            "router": {
+                "fallbacks": snap["fallbacks"],
+                "all_models_failed": snap["all_models_failed"],
+            },
+        }
 
-    def _throttle(self) -> None:
-        if self._min_gap <= 0:
-            return
-        wait = self._min_gap - (time.monotonic() - self._last_call)
+    def stats(self) -> dict:
+        status = self.model_status()
+        return {
+            "calls": self.calls,
+            "http_attempts": self.http_attempts,
+            "failures": self.failures,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "cost_cny": self.cost(),
+            "by_task": self.by_task,
+            "by_model": {
+                item["id"]: {
+                    "calls": item["successes"],
+                    "in": item["tokens_in"],
+                    "out": item["tokens_out"],
+                }
+                for item in status["models"]
+            },
+            "fallbacks": status["router"]["fallbacks"],
+            "cache_hits": self.cache_hits,
+            "rpm_limit": self.rpm,
+            "budget_calls": self.budget_calls,
+            "budget_hit": self.budget_hit,
+            "json_mode": all(self._json_mode_ok.values()),
+            "router": status["router"],
+            "models": status["models"],
+        }
+
+    def _throttle(self, wait: float) -> None:
         if wait > 0:
             time.sleep(wait)
-        self._last_call = time.monotonic()
+
+    def _reserve_http_attempt(self, spec) -> float | None:
+        """Reserve budget, circuit probe, and RPM slot before lock-free I/O."""
+        with self._state_lock:
+            if self.budget_calls and self.http_attempts >= self.budget_calls:
+                self.budget_hit = True
+                raise LLMError(
+                    f"已达调用上限 {self.budget_calls} 次（AGENTEDU_BUDGET_CALLS）")
+            if not self.router.begin_attempt(spec.model_id):
+                return None
+            self.http_attempts += 1
+            now = time.monotonic()
+            scheduled = max(now, self._next_attempt_at)
+            self._next_attempt_at = scheduled + self._min_gap
+            self._last_call = scheduled
+            return max(0.0, scheduled - now)
 
     @staticmethod
-    def _key(task: str, model: str, system: str, user: str, temp: float) -> str:
-        raw = f"{task}\x00{model}\x00{temp}\x00{system}\x00{user}"
+    def _key(task: str, model: str, system: str, user: str, temp: float,
+             json_mode: bool) -> str:
+        raw = f"{task}\x00{model}\x00{temp}\x00{int(json_mode)}\x00{system}\x00{user}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def _post(self, payload: dict) -> dict:
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
-            method="POST",
+    def _payload(self, spec, system: str, user: str, temp: float,
+                 json_mode: bool) -> dict:
+        user_text = user
+        payload = {
+            "model": spec.model_id,
+            "temperature": temp,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_text},
+            ],
+        }
+        if json_mode and self._json_mode_ok[spec.model_id]:
+            payload["response_format"] = {"type": "json_object"}
+        elif json_mode:
+            payload["messages"][1]["content"] = (
+                user_text + "\n请只输出合法 JSON，不要输出 Markdown 代码围栏或额外说明。")
+        return payload
+
+    @staticmethod
+    def _parse_result(spec, data: dict, latency_ms: int) -> ModelResult:
+        try:
+            if not isinstance(data, dict):
+                raise TypeError("top-level response is not an object")
+            usage = data.get("usage", {})
+            if not isinstance(usage, dict):
+                raise TypeError("usage is not an object")
+            content = data["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise TypeError("content is not text")
+            tokens_in = int(usage.get("prompt_tokens", 0))
+            tokens_out = int(usage.get("completion_tokens", 0))
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ModelCallError(
+                INVALID_RESPONSE,
+                None,
+                _INVALID_RESPONSE_SUMMARY,
+                latency_ms,
+            ) from exc
+        return ModelResult(content, tokens_in, tokens_out, latency_ms)
+
+    @staticmethod
+    def _is_response_format_error(error: ModelCallError) -> bool:
+        return (
+            error.kind == REQUEST
+            and error.status == 400
+            and error.code == "response_format_unsupported"
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+
+    def _record_task_usage(self, task: str, tokens_in: int,
+                           tokens_out: int) -> None:
+        task_rec = self.by_task.setdefault(task, {"calls": 0, "in": 0, "out": 0})
+        task_rec["calls"] += 1
+        task_rec["in"] += tokens_in
+        task_rec["out"] += tokens_out
+
+    def _cache_model_for(self, task: str) -> str:
+        role = "strong" if task == "make_item" else "default"
+        return next(spec.model_id for spec in self.router.specs.values()
+                    if spec.role == role)
+
+    def _finish_inflight(self, cache_key: str, inflight: _InFlightCall,
+                         content: str | None = None,
+                         error: LLMError | None = None) -> None:
+        with self._state_lock:
+            if error is None:
+                self._cache[cache_key] = content or ""
+            else:
+                inflight.error = error
+            inflight.done.set()
+            if self._inflight.get(cache_key) is inflight:
+                del self._inflight[cache_key]
+
+    def _wait_for_inflight(self, cache_key: str, inflight: _InFlightCall) -> str:
+        inflight.done.wait()
+        with self._state_lock:
+            if inflight.error is not None:
+                raise inflight.error
+            if cache_key in self._cache:
+                self.cache_hits += 1
+                return self._cache[cache_key]
+        raise LLMError("相同请求未生成可复用结果")
 
     def run(self, task: str, system: str, user: str, context: dict | None = None,
             json_mode: bool = False, temperature: float | None = None) -> str:
         temp = TASK_TEMP.get(task, 0.2) if temperature is None else temperature
-        model = self.model_for(task)
+        cache_key = self._key(
+            task, self._cache_model_for(task), system, user, temp, json_mode)
+        inflight: _InFlightCall | None = None
+        wait_for: _InFlightCall | None = None
+        if self.cache_enabled:
+            with self._state_lock:
+                if cache_key in self._cache:
+                    self.cache_hits += 1
+                    return self._cache[cache_key]
+                inflight = self._inflight.get(cache_key)
+                if inflight is None:
+                    inflight = _InFlightCall()
+                    self._inflight[cache_key] = inflight
+                else:
+                    wait_for = inflight
+            if wait_for is not None:
+                return self._wait_for_inflight(cache_key, wait_for)
 
-        ck = self._key(task, model, system, user, temp) if self.cache_enabled else ""
-        if ck and ck in self._cache:
-            self.cache_hits += 1
-            return self._cache[ck]
+        try:
+            return self._run_candidates(task, system, user, temp, json_mode,
+                                        cache_key, inflight)
+        except Exception as exc:
+            if inflight is not None:
+                waiter_error = (exc if isinstance(exc, LLMError)
+                                else LLMError("共享请求执行失败"))
+                self._finish_inflight(cache_key, inflight, error=waiter_error)
+            raise
 
-        if self.budget_calls and self.calls >= self.budget_calls:
-            # 额度用尽时**明确失败**，而不是继续发请求让它一个个超时。
-            # 上层捕获 LLMError 后会回退到规则版，行为是确定的。
-            self.budget_hit = True
-            raise LLMError(
-                f"已达调用上限 {self.budget_calls} 次（AGENTEDU_BUDGET_CALLS），"
-                "为保护免费额度已停止调用模型，后续走规则版")
+    def _run_candidates(self, task: str, system: str, user: str, temp: float,
+                        json_mode: bool, cache_key: str,
+                        inflight: _InFlightCall | None) -> str:
+        candidates = self.router.ordered_candidates(task)
+        if not candidates:
+            self.router.record_all_models_failed()
+            with self._state_lock:
+                self.failures += 1
+            raise LLMError(f"没有健康模型可执行任务 {task}")
 
-        want_json = json_mode and self._json_mode_ok
-        sys_text = system
-        if json_mode and not self._json_mode_ok:
-            sys_text = system + "\n严格只输出 JSON，不要任何解释文字或代码块标记。"
-
-        payload = {
-            "model": model,
-            "temperature": temp,
-            "messages": [{"role": "system", "content": sys_text},
-                         {"role": "user", "content": user}],
-        }
-        if want_json:
-            payload["response_format"] = {"type": "json_object"}
-
-        last = None
-        for attempt in range(self.retries):
-            try:
-                self._throttle()
-                data = self._post(payload)
-            except urllib.error.HTTPError as exc:
-                body = ""
+        last_error: ModelCallError | None = None
+        previous_model = ""
+        for spec in candidates:
+            candidate_started = False
+            protocol_downgraded = False
+            retry_index = 0
+            while retry_index < self.retries:
+                wait = self._reserve_http_attempt(spec)
+                if wait is None:
+                    break
+                if not candidate_started:
+                    if previous_model:
+                        self.router.record_fallback(previous_model, spec.model_id)
+                        with self._state_lock:
+                            self.fallbacks = self.router.fallbacks
+                    previous_model = spec.model_id
+                    candidate_started = True
                 try:
-                    body = exc.read().decode("utf-8", "ignore")[:300]
-                except Exception:                              # noqa: BLE001
-                    pass
-                # JSON 模式不被支持：降级一次，之后整个会话都不再用
-                if exc.code == 400 and want_json and "response_format" in body:
-                    self._json_mode_ok = False
-                    payload.pop("response_format", None)
-                    payload["messages"][0]["content"] = (
-                        system + "\n严格只输出 JSON，不要任何解释文字或代码块标记。")
-                    want_json = False
-                    continue
-                last = f"HTTP {exc.code}: {body}"
-                if exc.code in (429, 500, 502, 503, 504):
-                    time.sleep(min(8.0, 1.5 ** attempt))       # 指数退避
-                    continue
-                break                                          # 401/403 等重试无用
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                last = str(exc)
-                time.sleep(min(8.0, 1.5 ** attempt))
-                continue
+                    self._throttle(wait)
+                    payload = self._payload(spec, system, user, temp, json_mode)
+                    data, latency_ms = self.adapters[spec.model_id].post(
+                        payload, spec.timeout)
+                    result = self._parse_result(spec, data, latency_ms)
+                except ModelCallError as exc:
+                    last_error = exc
+                    self.router.record_failure(
+                        spec.model_id, exc.kind, exc.status, exc.latency_ms)
+                    if (json_mode and not protocol_downgraded
+                            and self._is_response_format_error(exc)):
+                        with self._state_lock:
+                            self._json_mode_ok[spec.model_id] = False
+                        self.router.record_json_downgrade(spec.model_id)
+                        protocol_downgraded = True
+                        continue
+                    shared_provider = len({
+                        id(provider) for provider in self.adapters.values()
+                    }) == 1
+                    if exc.kind == REQUEST or (
+                            exc.kind == AUTH and shared_provider):
+                        with self._state_lock:
+                            self.failures += 1
+                        raise LLMError(
+                            f"调用模型失败（{spec.model_id}）: {exc}") from exc
+                    if exc.kind in {AUTH, MODEL_UNAVAILABLE}:
+                        break
+                    retry_index += 1
+                    if retry_index < self.retries:
+                        time.sleep(min(8.0, 1.5 ** (retry_index - 1)))
+                        continue
+                    break
+                except BaseException:
+                    self.router.release_attempt(spec.model_id)
+                    raise
+                self.router.record_success(
+                    spec.model_id,
+                    result.latency_ms,
+                    result.tokens_in,
+                    result.tokens_out,
+                )
+                with self._state_lock:
+                    self.calls += 1
+                    self.tokens_in += result.tokens_in
+                    self.tokens_out += result.tokens_out
+                    self._record_task_usage(task, result.tokens_in, result.tokens_out)
+                    model_rec = self.by_model.setdefault(
+                        spec.model_id, {"calls": 0, "in": 0, "out": 0})
+                    model_rec["calls"] += 1
+                    model_rec["in"] += result.tokens_in
+                    model_rec["out"] += result.tokens_out
+                if inflight is not None:
+                    self._finish_inflight(cache_key, inflight, content=result.content)
+                return result.content
 
-            self.calls += 1
-            usage = data.get("usage") or {}
-            ti = int(usage.get("prompt_tokens", 0))
-            to = int(usage.get("completion_tokens", 0))
-            self.tokens_in += ti
-            self.tokens_out += to
-            rec = self.by_task.setdefault(task, {"calls": 0, "in": 0, "out": 0})
-            rec["calls"] += 1
-            rec["in"] += ti
-            rec["out"] += to
-            try:
-                content = data["choices"][0]["message"]["content"]
-                if ck:
-                    self._cache[ck] = content
-                return content
-            except (KeyError, IndexError):
-                last = f"响应结构异常: {str(data)[:200]}"
-                break
-
-        self.failures += 1
-        raise LLMError(f"调用模型失败（任务 {task}，重试 {self.retries} 次）: {last}")
+        self.router.record_all_models_failed()
+        with self._state_lock:
+            self.failures += 1
+        detail = str(last_error) if last_error else "所有候选均被熔断"
+        raise LLMError(f"调用模型失败（任务 {task}）: {detail}")
 
 
 _DIGITS = re.compile(r"\d+(?:\.\d+)?")
@@ -472,17 +809,19 @@ class MockLLM:
 
 
 def build_llm() -> RealLLM | MockLLM:
-    """按环境变量选后端。没配 key 就自动退回 Mock，永远不会因为缺 key 起不来。
+    """按环境变量选后端。任一 key 缺失就退回 Mock，避免半配置启动。
 
-    必填：
-      AGENTEDU_API_KEY    模型 key。不填即离线跑，系统照常工作。
+    真模型必填：
+      AGENTEDU_MINIMAX_API_KEY / AGENTEDU_MINIMAX_BASE_URL
+                          MiniMax 独立凭据和 OpenAI 兼容端点。
+      AGENTEDU_DEEPSEEK_API_KEY / AGENTEDU_DEEPSEEK_BASE_URL
+                          DeepSeek 独立凭据和 OpenAI 兼容端点。
 
     选填：
-      AGENTEDU_BASE_URL   OpenAI 兼容端点，默认阿里云百炼
-      AGENTEDU_MODEL      默认模型
-      AGENTEDU_MODEL_STRONG / _MID / _LIGHT
-                          按任务分档，见 TASK_TIER。只填一个也行，
-                          缺的自动回落到 AGENTEDU_MODEL。
+      AGENTEDU_MODEL      默认及降级模型，固定 MiniMax-M3
+      AGENTEDU_MODEL_STRONG
+                          强任务主模型，固定 deepseek-v4-pro。该模型重试后
+                          仍失败时，自动降级到 AGENTEDU_MODEL。
       AGENTEDU_PRICE_IN / _OUT
                           单价（元/百万 token），用于统计成本。不填则成本为 0。
       AGENTEDU_TIMEOUT    单次请求超时秒数，默认 60
@@ -499,24 +838,50 @@ def build_llm() -> RealLLM | MockLLM:
       AGENTEDU_INJECT     离线桩的幻觉注入率
       AGENTEDU_DRIFT      离线桩的数值漂移率
     """
-    key = os.environ.get("AGENTEDU_API_KEY", "").strip()
-    if not key:
+    _load_project_env()
+    legacy_key = os.environ.get("AGENTEDU_API_KEY", "").strip()
+    minimax_key = os.environ.get(
+        "AGENTEDU_MINIMAX_API_KEY", legacy_key).strip()
+    deepseek_key = os.environ.get(
+        "AGENTEDU_DEEPSEEK_API_KEY", legacy_key).strip()
+    if not minimax_key or not deepseek_key:
         return MockLLM(
             hallucination_rate=float(os.environ.get("AGENTEDU_INJECT", "0")),
             numeric_drift=float(os.environ.get("AGENTEDU_DRIFT", "0")),
         )
-    base_model = os.environ.get("AGENTEDU_MODEL", "qwen3.7-plus")
+    base_model = os.environ.get("AGENTEDU_MODEL", _DEFAULT_MODEL_ID).strip()
+    strong_model = os.environ.get(
+        "AGENTEDU_MODEL_STRONG", _STRONG_MODEL_ID).strip()
+    if (base_model, strong_model) != (_DEFAULT_MODEL_ID, _STRONG_MODEL_ID):
+        raise ValueError(
+            "生产模型配置固定为默认 MiniMax-M3、强模型 deepseek-v4-pro")
+    legacy_base_url = os.environ.get("AGENTEDU_BASE_URL", "").strip()
+    minimax_base_url = os.environ.get(
+        "AGENTEDU_MINIMAX_BASE_URL",
+        legacy_base_url or "https://api.minimax.io/v1",
+    ).strip()
+    deepseek_base_url = os.environ.get(
+        "AGENTEDU_DEEPSEEK_BASE_URL",
+        legacy_base_url or "https://api.deepseek.com",
+    ).strip()
+    minimax_adapter = OpenAIAdapter(minimax_base_url, minimax_key)
+    if (minimax_base_url, minimax_key) == (deepseek_base_url, deepseek_key):
+        # 兼容旧版统一网关：同一认证域必须共享实例，确保 401 全链路终止。
+        deepseek_adapter = minimax_adapter
+    else:
+        deepseek_adapter = OpenAIAdapter(deepseek_base_url, deepseek_key)
+    adapters = {
+        base_model: minimax_adapter,
+        strong_model: deepseek_adapter,
+    }
     return RealLLM(
-        base_url=os.environ.get(
-            "AGENTEDU_BASE_URL",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        api_key=key,
+        base_url=minimax_base_url,
+        api_key=minimax_key,
         model=base_model,
         models={
-            "strong": os.environ.get("AGENTEDU_MODEL_STRONG", ""),
-            "mid": os.environ.get("AGENTEDU_MODEL_MID", ""),
-            "light": os.environ.get("AGENTEDU_MODEL_LIGHT", ""),
+            "strong": strong_model,
         },
+        adapters=adapters,
         timeout=int(os.environ.get("AGENTEDU_TIMEOUT", "60")),
         retries=int(os.environ.get("AGENTEDU_RETRIES", "3")),
         price_in=float(os.environ.get("AGENTEDU_PRICE_IN", "0")),

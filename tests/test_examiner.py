@@ -19,7 +19,7 @@ import unittest
 
 import config
 from agents.examiner import ExaminerAgent, ItemRejected, _is_numeric
-from core.llm import MockLLM, build_llm
+from core.llm import MockLLM
 from core.retrieval import Retriever
 
 
@@ -122,7 +122,7 @@ class TestGeneration(unittest.TestCase):
 
     def test_generated_items_always_pass_vetting(self):
         """出题口和审核口是同一套标准：交付出来的题必定过审。"""
-        ex = ExaminerAgent(build_llm(), self.R, self.kps)
+        ex = ExaminerAgent(MockLLM(), self.R, self.kps)
         made = 0
         for kp in self.kps:
             it = ex.make_item(kp, 3)
@@ -135,7 +135,7 @@ class TestGeneration(unittest.TestCase):
         self.assertGreater(made, 0, "离线命题应当至少能产出若干道题")
 
     def test_generated_answer_is_in_knowledge_base(self):
-        ex = ExaminerAgent(build_llm(), self.R, self.kps)
+        ex = ExaminerAgent(MockLLM(), self.R, self.kps)
         for kp in self.kps:
             it = ex.make_item(kp, 3)
             if it is None:
@@ -163,7 +163,7 @@ class TestAnalyzeAndSynthesize(unittest.TestCase):
     def setUpClass(cls):
         cls.kps = {k["id"]: k for k in
                    json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]}
-        cls.ex = ExaminerAgent(build_llm(), Retriever.from_jsonl(config.KB_PATH),
+        cls.ex = ExaminerAgent(MockLLM(), Retriever.from_jsonl(config.KB_PATH),
                                cls.kps)
 
     def test_entry_level_reflects_background(self):
