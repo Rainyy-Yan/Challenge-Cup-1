@@ -12,6 +12,9 @@ import unittest
 from unittest import mock
 
 from tools.qykw.change import (
+    ChangeKind,
+    ChangeRequest,
+    CommandResult,
     FileDigest,
     FilePatch,
     PatchManifest,
@@ -19,19 +22,27 @@ from tools.qykw.change import (
     TextEdit,
     compute_manifest_digest,
 )
+from tools.qykw.domain import CommandMode, CommandName, CommandRequest, RunContext
 from tools.qykw.patches import (
     apply_patch_manifest,
     compute_workspace_tree_digest,
     materialize_workspace,
 )
-from tools.qykw.verification import get_verification_profile
+from tools.qykw.sandbox import SandboxError
+from tools.qykw.verification import (
+    VerificationRuntimeMetadata,
+    get_verification_profile,
+    verify_change,
+)
 
 
 def digest(path: str, content: bytes, mode: str = "100644") -> FileDigest:
     return FileDigest(path, mode, hashlib.sha256(content).hexdigest())
 
 
-def manifest(*patches: FilePatch, head: str = "a" * 40) -> PatchManifest:
+def manifest(
+    *patches: FilePatch, head: str = "a" * 40, profile: str = "full"
+) -> PatchManifest:
     provisional = PatchManifest(
         schema_version=1,
         run_id="QY-PR3-ABCD",
@@ -41,7 +52,7 @@ def manifest(*patches: FilePatch, head: str = "a" * 40) -> PatchManifest:
         source_head_sha=head,
         target_base_sha="b" * 40,
         target_base_ref="main",
-        verification_profile="full",
+        verification_profile=profile,
         files=tuple(patches),
         digest="",
     )
@@ -943,6 +954,366 @@ class TestProfiles(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "unknown_verification_profile"):
                     get_verification_profile(value)
+
+
+def _argv_digest(argv: tuple[str, ...]) -> str:
+    import json
+
+    encoded = json.dumps(argv, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(b"qykw-command-argv-v1\0" + encoded).hexdigest()
+
+
+class _StateStore:
+    def __init__(self, checkpoints: tuple[bool, ...] = ()) -> None:
+        self.checkpoints = list(checkpoints)
+        self.calls: list[tuple[int, str]] = []
+
+    def is_cancel_requested(self, pr_number: int, run_id: str) -> bool:
+        self.calls.append((pr_number, run_id))
+        return self.checkpoints.pop(0) if self.checkpoints else False
+
+
+class _Executor:
+    def __init__(
+        self, *, on_run=None, on_close=None, failure: Exception | None = None
+    ) -> None:
+        self.on_run = on_run
+        self.on_close = on_close
+        self.failure = failure
+        self.calls: list[
+            tuple[tuple[str, ...], Path, dict[str, str], int, int]
+        ] = []
+        self.close_calls = 0
+        self.cleanup_error: Exception | None = None
+
+    def run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+        output_limit_bytes: int,
+    ) -> CommandResult:
+        self.calls.append(
+            (argv, cwd, dict(env), timeout_seconds, output_limit_bytes)
+        )
+        if self.failure is not None:
+            raise self.failure
+        if self.on_run is not None:
+            result = self.on_run(len(self.calls), cwd, argv)
+            if result is not None:
+                return result
+        return CommandResult(
+            name="untrusted-executor-name",
+            argv_digest=_argv_digest(argv),
+            exit_code=0,
+            timed_out=False,
+            duration_ms=7,
+            output_digest=hashlib.sha256(b"test output").hexdigest(),
+            output_excerpt="Ran 1 test\nOK\nsecret raw source must disappear",
+        )
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.on_close is not None:
+            self.on_close()
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+
+
+class TestVerificationIntegration(WorkspaceFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.original = b"value = 1\n"
+        self.changed = b"value = 2\n"
+        self.write("app.py", self.original)
+        self.workspace = self.prepare((digest("app.py", self.original),))
+        patch = FilePatch(
+            "app.py",
+            hashlib.sha256(self.original).hexdigest(),
+            False,
+            (TextEdit("value = 1", "value = 2"),),
+        )
+        self.manifest = manifest(patch, profile="backend")
+        context = RunContext(
+            run_id=self.manifest.run_id,
+            idempotency_key="issue_comment:99",
+            repository_id=10,
+            repository="owner/target",
+            pr_number=self.manifest.source_pr_number,
+            event_name="issue_comment",
+            event_action="created",
+            source_repository=self.manifest.source_repository,
+            source_head_sha=self.manifest.source_head_sha,
+            target_base_sha=self.manifest.target_base_sha,
+            target_base_ref=self.manifest.target_base_ref,
+            command=CommandRequest(CommandName.FIX, "update value", CommandMode.CHANGE),
+            trigger_actor="xyh202131",
+            trigger_comment_id=99,
+        )
+        self.request = ChangeRequest(
+            context=context,
+            kind=ChangeKind.FIX,
+            instruction="update value",
+            source_repository=self.manifest.source_repository,
+            target_repository=self.manifest.target_repository,
+            source_head_sha=self.manifest.source_head_sha,
+            target_base_sha=self.manifest.target_base_sha,
+            target_base_ref=self.manifest.target_base_ref,
+            verification_profile=self.manifest.verification_profile,
+        )
+        self.runtime = VerificationRuntimeMetadata(
+            workflow_run_id=123,
+            image_digest="sha256:" + "c" * 64,
+            timeout_seconds=60,
+            output_limit_bytes=65536,
+        )
+
+    def verify(self, executor: _Executor, state: _StateStore | None = None):
+        return verify_change(
+            self.request,
+            self.manifest,
+            self.workspace,
+            executor,
+            state or _StateStore(),
+            runtime=self.runtime,
+        )
+
+    def test_runs_fixed_profile_in_order_and_attests_trusted_tree(self) -> None:
+        executor = _Executor()
+        state = _StateStore()
+
+        attestation = self.verify(executor, state)
+
+        profile = get_verification_profile("backend")
+        self.assertEqual(
+            tuple(command.argv for command in profile.commands),
+            tuple(call[0] for call in executor.calls),
+        )
+        self.assertTrue(
+            all(
+                cwd == self.workspace.root
+                and env == {}
+                and timeout == 60
+                and limit == 65536
+                for _, cwd, env, timeout, limit in executor.calls
+            )
+        )
+        self.assertEqual(1, executor.close_calls)
+        self.assertEqual(1 + 2 * len(profile.commands) + 1, len(state.calls))
+        self.assertEqual(
+            tuple(command.name for command in profile.commands),
+            tuple(result.name for result in attestation.results),
+        )
+        self.assertEqual(
+            tuple(_argv_digest(command.argv) for command in profile.commands),
+            tuple(result.argv_digest for result in attestation.results),
+        )
+        self.assertTrue(attestation.success)
+        self.assertFalse(attestation.canceled)
+        self.assertEqual(123, attestation.workflow_run_id)
+        self.assertEqual("sha256:" + "c" * 64, attestation.image_digest)
+        self.assertEqual((digest("app.py", self.changed),), attestation.output_files)
+        self.assertEqual(
+            compute_workspace_tree_digest((digest("app.py", self.changed),)),
+            attestation.workspace_tree_digest,
+        )
+        serialized = repr(attestation)
+        self.assertNotIn("secret raw source", serialized)
+        self.assertNotIn("value = 2", serialized)
+
+    def test_nonzero_or_timed_out_result_never_attests_success(self) -> None:
+        for exit_code, timed_out in ((2, False), (None, True)):
+            with self.subTest(exit_code=exit_code, timed_out=timed_out):
+                def fail_result(_count: int, _cwd: Path, argv: tuple[str, ...]):
+                    return CommandResult(
+                        "ignored",
+                        _argv_digest(argv),
+                        exit_code,
+                        timed_out,
+                        5,
+                        hashlib.sha256(b"failure").hexdigest(),
+                        "ValueError\nFAILED (errors=1)",
+                    )
+
+                executor = _Executor(on_run=fail_result)
+                attestation = self.verify(executor)
+                self.assertFalse(attestation.success)
+                self.assertFalse(attestation.canceled)
+                self.assertEqual(1, len(attestation.results))
+                self.assertEqual(1, executor.close_calls)
+
+                # Each subtest needs a pristine materialized workspace.
+                if timed_out is False:
+                    self.destination = self.root / "workspace-timeout"
+                    self.workspace = self.prepare((digest("app.py", self.original),))
+
+    def test_cancel_is_checked_before_patch_each_command_and_attestation(self) -> None:
+        command_count = len(get_verification_profile("backend").commands)
+        checkpoint_count = 1 + 2 * command_count + 1
+        for cancel_at in range(checkpoint_count):
+            with self.subTest(cancel_at=cancel_at):
+                destination = self.root / f"cancel-{cancel_at}"
+                workspace = materialize_workspace(
+                    self.source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest("app.py", self.original),),
+                    destination=destination,
+                )
+                executor = _Executor()
+                state = _StateStore((False,) * cancel_at + (True,))
+                attestation = verify_change(
+                    self.request,
+                    self.manifest,
+                    workspace,
+                    executor,
+                    state,
+                    runtime=self.runtime,
+                )
+                self.assertFalse(attestation.success)
+                self.assertTrue(attestation.canceled)
+                self.assertEqual(1, executor.close_calls)
+                expected_runs = min(command_count, cancel_at // 2)
+                self.assertEqual(expected_runs, len(executor.calls))
+
+    def test_rejects_tracked_drift_extra_files_and_git_metadata(self) -> None:
+        def mutate_source(_count: int, cwd: Path, _argv: tuple[str, ...]):
+            (cwd / "app.py").write_text("candidate changed source\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "verification_workspace_changed"):
+            self.verify(_Executor(on_run=mutate_source))
+
+        cases = (
+            ("extra.py", "verification_workspace_file_list_changed"),
+            (".git/index", "verification_git_metadata_created"),
+        )
+        for index, (path, error) in enumerate(cases):
+            with self.subTest(path=path):
+                workspace = materialize_workspace(
+                    self.source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest("app.py", self.original),),
+                    destination=self.root / f"malicious-{index}",
+                )
+
+                def create_file(_count: int, cwd: Path, _argv: tuple[str, ...]):
+                    target = cwd / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("forged\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, error):
+                    verify_change(
+                        self.request,
+                        self.manifest,
+                        workspace,
+                        _Executor(on_run=create_file),
+                        _StateStore(),
+                        runtime=self.runtime,
+                    )
+
+    def test_executor_and_cleanup_failures_produce_no_attestation(self) -> None:
+        executor = _Executor(
+            failure=SandboxError("sandbox_output_limit_exceeded")
+        )
+        with self.assertRaisesRegex(SandboxError, "sandbox_output_limit_exceeded"):
+            self.verify(executor)
+        self.assertEqual(1, executor.close_calls)
+
+        workspace = materialize_workspace(
+            self.source,
+            source_head_sha="a" * 40,
+            tracked_files=(digest("app.py", self.original),),
+            destination=self.root / "cleanup-failure",
+        )
+        executor = _Executor()
+        executor.cleanup_error = SandboxError("sandbox_cleanup_unconfirmed")
+        with self.assertRaisesRegex(SandboxError, "sandbox_cleanup_unconfirmed"):
+            verify_change(
+                self.request,
+                self.manifest,
+                workspace,
+                executor,
+                _StateStore(),
+                runtime=self.runtime,
+            )
+
+    def test_rechecks_workspace_after_container_removal(self) -> None:
+        executor = _Executor(
+            on_close=lambda: (self.workspace.root / "app.py").write_text(
+                "late background write\n", encoding="utf-8"
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "verification_workspace_changed"):
+            self.verify(executor)
+        self.assertEqual(1, executor.close_calls)
+
+    def test_rejects_untrusted_runtime_and_request_manifest_mismatch(self) -> None:
+        for kwargs in (
+            {"workflow_run_id": True},
+            {"workflow_run_id": 0},
+            {"image_digest": "repo@sha256:" + "c" * 64},
+            {"image_digest": "sha256:" + "C" * 64},
+            {"timeout_seconds": 0},
+            {"timeout_seconds": 901},
+            {"output_limit_bytes": 0},
+            {"output_limit_bytes": 1024 * 1024 + 1},
+        ):
+            with self.subTest(kwargs=kwargs):
+                values = {
+                    "workflow_run_id": 123,
+                    "image_digest": "sha256:" + "c" * 64,
+                    "timeout_seconds": 60,
+                    "output_limit_bytes": 65536,
+                    **kwargs,
+                }
+                with self.assertRaisesRegex(ValueError, "invalid_verification_runtime"):
+                    VerificationRuntimeMetadata(**values)
+
+        mismatched = replace(self.request, target_base_sha="d" * 40)
+        with self.assertRaisesRegex(ValueError, "verification_request_mismatch"):
+            verify_change(
+                mismatched,
+                self.manifest,
+                self.workspace,
+                _Executor(),
+                _StateStore(),
+                runtime=self.runtime,
+            )
+
+    def test_rejects_untrusted_cancel_and_executor_result_metadata(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_cancel_state"):
+            self.verify(_Executor(), _StateStore(("yes",)))  # type: ignore[arg-type]
+
+        workspace = materialize_workspace(
+            self.source,
+            source_head_sha="a" * 40,
+            tracked_files=(digest("app.py", self.original),),
+            destination=self.root / "invalid-command-result",
+        )
+
+        def forged_result(_count: int, _cwd: Path, _argv: tuple[str, ...]):
+            return CommandResult(
+                "forged-name",
+                "0" * 64,
+                0,
+                False,
+                1,
+                hashlib.sha256(b"output").hexdigest(),
+                "raw source",
+            )
+
+        with self.assertRaisesRegex(ValueError, "invalid_command_result"):
+            verify_change(
+                self.request,
+                self.manifest,
+                workspace,
+                _Executor(on_run=forged_result),
+                _StateStore(),
+                runtime=self.runtime,
+            )
 
 
 if __name__ == "__main__":
