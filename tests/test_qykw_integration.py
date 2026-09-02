@@ -1838,12 +1838,13 @@ class TestProductionBranchCoverage(unittest.TestCase):
         system = ReviewSystem()
         run = build_run_context(pull_event("opened"), system.gateway.get_pull_ref(PR_NUMBER))
         assert run is not None
-        plan = fixed_single_chunk_plan(pull_snapshot(), run)
-        subject._validate_plan_chunks(run, plan)
+        snapshot = pull_snapshot()
+        plan = fixed_single_chunk_plan(snapshot, run)
+        subject._validate_plan_chunks(run, snapshot, plan)
         with self.assertRaises(ValueError):
-            subject._validate_plan_chunks(run, replace(plan, chunks=(plan.chunks[0], plan.chunks[0])))
+            subject._validate_plan_chunks(run, snapshot, replace(plan, chunks=(plan.chunks[0], plan.chunks[0])))
         with self.assertRaises(ValueError):
-            subject._validate_plan_chunks(run, replace(plan, chunks=(replace(plan.chunks[0], paths=()),)))
+            subject._validate_plan_chunks(run, snapshot, replace(plan, chunks=(replace(plan.chunks[0], paths=()),)))
 
     def test_phase_publication_checkpoints_and_secondary_failures_are_explicit(self) -> None:
         from tools.qykw import phases as subject

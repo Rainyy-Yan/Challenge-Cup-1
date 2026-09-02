@@ -25,6 +25,7 @@ from tools.qykw.domain import (
 )
 from tools.qykw.github import GitHubGateway
 from tools.qykw.policy import authorize_command
+from tools.qykw.prompts import estimate_trusted_rules_input_tokens
 from tools.qykw.publish import ReviewPublisher, sanitize_public_text
 from tools.qykw.review import ReviewEngine
 from tools.qykw.state import RunStateStore
@@ -193,7 +194,15 @@ class QykwRunner:
             return self._cancel(record)
         try:
             plan = self.context_builder(snapshot, record.context)
-            result = self.advisory.handle(record.context, plan, record)
+            if isinstance(self.advisory, AdvisoryService):
+                result = self.advisory.handle(
+                    record.context,
+                    plan,
+                    record,
+                    trusted_rules=snapshot.trusted_rules,
+                )
+            else:
+                result = self.advisory.handle(record.context, plan, record)
         except Exception:
             return self._finish(record, RunStatus.FAILED, "advisory_failed")
         if self._cancelled(record):
@@ -352,12 +361,14 @@ class QykwRunner:
         if provider is None:
             raise ValueError("context_builder_required")
         capabilities = provider.capabilities()
+        trusted_input_reserve = estimate_trusted_rules_input_tokens(run, snapshot.trusted_rules)
         return build_context_plan(snapshot, run_id=run.run_id, repository_id=run.repository_id,
                                   repository_limit=capabilities.context_window,
                                   backend_context_window=capabilities.context_window,
                                   output_reserve=capabilities.max_output_tokens,
                                   safety_reserve_ratio=self.config.context.safety_reserve_ratio,
-                                  max_chunk_ratio=self.config.context.max_chunk_ratio)
+                                  max_chunk_ratio=self.config.context.max_chunk_ratio,
+                                  trusted_input_reserve=trusted_input_reserve)
 
     @staticmethod
     def _valid_event(event: object) -> bool:

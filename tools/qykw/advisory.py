@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from tools.qykw.domain import AdvisoryResult, CommandName, ContextPlan, RunContext, RunRecord, RunStage, RunStatus
+from tools.qykw.domain import AdvisoryResult, CommandName, ContextPlan, RepositoryFile, RunContext, RunRecord, RunStage, RunStatus
 from tools.qykw.prompts import build_analysis_request, build_plan_request
 from tools.qykw.provider import InferenceProvider, validate_provider_capabilities
 
@@ -22,7 +22,14 @@ class AdvisoryService:
     def __init__(self, provider: InferenceProvider) -> None:
         self.provider = provider
 
-    def handle(self, run: RunContext, plan: ContextPlan | None, record: RunRecord | None = None) -> AdvisoryResult:
+    def handle(
+        self,
+        run: RunContext,
+        plan: ContextPlan | None,
+        record: RunRecord | None = None,
+        *,
+        trusted_rules: tuple[RepositoryFile, ...] = (),
+    ) -> AdvisoryResult:
         if run.command.name is CommandName.HELP:
             return self.help(run)
         if run.command.name is CommandName.STATUS:
@@ -34,20 +41,20 @@ class AdvisoryService:
         if plan is None or not _valid_plan(run, plan):
             return _UNAVAILABLE
         if run.command.name is CommandName.ANALYZE:
-            return self.analyze(run, plan)
+            return self.analyze(run, plan, trusted_rules)
         if run.command.name is CommandName.PLAN:
-            return self.plan(run, plan)
+            return self.plan(run, plan, trusted_rules)
         return _UNAVAILABLE
 
     def help(self, run: RunContext) -> AdvisoryResult:
         del run
         return AdvisoryResult("qykw 帮助", "可使用：分析、计划、审查、复审、状态、总结、停止。", (), ("帮助内容为确定性说明。",))
 
-    def analyze(self, run: RunContext, plan: ContextPlan) -> AdvisoryResult:
-        return self._complete(build_analysis_request(run, plan))
+    def analyze(self, run: RunContext, plan: ContextPlan, trusted_rules: tuple[RepositoryFile, ...] = ()) -> AdvisoryResult:
+        return self._complete(build_analysis_request(run, plan, trusted_rules))
 
-    def plan(self, run: RunContext, plan: ContextPlan) -> AdvisoryResult:
-        return self._complete(build_plan_request(run, plan))
+    def plan(self, run: RunContext, plan: ContextPlan, trusted_rules: tuple[RepositoryFile, ...] = ()) -> AdvisoryResult:
+        return self._complete(build_plan_request(run, plan, trusted_rules))
 
     def status(self, run: RunContext, record: RunRecord) -> AdvisoryResult:
         del run

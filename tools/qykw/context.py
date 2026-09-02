@@ -17,6 +17,7 @@ from tools.qykw.domain import (
     ChangedFile,
     ChangedLine,
     ContextChunk,
+    ContextChunkKind,
     ContextPlan,
     CoverageReport,
     DiffHunk,
@@ -157,16 +158,19 @@ def build_context_plan(
     output_reserve: int,
     safety_reserve_ratio: float,
     max_chunk_ratio: float,
+    trusted_input_reserve: int = 0,
 ) -> ContextPlan:
     """Build a single-PR context plan with total and per-chunk hard limits."""
     _validate_snapshot(snapshot)
     _validate_run_identity(run_id, repository_id)
     plan_identity = _plan_identity(snapshot, run_id, repository_id)
     provenance_identity = _provenance_identity(snapshot, run_id, repository_id)
+    if not isinstance(trusted_input_reserve, int) or isinstance(trusted_input_reserve, bool) or trusted_input_reserve < 0:
+        raise ContextError("invalid_trusted_input_reserve")
     effective_budget, max_chunk_tokens = _effective_budget(
         repository_limit,
         backend_context_window,
-        output_reserve,
+        output_reserve + trusted_input_reserve,
         safety_reserve_ratio,
         max_chunk_ratio,
     )
@@ -286,9 +290,9 @@ def build_context_plan(
         )
     )
 
-    # Rules and related files are trusted/read-only context, never PR manifest
-    # entries.  They are appended only after every PR file has been triaged.
-    for reference in _ordered_references(snapshot.trusted_rules, snapshot.related_files):
+    # Related files remain untrusted reference context and never become PR
+    # manifest entries. Trusted rules use the separately budgeted prompt lane.
+    for reference in _ordered_references((), snapshot.related_files):
         _, _, chunk_index, used = _allocate_record(
             _reference_context_record(reference),
             plan_identity=plan_identity,
@@ -620,6 +624,13 @@ def _allocate_record(
                 paths=(record.path,),
                 text=piece,
                 estimated_tokens=tokens,
+                kind=(
+                    ContextChunkKind.REFERENCE
+                    if record.side == "REFERENCE"
+                    else ContextChunkKind.TRIAGE
+                    if record.side == "TRIAGE"
+                    else ContextChunkKind.DIFF
+                ),
             )
         )
         allocated = True

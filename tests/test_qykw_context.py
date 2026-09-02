@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
-from tools.qykw.domain import ChangedFile, ChangedLine, DiffSide, PullSnapshot
+from tools.qykw.domain import ChangedFile, ChangedLine, ContextChunkKind, DiffSide, PullSnapshot, RepositoryFile
 from tools.qykw.context import ContextError, build_context_plan, estimate_tokens, parse_hunks
 
 
@@ -82,6 +83,15 @@ def budget(**overrides: object) -> dict[str, object]:
 
 
 class TestContextPlanning(unittest.TestCase):
+    def test_trusted_rules_are_reserved_but_not_duplicated_as_reference_chunks(self) -> None:
+        rule = RepositoryFile("AGENTS.md", "b" * 40, "rule-sha", "r" * 200, "rules")
+        source = replace(snapshot(changed_file("src/app.py")), trusted_rules=(rule,))
+
+        plan = build_context_plan(source, **budget(trusted_input_reserve=250, max_chunk_ratio=1.0))
+
+        self.assertEqual(plan.effective_input_budget_tokens, 550)
+        self.assertTrue(all("AGENTS.md" not in chunk.paths for chunk in plan.chunks))
+
     def test_late_high_risk_file_is_not_silently_lost(self) -> None:
         files = [changed_file(f"docs/{index:03}.txt") for index in range(101)]
         files.append(changed_file("auth/permissions.py"))
@@ -221,6 +231,8 @@ class TestContextPlanning(unittest.TestCase):
         self.assertGreater(len(plan.chunks), 1)
         diff_chunks = [chunk for chunk in plan.chunks if "side=RIGHT" in chunk.text]
         self.assertTrue(diff_chunks)
+        self.assertTrue(all(chunk.kind is ContextChunkKind.DIFF for chunk in diff_chunks))
+        self.assertTrue(any(chunk.kind is ContextChunkKind.TRIAGE for chunk in plan.chunks))
         for chunk in diff_chunks:
             self.assertIn("repo=owner/repo", chunk.text)
             self.assertIn("pr=53", chunk.text)
