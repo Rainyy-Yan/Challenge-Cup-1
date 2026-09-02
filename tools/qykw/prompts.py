@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 PROMPT_VERSION = "qykw-review-v1"
 _IDENTITY = "启元开物独立工程审查机器人 qykw"
 _DEADLINE_SECONDS = 900
-_MAX_OUTPUT_TOKENS = 4096
+_MAX_OUTPUT_TOKENS = 16_384
 _CHANGE_MAX_OUTPUT_TOKENS = 64_000
 _TRUSTED_RULE_PATHS = frozenset({"AGENTS.md", ".github/qykw.toml"})
 

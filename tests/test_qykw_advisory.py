@@ -30,7 +30,7 @@ class RecordingProvider:
         self.calls: list[object] = []
 
     def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(100_000, 8_000, True, frozenset({"maximum"}))
+        return ProviderCapabilities(100_000, 20_000, True, frozenset({"maximum"}))
 
     def complete(self, request: object) -> InferenceResponse:
         self.calls.append(request)
