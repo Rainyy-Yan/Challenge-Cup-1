@@ -196,6 +196,29 @@ def _canonical_case_id(case_id: object) -> str | None:
     return case_id.strip().casefold()
 
 
+def _valid_dataset_profile_ids(profile_ids: object, errors: list[str]) -> set[str]:
+    """Validate and normalize the sole profile universe used by reports."""
+    valid_profile_ids: set[str] = set()
+    if not isinstance(profile_ids, list):
+        return valid_profile_ids
+    for index, profile_id in enumerate(profile_ids):
+        if (
+            not isinstance(profile_id, str)
+            or not profile_id.strip()
+            or profile_id != profile_id.strip()
+        ):
+            errors.append(
+                f"dataset.profile_ids[{index}] must be a non-empty untrimmed string"
+            )
+            continue
+        canonical_profile_id = profile_id.casefold()
+        if canonical_profile_id in valid_profile_ids:
+            errors.append(f"duplicate dataset profile_id: {profile_id}")
+        else:
+            valid_profile_ids.add(canonical_profile_id)
+    return valid_profile_ids
+
+
 def _reviewer_values(
     labels: object, reviewer_ids: list[str], allowed: set[str]
 ) -> tuple[str, str] | None:
@@ -417,16 +440,7 @@ def validate_truth(data: dict) -> list[str]:
         errors.append("at least 50 cases are required")
 
     profile_ids = dataset.get("profile_ids")
-    valid_profile_ids: set[str] = set()
-    if isinstance(profile_ids, list):
-        for profile_id in profile_ids:
-            if not isinstance(profile_id, str) or not profile_id.strip():
-                continue
-            canonical_profile_id = profile_id.strip().casefold()
-            if canonical_profile_id in valid_profile_ids:
-                errors.append(f"duplicate dataset profile_id: {profile_id}")
-            else:
-                valid_profile_ids.add(canonical_profile_id)
+    valid_profile_ids = _valid_dataset_profile_ids(profile_ids, errors)
     if len(valid_profile_ids) < 3:
         errors.append("dataset.profile_ids must contain at least 3 distinct non-empty values")
     profile_universe_valid = len(valid_profile_ids) >= 3
@@ -727,7 +741,9 @@ def build_scorecard(data: dict) -> dict:
             },
             "gates": _quality_gates(
                 cases=len(data["dataset"]["cases"]),
-                profiles=len(data["dataset"]["profile_ids"]),
+                profiles=len(
+                    _valid_dataset_profile_ids(data["dataset"]["profile_ids"], [])
+                ),
                 claims_assessable_share=(
                     sum(record["final_label"] != "unassessable" for record in claims)
                     / len(claims)

@@ -556,11 +556,27 @@ class TestTruthValidation(unittest.TestCase):
 
     def test_rejects_normalized_duplicate_dataset_profile_ids(self):
         truth = valid_truth()
-        truth["dataset"]["profile_ids"] = [" Profile-1 ", "profile-1", "profile-2", "profile-3"]
+        truth["dataset"]["profile_ids"] = ["profile-1", "PROFILE-1", "profile-2", "profile-3"]
         self.assertEqual(
             validate_truth(truth),
-            ["duplicate dataset profile_id: profile-1"],
+            ["duplicate dataset profile_id: PROFILE-1"],
         )
+
+    def test_rejects_invalid_dataset_profile_id_entries_without_reporting_extra_profiles(self):
+        for profile_id in ("", None, "   ", " profile-4", "profile-4 "):
+            with self.subTest(profile_id=profile_id):
+                truth = valid_truth()
+                truth["dataset"]["profile_ids"].append(profile_id)
+
+                self.assertEqual(
+                    validate_truth(truth),
+                    [
+                        "dataset.profile_ids[3] must be a non-empty untrimmed string"
+                    ],
+                )
+                scorecard = build_scorecard(truth)
+                self.assertEqual(scorecard["overall_status"], "not_assessable")
+                self.assertNotEqual(scorecard["data_quality"]["gates"]["profiles"]["actual"], 6)
 
 
 class TestScorecard(unittest.TestCase):
@@ -574,6 +590,7 @@ class TestScorecard(unittest.TestCase):
         self.assertEqual(scorecard["data_quality"]["decision"], "pass")
         self.assertIn("provenance", scorecard)
         self.assertIn("limitations", scorecard)
+        self.assertEqual(scorecard["data_quality"]["gates"]["profiles"]["actual"], 3)
 
     def test_markdown_renders_each_data_quality_gate_with_json_values(self):
         scorecard = build_scorecard(passing_truth())
