@@ -95,6 +95,32 @@ class QueuedRuns:
 
 
 class TestQykwWorkflow(unittest.TestCase):
+    def test_ci_installs_pinned_test_dependencies_for_python_suites(self) -> None:
+        jobs = workflow_jobs(CI)
+        install = (
+            "python -m pip install --disable-pip-version-check "
+            "-r requirements-dev.txt"
+        )
+        for job_name in ("qykw-coverage", "backend"):
+            with self.subTest(job=job_name):
+                commands = tuple(
+                    str(step.get("run", ""))
+                    for step in jobs[job_name]["steps"]
+                    if isinstance(step, dict)
+                )
+                self.assertIn(install, commands)
+
+        self.assertEqual(
+            jobs["backend"]["env"],
+            {"TEMP": "${{ runner.temp }}", "TMP": "${{ runner.temp }}"},
+        )
+
+        requirements = (ROOT / "requirements-dev.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertIn("coverage==7.16.0", requirements)
+        self.assertIn("PyYAML==6.0.3", requirements)
+
     def test_ci_has_an_isolated_no_secret_qykw_coverage_gate(self) -> None:
         jobs = workflow_jobs(CI)
         self.assertIn("qykw-coverage", jobs)

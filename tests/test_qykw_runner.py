@@ -636,8 +636,9 @@ class TestQykwRunner(unittest.TestCase):
             input_path = Path(directory) / "input.json"
             output_path = Path(directory) / "output.json"
             input_path.write_text(json.dumps(artifact_for("analyze", complete_run(), {"analysis": {"result_ref": "sha256:abc"}})), encoding="utf-8")
-            result = main(["--phase", "record-failure", "--artifact", str(input_path),
-                           "--output", str(output_path), "--error-code", "provider_failed"])
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": ""}):
+                result = main(["--phase", "record-failure", "--artifact", str(input_path),
+                               "--output", str(output_path), "--error-code", "provider_failed"])
             payload = json.loads(output_path.read_text(encoding="utf-8")) if output_path.exists() else {}
         self.assertEqual(result, 0)
         self.assertEqual(payload["payload"], {"error_code": "provider_failed"})
