@@ -158,6 +158,7 @@ class TestQykwPromptBuilders(unittest.TestCase):
         for name, build in builders:
             with self.subTest(request_kind=name):
                 self.assertEqual(build().reasoning_profile, "maximum")
+                self.assertGreaterEqual(build().max_output_tokens, 16_384)
 
     def test_each_builder_declares_its_own_versioned_strict_schema(self) -> None:
         builders = (

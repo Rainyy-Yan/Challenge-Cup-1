@@ -49,7 +49,7 @@ class ReviewEngine:
         try:
             candidates: list[_SourcedCandidate] = []
             for chunk in plan.chunks:
-                if chunk.kind is ContextChunkKind.REFERENCE:
+                if chunk.kind is not ContextChunkKind.DIFF:
                     continue
                 request = build_review_request(
                     run,
