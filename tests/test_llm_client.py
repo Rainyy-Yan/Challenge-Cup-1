@@ -23,10 +23,34 @@ from core.llm import (
     OpenAIAdapter,
     RealLLM,
     classify_http_error,
+    parse_json,
 )
 from core.model_router import ModelSpec, SmartModelRouter
 
 STATE = {"hits": 0, "mode": "normal"}
+
+
+class TestStructuredOutputParsing(unittest.TestCase):
+    def test_parse_json_ignores_think_block_that_echoes_json(self) -> None:
+        raw = (
+            '<think>先确认示例 {"ok": false}，再输出答案。</think>\n\n'
+            '```json\n{"ok": true}\n```'
+        )
+
+        self.assertEqual(parse_json(raw), {"ok": True})
+
+    def test_parse_json_uses_last_complete_top_level_object(self) -> None:
+        raw = '示例：{"ok": false}\n最终答案：{"ok": true}'
+
+        self.assertEqual(parse_json(raw), {"ok": True})
+
+    def test_parse_json_preserves_think_tags_inside_json_strings(self) -> None:
+        raw = '{"content": "保留 <think>原文</think> 标签", "ok": true}'
+
+        self.assertEqual(parse_json(raw), {
+            "content": "保留 <think>原文</think> 标签",
+            "ok": True,
+        })
 
 
 class TestProviderErrorClassification(unittest.TestCase):

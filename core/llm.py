@@ -858,7 +858,7 @@ def build_llm() -> RealLLM | MockLLM:
     legacy_base_url = os.environ.get("AGENTEDU_BASE_URL", "").strip()
     minimax_base_url = os.environ.get(
         "AGENTEDU_MINIMAX_BASE_URL",
-        legacy_base_url or "https://api.minimax.io/v1",
+        legacy_base_url or "https://api.minimaxi.com/v1",
     ).strip()
     deepseek_base_url = os.environ.get(
         "AGENTEDU_DEEPSEEK_BASE_URL",
@@ -897,16 +897,35 @@ def parse_json(raw: str, fallback: dict | None = None) -> dict:
     if not raw:
         return fallback or {}
     txt = raw.strip()
+    txt = re.sub(
+        r"^(?:\s*<think\b[^>]*>.*?</think\s*>\s*)+",
+        "",
+        txt,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
     if txt.startswith("```"):
         txt = re.sub(r"^```[a-zA-Z]*\n?", "", txt)
         txt = re.sub(r"\n?```$", "", txt)
     try:
         return json.loads(txt)
     except json.JSONDecodeError:
-        start, end = txt.find("{"), txt.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(txt[start:end + 1])
-            except json.JSONDecodeError:
-                pass
+        pass
+
+    decoder = json.JSONDecoder()
+    last_object = None
+    offset = 0
+    while True:
+        start = txt.find("{", offset)
+        if start < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(txt, start)
+        except json.JSONDecodeError:
+            offset = start + 1
+            continue
+        if isinstance(value, dict):
+            last_object = value
+        offset = max(end, start + 1)
+    if last_object is not None:
+        return last_object
     return fallback or {}
