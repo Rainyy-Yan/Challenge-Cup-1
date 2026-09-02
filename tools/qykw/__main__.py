@@ -484,6 +484,7 @@ def _safe_code(error: BaseException) -> str:
     from tools.qykw.context import ContextError
     from tools.qykw.domain import InferenceError, InferenceErrorCode
     from tools.qykw.github import GitHubError
+    from tools.qykw.phases import AnalyzePhaseError, AnalyzePhaseErrorCode
     from tools.qykw.prompts import PromptError
     from tools.qykw.provider import ProviderError
 
@@ -491,6 +492,8 @@ def _safe_code(error: BaseException) -> str:
         return f"inference_{error.code.value}"
     if isinstance(error, InferenceError) and isinstance(error.failure.code, InferenceErrorCode):
         return f"inference_{error.failure.code.value}"
+    if isinstance(error, AnalyzePhaseError) and isinstance(error.code, AnalyzePhaseErrorCode):
+        return error.code.value
     for error_type, public_code in (
         (ConfigError, "analysis_config_failed"),
         (ContextError, "analysis_context_failed"),

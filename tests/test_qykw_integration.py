@@ -478,6 +478,39 @@ class TestPhaseArtifactIntegration(unittest.TestCase):
                 result = publish.publish({"version": 1, "phase": "analyze", "run": _run_payload(run), "payload": payload})
                 self.assertEqual(result["payload"]["status"], expected)  # type: ignore[index]
 
+    def test_phase_analyze_wraps_unknown_failures_at_exact_stage_boundaries(self) -> None:
+        from tools.qykw import __main__ as entry
+        from tools.qykw.phases import (
+            AnalyzePhaseError,
+            AnalyzePhaseErrorCode,
+            ProductionPhaseController,
+            _run_payload,
+        )
+
+        for stage, expected in (
+            ("provider", AnalyzePhaseErrorCode.PROVIDER_SETUP_FAILED),
+            ("context", AnalyzePhaseErrorCode.CONTEXT_BUILD_FAILED),
+            ("review", AnalyzePhaseErrorCode.REVIEW_EXECUTION_FAILED),
+        ):
+            with self.subTest(stage=stage):
+                system, run = self.active_phase_system()
+                artifact = {"version": 1, "phase": "authorize", "run": _run_payload(run),
+                            "payload": {"authorization": "accepted"}}
+                controller = ProductionPhaseController("analyze", {})
+                controller._read_services = lambda: (system.gateway, system.state, qykw_config())  # type: ignore[method-assign]
+                patches = {
+                    "provider": patch("tools.qykw.phases.ResponsesInferenceProvider.from_env", side_effect=RuntimeError("sensitive provider detail")),
+                    "context": patch("tools.qykw.phases.build_context_plan", side_effect=RuntimeError("sensitive context detail")),
+                    "review": patch("tools.qykw.phases.ReviewEngine.review", side_effect=RuntimeError("sensitive review detail")),
+                }
+                with patch("tools.qykw.phases.ResponsesInferenceProvider.from_env", return_value=system.provider), \
+                     patches[stage], self.assertRaises(AnalyzePhaseError) as caught:
+                    controller.analyze(artifact)
+                self.assertIs(caught.exception.code, expected)
+                self.assertEqual(str(caught.exception), expected.value)
+                self.assertNotIn("sensitive", repr(caught.exception))
+                self.assertEqual(entry._safe_code(caught.exception), expected.value)
+
     def test_phase_record_failure_and_controller_construction(self) -> None:
         from tools.qykw.phases import ProductionPhaseController, build_production_controller, _run_payload
 
