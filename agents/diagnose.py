@@ -22,10 +22,12 @@ from core.schema import Diagnosis, Mastery
 class DiagnoseAgent:
     name = "学情诊断Agent"
 
-    def __init__(self, llm, kp_path=config.KP_PATH, pretest_path=config.PRETEST_PATH):
+    def __init__(self, llm, kp_path=config.KP_PATH, pretest_path=config.PRETEST_PATH,
+                 *, items: list[dict] | None = None):
         self.llm = llm
         self.kps = json.loads(kp_path.read_text(encoding="utf-8"))["points"]
-        self.items = json.loads(pretest_path.read_text(encoding="utf-8"))["items"]
+        self.items = (list(items) if items is not None else
+                      json.loads(pretest_path.read_text(encoding="utf-8"))["items"])
         self._kp_index = {k["id"]: k for k in self.kps}
         self._item_index = {i["id"]: i for i in self.items}
 

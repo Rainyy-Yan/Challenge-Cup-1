@@ -11,33 +11,198 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import mimetypes
 import uuid
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 
 import config
 from agents.examiner import ExaminerAgent
 from agents.intake import IntakeAgent
 from core.cat import AdaptiveSession
-from core.llm import build_llm
+from core.demo_items import formal_demo_items
+from core.demo_sources import (
+    publicly_verified_source_ids,
+    validate_demo_source_manifest,
+)
+from core.llm import MockLLM, build_llm
 from core.retrieval import Retriever
 from orchestrator import Orchestrator, load_profile
+from tools.ingest import ingest, quality_gate, write_stage
 
-WEB = Path(__file__).resolve().parent / "web"
+ROOT = Path(__file__).resolve().parent
+WEB = ROOT / "web"
+INCOMING_DIR = ROOT / "data" / "incoming"
+UPLOAD_STAGE_DIR = ROOT / "data" / "staged" / "uploads"
+# 与 tools.ingest 支持的格式保持完全一致。浏览器端也使用这份名单，避免
+# 前端显示可上传、后端却无法切片的情况。
+ALLOWED_UPLOAD_SUFFIXES = frozenset({".txt", ".md", ".pdf", ".docx",
+                                     ".csv", ".tsv", ".xlsx"})
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_REQUEST_BYTES = 28 * 1024 * 1024
 SESSIONS: dict[str, tuple[Orchestrator, object]] = {}
 INTERVIEWS: dict[str, AdaptiveSession] = {}
-_ITEMS = json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+_ITEMS = formal_demo_items(
+    json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+)
 _KPS = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
 _KP_INDEX = {k["id"]: k for k in _KPS}
+_MODEL_CLIENT = None
+_MODEL_CLIENT_LOCK = Lock()
+
+
+def get_model_client():
+    global _MODEL_CLIENT
+    if _MODEL_CLIENT is None:
+        with _MODEL_CLIENT_LOCK:
+            if _MODEL_CLIENT is None:
+                _MODEL_CLIENT = build_llm()
+    return _MODEL_CLIENT
+
+
+def model_status_payload() -> dict:
+    client = get_model_client()
+    if isinstance(client, MockLLM):
+        return {
+            "mode": "offline",
+            "strategy": "deterministic-rules",
+            "models": [],
+            "router": {"fallbacks": 0, "all_models_failed": 0},
+        }
+    return client.model_status()
+
+
+class UploadError(ValueError):
+    """资料上传不符合受控摄入规范。"""
+
+
+def _upload_name(filename: object) -> tuple[str, str]:
+    """校验原始文件名；不重命名或猜测扩展名，避免绕过格式门禁。"""
+    if not isinstance(filename, str):
+        raise UploadError("缺少文件名")
+    name = filename.strip()
+    if not name or len(name) > 120:
+        raise UploadError("文件名不能为空，且不得超过 120 个字符")
+    if "\x00" in name or "/" in name or "\\" in name or Path(name).name != name:
+        raise UploadError("文件名不能包含路径")
+    suffix = Path(name).suffix.lower()
+    if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+        allowed = "、".join(sorted(ALLOWED_UPLOAD_SUFFIXES))
+        raise UploadError(f"不支持该格式；仅接收 {allowed}")
+    return name, suffix
+
+
+def _upload_source(value: object) -> str:
+    """资料来源说明是复核入口，不能只留一个没有上下文的文件名。"""
+    if not isinstance(value, str):
+        raise UploadError("请填写资料来源、版本或授权说明")
+    source = " ".join(value.split())
+    if len(source) < 4:
+        raise UploadError("资料来源说明至少填写 4 个字符")
+    if len(source) > 500:
+        raise UploadError("资料来源说明不得超过 500 个字符")
+    return source
+
+
+def _upload_bytes(encoded: object) -> bytes:
+    """严格解码 Base64，并在落盘前执行大小与空文件检查。"""
+    if not isinstance(encoded, str) or not encoded:
+        raise UploadError("没有读取到文件内容")
+    # Base64 最多约为原始大小的 4/3；先拦截异常大的 JSON 字段，避免不必要的解码。
+    max_encoded = ((MAX_UPLOAD_BYTES + 2) // 3) * 4
+    if len(encoded) > max_encoded:
+        raise UploadError("文件超过 20 MiB 限制")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise UploadError("文件内容编码无效") from exc
+    if not content:
+        raise UploadError("不接收空文件")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise UploadError("文件超过 20 MiB 限制")
+    return content
+
+
+def stage_material(filename: object, encoded: object, source_description: object,
+                   rights_confirmed: object, *, incoming_dir: Path = INCOMING_DIR,
+                   staging_root: Path = UPLOAD_STAGE_DIR) -> dict:
+    """把原始资料暂存、切片、质检；此函数绝不调用 apply_to_kb。
+
+    资料先保存在独立的 incoming 目录。切片结果进入本次上传独立的暂存目录，
+    合格与隔离内容都留下，等待人工查看来源、内容和质量报告后再走正式入库流程。
+    """
+    original_name, _ = _upload_name(filename)
+    source = _upload_source(source_description)
+    if rights_confirmed is not True:
+        raise UploadError("请确认资料可用于本项目，且不含学习者个人信息")
+    content = _upload_bytes(encoded)
+
+    upload_id = uuid.uuid4().hex[:12]
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    stored = incoming_dir / f"{upload_id}_{original_name}"
+    stored.write_bytes(content)
+
+    # ingest 只生成 sourced / quarantined 的暂存切片；quality_gate 不会删除原文。
+    result = ingest([stored])
+    if not result["staged"]:
+        reasons = "；".join(reason for _, reason in result["skipped"])
+        detail = f"（{reasons}）" if reasons else ""
+        raise UploadError(
+            f"未提取到可复核内容{detail}；请检查文件格式、内容和解析工具"
+        )
+    quality_gate(result["staged"])
+    stage_dir = staging_root / upload_id
+    write_stage(result, stage_dir)
+
+    sourced = [s for s in result["staged"] if s.status == "sourced"]
+    quarantined = [s for s in result["staged"] if s.status == "quarantined"]
+    manifest = {
+        "upload_id": upload_id,
+        "original_filename": original_name,
+        "stored_filename": stored.name,
+        "source_description": source,
+        "rights_confirmed": True,
+        "bytes": len(content),
+        "review_state": "pending_manual_review",
+        "knowledge_base_written": False,
+        "verified": False,
+        "next_steps": [
+            "人工核对原始资料、文件指纹和每条切片的来源位置",
+            "查看隔离原因并处理冲突、错配或待归类内容",
+            "完成独立外部证据复核后，才可由人工标记 verified",
+        ],
+    }
+    (stage_dir / "upload_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "upload_id": upload_id,
+        "filename": original_name,
+        "bytes": len(content),
+        "sourced": len(sourced),
+        "quarantined": len(quarantined),
+        "unassigned": sum(1 for s in sourced if s.kp is None),
+        "skipped": [{"file": name, "reason": reason}
+                    for name, reason in result["skipped"]],
+        "review_state": manifest["review_state"],
+        "knowledge_base_written": False,
+        "verified": False,
+        "next_steps": manifest["next_steps"],
+    }
 
 
 def _examiner():
     if not config.EXAMINER_ENABLED:
         return None
-    return ExaminerAgent(build_llm(), Retriever.from_jsonl(config.KB_PATH), _KP_INDEX)
+    return ExaminerAgent(
+        get_model_client(),
+        Retriever.from_jsonl(config.KB_PATH, demo_only=True),
+        _KP_INDEX,
+    )
 
 
 def list_profiles() -> list[dict]:
@@ -62,6 +227,20 @@ def session_payload(sid: str) -> dict:
     data["state"] = orch.state
     data["kp_index"] = kp_index
     data["path_names"] = [kp_index[k]["name"] for k in session.path]
+    # 资源展示必须把来源、核实状态和人工备注一并带到前端。只给 source_id
+    # 会让评委看不到“这条断言的依据是否已核实”，也无法核对具体来源。
+    publicly_verified = publicly_verified_source_ids()
+    data["kb"] = {
+        c.id: {
+            "title": c.title,
+            "source": c.source,
+            "verified": c.verified and c.id in publicly_verified,
+            "source_note": c.source_note,
+        }
+        for c in orch.retriever.chunks
+        if c.demo_eligible
+    }
+    validate_demo_source_manifest(data["kb"], artifact="在线会话")
     return data
 
 
@@ -82,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
+        if path == "/api/model-status":
+            return self._json(model_status_payload())
         if path == "/api/profiles":
             return self._json(list_profiles())
         if path.startswith("/api/session/"):
@@ -99,7 +280,12 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, target.read_bytes(), ctype)
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return self._json({"error": "请求长度无效"}, 400)
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            return self._json({"error": "请求超过 28 MiB 限制"}, 413)
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
@@ -111,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
                 profile = load_profile(pid)
             except FileNotFoundError:
                 return self._json({"error": f"没有画像 {pid}"}, 404)
-            orch = Orchestrator()
+            orch = Orchestrator(llm=get_model_client())
             session = orch.run(profile, max_kp=int(body.get("max_kp", 3)))
             sid = uuid.uuid4().hex[:12]
             SESSIONS[sid] = (orch, session)
@@ -119,12 +305,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/intake":
             text = body.get("text", "")
-            agent = IntakeAgent(build_llm())
+            if not isinstance(text, str) or len(text.strip()) < 8:
+                return self._json({"error": "请至少写 8 个字符的学习情况"}, 400)
+            if len(text) > 2000:
+                return self._json({"error": "学习情况不得超过 2000 个字符"}, 400)
+            agent = IntakeAgent(get_model_client())
             bg = agent.parse(text)
             ex = _examiner()
             analysis = ex.analyze(bg, text) if ex else {}
             return self._json({"background": bg, "clarify": agent.clarify(bg),
                                "analysis": analysis})
+
+        if self.path == "/api/materials/stage":
+            try:
+                report = stage_material(
+                    body.get("filename"), body.get("content_base64"),
+                    body.get("source_description"), body.get("rights_confirmed"),
+                )
+            except UploadError as exc:
+                return self._json({"error": str(exc)}, 400)
+            except Exception as exc:                       # noqa: BLE001
+                # 原始文件仍会保留在 incoming，避免处理失败时静默丢失资料。
+                return self._json({"error": f"暂存处理失败：{type(exc).__name__} {exc}"}, 500)
+            return self._json(report, 201)
 
         if self.path == "/api/interview/start":
             sid = uuid.uuid4().hex[:12]
@@ -157,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             profile = {"id": f"LIVE-{iid[:6]}", "name": "本次访谈",
                        "background": body.get("background", {}),
                        "responses": iv.responses()}
-            orch = Orchestrator()
+            orch = Orchestrator(llm=get_model_client())
             session = orch.run(profile, max_kp=int(body.get("max_kp", 4)))
             sid = uuid.uuid4().hex[:12]
             SESSIONS[sid] = (orch, session)

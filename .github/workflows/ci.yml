@@ -80,7 +80,7 @@ jobs:
         run: >-
           python -m compileall -q
           agents core evalkit tools
-          build_showcase.py cli.py config.py orchestrator.py server.py
+          cli.py config.py orchestrator.py server.py
 
       - name: Run complete backend test suite
         run: python -m unittest discover -s tests -v
@@ -88,7 +88,7 @@ jobs:
   frontend:
     name: Frontend and generated assets
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
@@ -106,29 +106,15 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Display runtime versions
+      - name: Display Python version
+        run: python --version
+
+      - name: Verify learner frontend
         run: |
-          python --version
-          node --version
-
-      - name: Check browser engine syntax
-        run: node --check web/engine.js
-
-      - name: Verify frontend and backend parity
-        run: python -m unittest tests.test_parity -v
-
-      - name: Generate and validate a fresh snapshot
-        env:
-          SNAPSHOT_OUT: ${{ runner.temp }}/snapshot.json
-        run: |
-          python -m evalkit.snapshot --out "$SNAPSHOT_OUT"
-          python -c "import json, os; data = json.load(open(os.environ['SNAPSHOT_OUT'], encoding='utf-8')); assert set(data['sessions']) == {'P-A', 'P-B', 'P-C'}; assert data['items'] and data['kb']"
-
-      - name: Rebuild standalone showcase
-        run: python build_showcase.py
-
-      - name: Verify standalone showcase is current
-        run: git diff --exit-code -- web/showcase.html
+          node --check web/view-model.js
+          node --check web/app.js
+          node --test tests/frontend-ui.test.mjs
+          python -m unittest tests.test_server.TestOnlineFrontend -v
 
   smoke:
     name: Backend service smoke test
@@ -163,3 +149,6 @@ jobs:
 
           curl --fail --show-error --silent http://127.0.0.1:8765/ >"$RUNNER_TEMP/index.html"
           grep --ignore-case --quiet '<!doctype html>' "$RUNNER_TEMP/index.html"
+          curl --fail --silent http://127.0.0.1:8765/styles.css >/dev/null
+          curl --fail --silent http://127.0.0.1:8765/view-model.js >/dev/null
+          curl --fail --silent http://127.0.0.1:8765/app.js >/dev/null

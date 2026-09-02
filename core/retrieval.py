@@ -58,14 +58,36 @@ class Retriever:
         self._n = len(chunks)
 
     @classmethod
-    def from_jsonl(cls, path: str | Path) -> "Retriever":
+    def from_jsonl(cls, path: str | Path, *, demo_only: bool = False) -> "Retriever":
+        """从知识库读取切片。
+
+        ``demo_only`` 只加载允许在正式 Demo 中使用的切片。被排除的
+        资料仍留在原始库中，便于补齐可访问的原始来源后重新复核；它们不能
+        因为仍在 JSONL 文件里就重新出现在演示内容中。
+        """
         chunks = []
+        known = {f.name for f in dataclasses.fields(Chunk)}
         with open(path, encoding="utf-8") as fh:
-            for line in fh:
+            for line_number, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 rec = json.loads(line)
+                if not isinstance(rec, dict):
+                    raise ValueError(
+                        f"知识库第 {line_number} 行不是对象，无法读取切片"
+                    )
+                chunk_id = rec.get("id", "<missing id>")
+                for field in ("verified", "demo_eligible"):
+                    if field in rec and not isinstance(rec[field], bool):
+                        raise ValueError(
+                            f"知识库切片 {chunk_id!r}（第 {line_number} 行）的 "
+                            f"{field} 必须为布尔值"
+                        )
+                # 先按原始记录过滤，避免已排除的失效来源因缺字段或结构错误
+                # 影响正式 Demo 的加载。
+                if demo_only and not rec.get("demo_eligible", True):
+                    continue
                 # 只取 Chunk 认识的字段。
                 #
                 # 端到端跑出来的教训：摄入工具给切片加了 origin 字段，
@@ -76,8 +98,13 @@ class Retriever:
                 # 知识库是多个工具共同写入的，字段会随工具演进而增加。
                 # 读取端必须对未知字段容错，否则任何一个工具加字段
                 # 都会把整个系统打死。
-                known = {f.name for f in dataclasses.fields(Chunk)}
-                chunks.append(Chunk(**{k: v for k, v in rec.items() if k in known}))
+                try:
+                    chunk = Chunk(**{k: v for k, v in rec.items() if k in known})
+                except TypeError as exc:
+                    raise ValueError(
+                        f"知识库切片 {chunk_id!r}（第 {line_number} 行）字段无效"
+                    ) from exc
+                chunks.append(chunk)
         return cls(chunks)
 
     def _idf(self, term: str) -> float:

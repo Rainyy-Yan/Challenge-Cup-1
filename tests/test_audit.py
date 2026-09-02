@@ -12,11 +12,11 @@
 
 import unittest
 
-from agents.audit import AuditAgent
+from agents.audit import AuditAgent, semantic_boundary_issue
 import config
 from core.llm import MockLLM
 from core.retrieval import Retriever
-from core.schema import (Claim, VERDICT_CONTRADICTED, VERDICT_SUPPORTED,
+from core.schema import (Chunk, Claim, VERDICT_CONTRADICTED, VERDICT_SUPPORTED,
                          VERDICT_UNSUPPORTED)
 
 
@@ -30,12 +30,12 @@ class TestAudit(unittest.TestCase):
 
     def test_true_claims_pass(self):
         truths = [
-            Claim(text="示教器三位使能开关只有保持在中间位时伺服才能上电。",
+            Claim(text="三位使能装置有松开、中间位和按死三种状态。",
                   source_id="KB-003"),
-            Claim(text="T1模式下末端法兰中心的移动速度被限制在250毫米每秒以内。",
+            Claim(text="手动模式速度最高为250 mm/s。",
                   source_id="KB-004"),
-            Claim(text="报警SRVO-005含义为机器人超程。", source_id="KB-017"),
-            Claim(text="机器人安全围栏高度不低于1.4米。", source_id="KB-022"),
+            Claim(text="SRVO-001 表示操作面板急停被按下。", source_id="KB-015"),
+            Claim(text="带联锁的安全门打开时应停止自动运行。", source_id="KB-022"),
         ]
         kept, dropped = self.auditor.review(truths)
         self.assertEqual(len(dropped), 0, [d.audit_note for d in dropped])
@@ -66,7 +66,7 @@ class TestAudit(unittest.TestCase):
 
     def test_altered_number_is_contradicted(self):
         """句式照抄，把 250 改成 200。这类最难靠人眼发现。"""
-        c = Claim(text="T1模式下末端法兰中心的移动速度被限制在200毫米每秒以内。",
+        c = Claim(text="手动模式速度最高为200 mm/s。",
                   source_id="KB-004")
         kept, dropped = self.auditor.review([c])
         self.assertEqual(len(kept), 0)
@@ -74,8 +74,8 @@ class TestAudit(unittest.TestCase):
         self.assertIn("200", dropped[0].audit_note)
 
     def test_wrong_alarm_code_mapping_is_caught(self):
-        """把 SRVO-005 的含义安到 SRVO-002 上。"""
-        c = Claim(text="报警SRVO-002含义为机器人超程。", source_id="KB-016")
+        """把操作面板急停的含义安到示教器急停上。"""
+        c = Claim(text="SRVO-002 表示操作面板急停被按下。", source_id="KB-016")
         kept, dropped = self.auditor.review([c])
         self.assertEqual(len(kept), 0)
 
@@ -85,9 +85,9 @@ class TestAudit(unittest.TestCase):
         planted = [
             Claim(text="国家标准规定该项检测每72小时执行一次。", source_id="KB-021"),
             Claim(text="TCP标定四个姿态的夹角必须小于10度。", source_id="KB-006"),
-            Claim(text="安全围栏高度不低于2.4米。", source_id="KB-022"),
+            Claim(text="手动模式速度最高为900 mm/s。", source_id="KB-004"),
             Claim(text="子程序调用层数上限为32层。", source_id="KB-012"),
-            Claim(text="软限位修改后立即生效无需重启。", source_id="KB-025"),
+            Claim(text="三位使能装置有8种状态。", source_id="KB-003"),
             Claim(text="控制器会自动切换到备用固件分区。", source_id=None),
         ]
         kept, dropped = self.auditor.review(planted)
@@ -96,9 +96,201 @@ class TestAudit(unittest.TestCase):
                                 f"拦截率仅 {rate:.0%}，漏网：{[k.text for k in kept]}")
 
     def test_evidence_score_recorded(self):
-        c = Claim(text="报警SRVO-005含义为机器人超程。", source_id="KB-017")
+        c = Claim(text="SRVO-001 表示操作面板急停被按下。", source_id="KB-015")
         self.auditor.review([c])
         self.assertGreater(c.evidence_score, config.EVIDENCE_MIN)
+
+    def test_scope_expansion_is_contradicted(self):
+        retriever = Retriever([Chunk(
+            id="KB-SCOPE", kp="KP-X", title="特定控制器手册",
+            source="manual", verified=True,
+            text="以ABB所列控制器为例，手动模式速度最高为250 mm/s；"
+                 "具体模式权限应按实际机型手册确认。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="所有工业机器人的手动模式速度最高为250 mm/s。",
+            source_id="KB-SCOPE",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(kept)
+        self.assertEqual(dropped[0].verdict, VERDICT_CONTRADICTED)
+        self.assertIn("适用范围", dropped[0].audit_note)
+
+    def test_requirement_relaxation_is_contradicted(self):
+        retriever = Retriever([Chunk(
+            id="KB-LOAD", kp="KP-X", title="负载数据",
+            source="manual", verified=True,
+            text="工具或有效载荷数据未知时，可用负载辨识功能定义；"
+                 "错误的负载数据可能导致碰撞检测失效。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="使用负载辨识功能后无需再核对工具或有效载荷数据。",
+            source_id="KB-LOAD",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(kept)
+        self.assertEqual(dropped[0].verdict, VERDICT_CONTRADICTED)
+        self.assertIn("条件或步骤", dropped[0].audit_note)
+
+    def test_explicit_universal_scope_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-UNIVERSAL", kp="KP-X", title="通用规则",
+            source="manual", verified=True,
+            text="所有设备都必须在检修前断开能源。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="所有设备都必须在检修前断开能源。",
+            source_id="KB-UNIVERSAL",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_preserved_scope_limit_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-LIMITED", kp="KP-X", title="特定控制器手册",
+            source="manual", verified=True,
+            text="以ABB所列控制器为例，所有该型号设备在检修前必须断开能源。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="以ABB所列控制器为例，所有该型号设备在检修前必须断开能源。",
+            source_id="KB-LIMITED",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_explicit_relaxation_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-RELAX", kp="KP-X", title="自动检查",
+            source="manual", verified=True,
+            text="自检完成后无需再次运行同一项自检。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="自检完成后无需再次运行同一项自检。",
+            source_id="KB-RELAX",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_equivalent_relaxation_wording_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-RELAX-SYNONYM", kp="KP-X", title="自动检查",
+            source="manual", verified=True,
+            text="自检完成后无需再次运行同一项自检。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="自检完成后不需要再次运行同一项自检。",
+            source_id="KB-RELAX-SYNONYM",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_scope_limit_appended_after_expansion_does_not_bypass(self):
+        issue = semantic_boundary_issue(
+            "所有机器人都必须使用MOVJ，以Yaskawa控制器为例。",
+            "以Yaskawa控制器为例，应按工艺轨迹、空间和机型手册选择指令。",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_scope_limit_in_previous_clause_does_not_bypass(self):
+        issue = semantic_boundary_issue(
+            "以Yaskawa控制器为例，所有该型号使用MOVJ；所有机器人都使用MOVJ。",
+            "以Yaskawa控制器为例，应按工艺轨迹、空间和机型手册选择指令。",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_each_scope_clause_can_keep_its_own_limit(self):
+        issue = semantic_boundary_issue(
+            "以A控制器为例，所有该型号使用MOVJ；仅在B控制器中，所有该型号使用MOVL。",
+            "具体机型应查阅机型手册。",
+        )
+        self.assertIsNone(issue)
+
+    def test_automatic_mode_does_not_hide_cancelled_validation(self):
+        issue = semantic_boundary_issue(
+            "快速校对完成后无需验证精度。",
+            "自动模式可用于生产；快速校对完成后必须验证精度。",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_broad_substrings_do_not_create_a_requirement(self):
+        issue = semantic_boundary_issue(
+            "查看错误信息无需打开附录。",
+            "维护需求记录在附录中，应用程序重新定义了错误信息格式。",
+        )
+        self.assertIsNone(issue)
+
+    def test_explicit_automatic_validation_in_evidence_is_preserved(self):
+        issue = semantic_boundary_issue(
+            "自检完成后会自动验证精度。",
+            "自检完成后会自动验证精度。",
+        )
+        self.assertIsNone(issue)
+
+    def test_risk_synonyms_keep_the_requirement(self):
+        for verb in ("导致", "触发", "造成", "引发", "带来", "引起"):
+            with self.subTest(verb=verb):
+                issue = semantic_boundary_issue(
+                    "使用辨识功能后无需核对负载数据。",
+                    f"不正确的负载数据可能{verb}碰撞检测失效。",
+                )
+                self.assertIsNotNone(issue)
+
+    def test_omission_risk_synonyms_keep_the_requirement(self):
+        for verb in ("导致", "触发", "造成", "引发", "带来", "引起"):
+            with self.subTest(verb=verb):
+                issue = semantic_boundary_issue(
+                    "快速校对完成后无需验证精度。",
+                    f"未验证精度将{verb}定位误差。",
+                )
+                self.assertIsNotNone(issue)
+
+    def test_common_omission_phrases_keep_the_requirement(self):
+        evidence_cases = (
+            "若省略验证，会导致定位误差。",
+            "如不确认前提，将引发意外动作。",
+            "跳过核对后造成碰撞检测失效。",
+            "略过核实可能带来错误结果。",
+            "漏掉确认会引起设备停机。",
+        )
+        for evidence in evidence_cases:
+            with self.subTest(evidence=evidence):
+                issue = semantic_boundary_issue(
+                    "快速校对完成后无需验证精度。", evidence
+                )
+                self.assertIsNotNone(issue)
+
+    def test_risk_requirement_does_not_cross_ascii_punctuation(self):
+        issue = semantic_boundary_issue(
+            "使用辨识功能后无需核对负载数据。",
+            "不正确的负载数据,这里只描述输入；另一项可能导致提示。",
+        )
+        self.assertIsNone(issue)
+
+    def test_whitespace_does_not_hide_automatic_completion(self):
+        for spacing in (" ", "\t", "\u00a0", "\u200b", "\u3000"):
+            with self.subTest(spacing=repr(spacing)):
+                issue = semantic_boundary_issue(
+                    f"快速校对完成后会自动{spacing}验证精度。",
+                    "快速校对完成后必须验证精度。",
+                )
+                self.assertIsNotNone(issue)
+
+    def test_evidence_paragraphs_are_not_joined_into_a_requirement(self):
+        issue = semantic_boundary_issue(
+            "快速校对完成后无需验证精度。",
+            "快速校对必须\n\n验证其它设备的运行状态。",
+        )
+        self.assertIsNone(issue)
 
 
 if __name__ == "__main__":

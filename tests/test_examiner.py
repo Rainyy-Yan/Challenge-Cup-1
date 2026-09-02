@@ -19,7 +19,7 @@ import unittest
 
 import config
 from agents.examiner import ExaminerAgent, ItemRejected, _is_numeric
-from core.llm import MockLLM, build_llm
+from core.llm import MockLLM
 from core.retrieval import Retriever
 
 
@@ -41,10 +41,10 @@ class TestVetting(unittest.TestCase):
         cls.ex = ExaminerAgent(MockLLM(), Retriever.from_jsonl(config.KB_PATH), cls.kps)
 
     def _base(self, **kw):
-        item = {"id": "T-1", "kp": "KP-13", "level": 2,
-                "stem": "机器人工作站的安全围栏高度要求是",
-                "options": ["1.4", "2.8", "0.7", "5.6"], "answer": 0,
-                "source_id": "KB-022", "origin": "generated"}
+        item = {"id": "T-1", "kp": "KP-02", "level": 2,
+                "stem": "ABB 示例中手动模式的最高速度是",
+                "options": ["250", "200", "600", "900"], "answer": 0,
+                "source_id": "KB-004", "origin": "generated"}
         item.update(kw)
         return item
 
@@ -54,21 +54,24 @@ class TestVetting(unittest.TestCase):
     def test_answer_without_evidence_is_rejected(self):
         """正确答案的数值在知识库里根本不存在。"""
         with self.assertRaises(ItemRejected):
-            self.ex.vet(self._base(options=["9.9", "2.8", "0.7", "5.6"], answer=0))
+            self.ex.vet(self._base(options=["999", "200", "600", "900"], answer=0))
 
     def test_distractor_that_also_holds_is_rejected(self):
-        """0.5 米是原文里的安全距离，拿它当干扰项等于一题两解。
+        """把正文里同样成立的说法拿来做干扰项，会形成一题两解。
 
         这一类比答案错了还糟：学习者选了另一个"对的"会被判错，
         掌握度反向移动，且没有任何环节会发现。
         """
         with self.assertRaises(ItemRejected) as cm:
-            self.ex.vet(self._base(options=["1.4", "0.5", "2.8", "5.6"], answer=0))
+            self.ex.vet(self._base(
+                stem="ABB 示例中手动模式应如何操作",
+                options=["只能通过示教器操作", "机器人可在手动或自动模式下运行",
+                         "可以绕过现场规程", "无需示教器"], answer=0))
         self.assertIn("可能同样成立", str(cm.exception))
 
     def test_stem_with_invented_number_is_rejected(self):
         with self.assertRaises(ItemRejected) as cm:
-            self.ex.vet(self._base(stem="依据第 37 条，安全围栏高度要求是"))
+            self.ex.vet(self._base(stem="依据第 37 条，手动模式的最高速度是"))
         self.assertIn("题干", str(cm.exception))
 
     def test_distractors_may_carry_numbers_absent_from_kb(self):
@@ -77,27 +80,25 @@ class TestVetting(unittest.TestCase):
         第一版的审核规则不分题干和选项，一律禁止出现切片外数值，
         结果把所有能用的题都毙掉了 —— 等于禁止出错误选项。
         """
-        self.ex.vet(self._base(options=["1.4", "3.3", "9.1", "7.7"], answer=0))
+        self.ex.vet(self._base(options=["250", "333", "910", "770"], answer=0))
 
     def test_length_clue_is_rejected(self):
         with self.assertRaises(ItemRejected) as cm:
             self.ex.vet(self._base(
-                kp="KP-10", source_id="KB-017",
-                stem="出现超程报警时的正确处理方法是",
-                options=["按住超程解除按钮，同时在关节坐标系下手动将超程轴反向移出限位范围",
+                kp="KP-10", source_id="KB-015",
+                stem="SRVO-001 表示什么",
+                options=["操作面板急停被按下，必须先排除风险后按安全规程恢复",
                          "喷漆", "扫码", "联网"],
                 answer=0))
         self.assertIn("长度线索", str(cm.exception))
 
     def test_length_rule_skips_pure_numeric_options(self):
         """纯数值选项的长度反映量级不是正确性，不该触发长度线索。"""
-        self.ex.vet(self._base(kp="KP-12", source_id="KB-020",
-                               stem="减速机润滑脂的更换周期为运行多少小时",
-                               options=["10000", "20", "500", "30"], answer=0))
+        self.ex.vet(self._base(options=["250", "20", "500", "30"], answer=0))
 
     def test_duplicate_options_rejected(self):
         with self.assertRaises(ItemRejected):
-            self.ex.vet(self._base(options=["1.4", "1.4", "0.7", "5.6"]))
+            self.ex.vet(self._base(options=["250", "250", "200", "600"]))
 
     def test_answer_index_out_of_range(self):
         with self.assertRaises(ItemRejected):
@@ -109,7 +110,7 @@ class TestVetting(unittest.TestCase):
 
     def test_too_few_options(self):
         with self.assertRaises(ItemRejected):
-            self.ex.vet(self._base(options=["1.4", "2.8"], answer=0))
+            self.ex.vet(self._base(options=["250", "200"], answer=0))
 
 
 class TestGeneration(unittest.TestCase):
@@ -121,7 +122,7 @@ class TestGeneration(unittest.TestCase):
 
     def test_generated_items_always_pass_vetting(self):
         """出题口和审核口是同一套标准：交付出来的题必定过审。"""
-        ex = ExaminerAgent(build_llm(), self.R, self.kps)
+        ex = ExaminerAgent(MockLLM(), self.R, self.kps)
         made = 0
         for kp in self.kps:
             it = ex.make_item(kp, 3)
@@ -134,7 +135,7 @@ class TestGeneration(unittest.TestCase):
         self.assertGreater(made, 0, "离线命题应当至少能产出若干道题")
 
     def test_generated_answer_is_in_knowledge_base(self):
-        ex = ExaminerAgent(build_llm(), self.R, self.kps)
+        ex = ExaminerAgent(MockLLM(), self.R, self.kps)
         for kp in self.kps:
             it = ex.make_item(kp, 3)
             if it is None:
@@ -162,7 +163,7 @@ class TestAnalyzeAndSynthesize(unittest.TestCase):
     def setUpClass(cls):
         cls.kps = {k["id"]: k for k in
                    json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]}
-        cls.ex = ExaminerAgent(build_llm(), Retriever.from_jsonl(config.KB_PATH),
+        cls.ex = ExaminerAgent(MockLLM(), Retriever.from_jsonl(config.KB_PATH),
                                cls.kps)
 
     def test_entry_level_reflects_background(self):
@@ -192,6 +193,27 @@ class TestAnalyzeAndSynthesize(unittest.TestCase):
         out = self.ex.synthesize(diag, log)
         self.assertIsInstance(out["patterns"], list)
         self.assertIn("narrative", out)
+
+    def test_reasoning_text_is_removed_from_narrative(self):
+        from agents.examiner import _clean_narrative
+
+        raw = "<think>internal chain of thought</think>\n建议先复习安全规程。"
+        self.assertEqual(_clean_narrative(raw, []), "建议先复习安全规程。")
+
+    def test_unclosed_reasoning_uses_rule_based_fallback(self):
+        from agents.examiner import _clean_narrative
+
+        cleaned = _clean_narrative("<think>internal chain of thought", ["安全题连续答错"])
+        self.assertEqual(cleaned, "安全题连续答错。")
+        self.assertNotIn("think", cleaned.lower())
+
+    def test_empty_model_narrative_has_readable_fallback(self):
+        from agents.examiner import _clean_narrative
+
+        self.assertEqual(
+            _clean_narrative("```text\n\n```", []),
+            "已根据你的实际作答生成学习建议，请按推荐顺序开始学习。",
+        )
 
     def test_patterns_flag_safety_weakness(self):
         """安全类题目错得多，必须单独点出来 —— 这一类错了后果最重。"""
@@ -244,14 +266,14 @@ class TestNegationAwareDistractors(unittest.TestCase):
     def test_prohibition_scope_is_clause_level(self):
         """禁止的作用域是分句。
 
-        KB-020 一句话里同时有「必须打开排脂口」和「禁止在封闭状态下加注」。
+        KB-020 一句话里同时有「必须拆下排脂塞」和「未拆下时注脂会损坏油封」。
         只按句号切会把整句当禁止句，连正确做法都被判成"被禁止"，
         等于把正确答案塞进干扰项。
         """
         from agents.examiner import _forbidden_by
         body = self._body("KB-020")
-        self.assertTrue(_forbidden_by("在排脂口封闭状态下加注润滑脂", body))
-        self.assertFalse(_forbidden_by("打开排脂口后加注润滑脂", body))
+        self.assertTrue(_forbidden_by("在排脂塞未拆下时注脂", body))
+        self.assertFalse(_forbidden_by("拆下排脂塞后注脂", body))
 
     def test_unrelated_option_is_not_exempted(self):
         from agents.examiner import _forbidden_by

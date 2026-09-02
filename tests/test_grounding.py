@@ -12,7 +12,6 @@
 
 import json
 import unittest
-from pathlib import Path
 
 import config
 from core.retrieval import Retriever
@@ -47,8 +46,10 @@ class TestChunkProvenance(unittest.TestCase):
         for c in self.raw:
             if c["verified"]:
                 continue
+            # 公开网页可能改版或失效；单有 URL 不是稳定的内容级溯源。
+            # 没有 SHA 的记录必须明确保留人工复核标记。
             traceable = "｜sha:" in c["source"]
-            flagged = "待核实" in c["source"]
+            flagged = "待核实" in c["source"] or "待人工核实" in c["source"]
             self.assertTrue(traceable or flagged,
                             f"{c['id']} 未核实，出处既不可回溯也无占位标记：{c['source']}")
 
@@ -78,6 +79,14 @@ class TestChunkProvenance(unittest.TestCase):
         c = next(x for x in self.raw if x["id"] == "KB-022")
         self.assertFalse(c["verified"])
         self.assertIn("出处错配", c.get("source_note", ""))
+
+    def test_every_online_demo_source_is_locatable(self):
+        """在线 Demo 可暴露的知识切片不能继续指向教材占位出处。"""
+        formal = Retriever.from_jsonl(config.KB_PATH, demo_only=True)
+        for chunk in formal.chunks:
+            self.assertNotIn("占位出处", chunk.source, chunk.id)
+            self.assertIn("定位：", chunk.source, chunk.id)
+            self.assertIn("https://", chunk.source, chunk.id)
 
 
 class TestGroundingIsReported(unittest.TestCase):

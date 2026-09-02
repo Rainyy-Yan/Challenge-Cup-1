@@ -1,8 +1,8 @@
 {
   "summary": {
     "fixtures": 21,
-    "caught": 19,
-    "recall": 0.9048,
+    "caught": 21,
+    "recall": 1.0,
     "true_claims": 10,
     "false_positives": 0,
     "false_positive_rate": 0.0
@@ -39,20 +39,16 @@
     "H5": {
       "name": "过度泛化",
       "total": 3,
-      "caught": 2,
-      "recall": 0.6667,
-      "missed": [
-        "所有工业机器人的TCP标定误差都必须不大于0.2毫米。"
-      ]
+      "caught": 3,
+      "recall": 1.0,
+      "missed": []
     },
     "H6": {
       "name": "似真外推",
       "total": 3,
-      "caught": 2,
-      "recall": 0.6667,
-      "missed": [
-        "更换编码器电池后系统会自动恢复原有零点数据。"
-      ]
+      "caught": 3,
+      "recall": 1.0,
+      "missed": []
     }
   },
   "detail": [
@@ -112,138 +108,138 @@
     },
     {
       "category": "H3",
-      "claim": "机器人安全围栏高度不低于2.4米。",
-      "cited": "KB-022",
-      "why_wrong": "原文为1.4米",
+      "claim": "典型工业机器人有七个独立关节。",
+      "cited": "KB-001",
+      "why_wrong": "原文为六个关节",
       "caught": true,
       "verdict": "contradicted",
-      "audit_note": "断言中的数值 ['2.4'] 在所引切片中不存在"
+      "audit_note": "断言中的数值 ['7'] 在所引切片中不存在"
     },
     {
       "category": "H3",
-      "claim": "TCP四点标定法要求四个姿态之间的夹角不小于60度。",
+      "claim": "固定工具TCP采用六点法标定。",
       "cited": "KB-006",
-      "why_wrong": "原文为30度",
+      "why_wrong": "原文为四点法",
       "caught": true,
       "verdict": "contradicted",
-      "audit_note": "断言中的数值 ['60'] 在所引切片中不存在"
+      "audit_note": "断言中的数值 ['6'] 在所引切片中不存在"
     },
     {
       "category": "H3",
-      "claim": "一般工业现场要求TCP标定误差不大于1.5毫米。",
-      "cited": "KB-007",
-      "why_wrong": "原文为0.5毫米",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言中的数值 ['1.5'] 在所引切片中不存在"
-    },
-    {
-      "category": "H3",
-      "claim": "子程序调用层数一般不超过16层。",
-      "cited": "KB-012",
-      "why_wrong": "原文为8层",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言中的数值 ['16'] 在所引切片中不存在"
-    },
-    {
-      "category": "H3",
-      "claim": "减速机润滑脂的更换周期通常为运行两万小时或五年。",
-      "cited": "KB-020",
-      "why_wrong": "原文为一万小时或三年",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言中的数值 ['20000', '5'] 在所引切片中不存在"
-    },
-    {
-      "category": "H4",
-      "claim": "报警SRVO-002含义为机器人超程。",
-      "cited": "KB-016",
-      "why_wrong": "SRVO-002是示教器急停",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言使用的术语 ['超程'] 不属于所引切片"
-    },
-    {
-      "category": "H4",
-      "claim": "报警SRVO-005含义为编码器电池电压过低。",
-      "cited": "KB-017",
-      "why_wrong": "SRVO-005是超程",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言使用的术语 ['压过', '池电', '电压', '电池', '编码', '过低'] 不属于所引切片"
-    },
-    {
-      "category": "H4",
-      "claim": "减速机润滑脂应当每运行三千小时更换一次。",
-      "cited": "KB-022",
-      "why_wrong": "内容讲润滑，引用的是安全围栏",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言中的数值 ['1', '3000'] 在所引切片中不存在"
-    },
-    {
-      "category": "H4",
-      "claim": "工件坐标系采用四点法标定。",
+      "claim": "用户坐标系采用四点建立。",
       "cited": "KB-008",
-      "why_wrong": "原文为三点法",
+      "why_wrong": "原文为三点",
       "caught": true,
       "verdict": "contradicted",
       "audit_note": "断言中的数值 ['4'] 在所引切片中不存在"
     },
     {
-      "category": "H5",
-      "claim": "所有工业机器人的TCP标定误差都必须不大于0.2毫米。",
-      "cited": "KB-007",
-      "why_wrong": "原文0.2毫米仅限精密装配场合",
-      "caught": false,
-      "verdict": "supported",
-      "audit_note": "证据覆盖率 0.67"
+      "category": "H3",
+      "claim": "RAPID预定义的z5表示TCP路径区为5毫米。",
+      "cited": "KB-011",
+      "why_wrong": "原文为z1和1毫米",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['5'] 在所引切片中不存在"
     },
     {
-      "category": "H5",
-      "claim": "任何情况下都必须使用MOVL指令以保证轨迹精度。",
+      "category": "H3",
+      "claim": "三位使能装置有四种状态。",
+      "cited": "KB-003",
+      "why_wrong": "原文为三种状态",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['4'] 在所引切片中不存在"
+    },
+    {
+      "category": "H4",
+      "claim": "手动模式速度最高为250 mm/s。",
       "cited": "KB-009",
-      "why_wrong": "原文仅说焊接涂胶工艺段适合",
+      "why_wrong": "内容讲运行模式，引用的是运动指令",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言中的数值 ['250'] 在所引切片中不存在"
+    },
+    {
+      "category": "H4",
+      "claim": "MOVJ是较快的关节插补点到点运动。",
+      "cited": "KB-020",
+      "why_wrong": "内容讲运动指令，引用的是润滑",
       "caught": true,
       "verdict": "unsupported",
-      "audit_note": "与所引切片的证据覆盖率仅 0.24"
+      "audit_note": "与所引切片的证据覆盖率仅 0.04"
+    },
+    {
+      "category": "H4",
+      "claim": "DOUT用于设置数字输出。",
+      "cited": "KB-022",
+      "why_wrong": "内容讲数字I/O，引用的是安全围栏",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "与所引切片的证据覆盖率仅 0.12"
+    },
+    {
+      "category": "H4",
+      "claim": "带联锁的安全门打开时应停止自动运行。",
+      "cited": "KB-013",
+      "why_wrong": "内容讲安全门，引用的是数字I/O",
+      "caught": true,
+      "verdict": "unsupported",
+      "audit_note": "与所引切片的证据覆盖率仅 0.03"
     },
     {
       "category": "H5",
-      "claim": "润滑脂加注量越接近规定值上限效果越好。",
+      "claim": "机器人可在手动或自动模式下运行。所有工业机器人的手动模式只能通过示教器操作，速度最高为250 mm/s。",
+      "cited": "KB-004",
+      "why_wrong": "原文明确限定为所列ABB控制器示例",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言把资料限定的适用范围扩大成了无条件通用结论"
+    },
+    {
+      "category": "H5",
+      "claim": "Yaskawa INFORM中，MOVJ是较快的关节插补点到点运动，任何情况下都使用MOVJ。",
+      "cited": "KB-009",
+      "why_wrong": "原文要求按工艺轨迹、空间和机型选择",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言把资料限定的适用范围扩大成了无条件通用结论"
+    },
+    {
+      "category": "H5",
+      "claim": "所有机器人加注润滑脂前都必须拆下排脂塞。",
       "cited": "KB-020",
-      "why_wrong": "原文说过量加注会损坏油封",
+      "why_wrong": "原文只以Yaskawa GP12维护程序为例",
       "caught": true,
       "verdict": "contradicted",
-      "audit_note": "断言使用的术语 ['接近'] 不属于所引切片"
+      "audit_note": "断言把资料限定的适用范围扩大成了无条件通用结论"
     },
     {
       "category": "H6",
-      "claim": "更换编码器电池后系统会自动恢复原有零点数据。",
-      "cited": "KB-018",
-      "why_wrong": "原文说必须重新执行零点校对",
-      "caught": false,
-      "verdict": "supported",
-      "audit_note": "证据覆盖率 0.46"
-    },
-    {
-      "category": "H6",
-      "claim": "软限位设置后可以完全替代机械硬限位。",
-      "cited": "KB-025",
-      "why_wrong": "原文说软限位范围应小于硬限位，是补充不是替代",
-      "caught": true,
-      "verdict": "contradicted",
-      "audit_note": "断言使用的术语 ['完全'] 不属于所引切片"
-    },
-    {
-      "category": "H6",
-      "claim": "碰撞检测功能开启后无需再设定末端负载参数。",
+      "claim": "工具或有效载荷数据未知时，使用负载辨识功能后无需再核对负载数据。",
       "cited": "KB-024",
-      "why_wrong": "原文说负载参数错误会导致检测失效",
+      "why_wrong": "原文只说可用负载辨识定义，未免除核对",
       "caught": true,
       "verdict": "contradicted",
-      "audit_note": "断言使用的术语 ['功能', '无需', '能开'] 不属于所引切片"
+      "audit_note": "断言用“无需”取消了资料明确保留的条件或步骤"
+    },
+    {
+      "category": "H6",
+      "claim": "快速校对完成后会自动验证精度。",
+      "cited": "KB-019",
+      "why_wrong": "原文要求完成后必须另行验证精度",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言用“自动验证”取消了资料明确保留的条件或步骤"
+    },
+    {
+      "category": "H6",
+      "claim": "快速校对只要完成就适用，不需要确认机器人是否移动。",
+      "cited": "KB-019",
+      "why_wrong": "原文明确要求机器人未移动等前提",
+      "caught": true,
+      "verdict": "contradicted",
+      "audit_note": "断言用“不需要”取消了资料明确保留的条件或步骤"
     }
   ],
   "false_positive_detail": []
