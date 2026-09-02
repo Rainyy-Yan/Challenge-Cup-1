@@ -6,6 +6,7 @@ from dataclasses import replace
 import hashlib
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -151,10 +152,10 @@ class TestPatchApplication(WorkspaceFixture):
                 destination=self.root / "missing-parent" / "unused",
             )
 
-    def test_rejects_duplicate_case_collision_unknown_mode_binary_and_invalid_utf8(self) -> None:
+    def test_rejects_duplicate_case_collision_and_unknown_mode(self) -> None:
         cases = (
             ((digest("A.py", b"a"), digest("a.py", b"a")), "path_collision"),
-            ((digest("a.py", b"a", "100755"),), "unsupported_file_mode"),
+            ((digest("a.py", b"a", "120000"),), "unsupported_file_mode"),
         )
         self.write("a.py", b"a")
         for files, error in cases:
@@ -167,24 +168,143 @@ class TestPatchApplication(WorkspaceFixture):
                         destination=self.root / error,
                     )
 
-        binary_source = self.root / "binary"
-        binary_source.mkdir()
-        (binary_source / "bad.py").write_bytes(b"ok\x00bad")
-        with self.assertRaisesRegex(ValueError, "binary_source_file"):
-            materialize_workspace(
-                binary_source,
-                source_head_sha="a" * 40,
-                tracked_files=(digest("bad.py", b"ok\x00bad"),),
-                destination=self.root / "binary-out",
+    def test_materializes_large_binary_and_executable_sentinels_as_raw_bytes(self) -> None:
+        app = b"old\n"
+        large = b"x" * (300 * 1024) + b"\x00\xfftail"
+        pdf = b"%PDF-1.7\r\n\x00\xffbinary-object\r\n%%EOF"
+        executable = b"#!/bin/sh\necho safe\n"
+        self.write("app.py", app)
+        self.write("assets/large.bin", large)
+        self.write("docs/reference.pdf", pdf)
+        self.write("scripts/check.sh", executable)
+        files = (
+            digest("app.py", app),
+            digest("assets/large.bin", large),
+            digest("docs/reference.pdf", pdf),
+            digest("scripts/check.sh", executable, "100755"),
+        )
+
+        workspace = self.prepare(files)
+
+        self.assertEqual(large, (workspace.root / "assets/large.bin").read_bytes())
+        self.assertEqual(pdf, (workspace.root / "docs/reference.pdf").read_bytes())
+        self.assertEqual(files, workspace.source_files)
+        if os.name != "nt":
+            self.assertEqual(0o644, stat.S_IMODE((workspace.root / "app.py").stat().st_mode))
+            self.assertEqual(
+                0o755, stat.S_IMODE((workspace.root / "scripts/check.sh").stat().st_mode)
             )
-        (binary_source / "bad.py").write_bytes(b"\xff")
-        with self.assertRaisesRegex(ValueError, "non_utf8_source_file"):
-            materialize_workspace(
-                binary_source,
-                source_head_sha="a" * 40,
-                tracked_files=(digest("bad.py", b"\xff"),),
-                destination=self.root / "utf8-out",
-            )
+
+        patch = FilePatch(
+            "app.py",
+            hashlib.sha256(app).hexdigest(),
+            False,
+            (TextEdit("old", "new"),),
+        )
+        applied = apply_patch_manifest(manifest(patch), workspace)
+        expected_files = (
+            digest("app.py", b"new\n"),
+            digest("assets/large.bin", large),
+            digest("docs/reference.pdf", pdf),
+            digest("scripts/check.sh", executable, "100755"),
+        )
+        self.assertEqual(
+            compute_workspace_tree_digest(expected_files), applied.workspace_tree_digest
+        )
+        if os.name != "nt":
+            self.assertEqual(0o644, stat.S_IMODE((workspace.root / "app.py").stat().st_mode))
+
+    def test_binary_file_can_be_hashed_but_cannot_be_a_text_patch_target(self) -> None:
+        binary = b"\x00\xffbinary"
+        self.write("asset.bin", binary)
+        workspace = self.prepare((digest("asset.bin", binary),))
+        patch = FilePatch(
+            "asset.bin",
+            hashlib.sha256(binary).hexdigest(),
+            False,
+            (TextEdit("binary", "changed"),),
+        )
+        with self.assertRaisesRegex(ValueError, "binary_workspace_file"):
+            apply_patch_manifest(manifest(patch), workspace)
+
+    def test_non_utf8_large_or_executable_blob_cannot_be_a_patch_target(self) -> None:
+        cases = (
+            ("invalid.bin", b"\xff", "100644", "non_utf8_workspace_file"),
+            (
+                "large.txt",
+                b"x" * (256 * 1024 + 1),
+                "100644",
+                "patch_file_too_large",
+            ),
+            ("run.sh", b"#!/bin/sh\n", "100755", "patch_target_mode_forbidden"),
+        )
+        for index, (path, content, mode, error) in enumerate(cases):
+            with self.subTest(error=error):
+                source = self.root / f"target-source-{index}"
+                source.mkdir()
+                (source / path).write_bytes(content)
+                workspace = materialize_workspace(
+                    source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest(path, content, mode),),
+                    destination=self.root / f"target-workspace-{index}",
+                )
+                patch = FilePatch(
+                    path,
+                    hashlib.sha256(content).hexdigest(),
+                    False,
+                    (TextEdit("x", "y"),),
+                )
+                with self.assertRaisesRegex(ValueError, error):
+                    apply_patch_manifest(manifest(patch), workspace)
+
+    def test_workspace_rejects_new_git_metadata_and_hashes_hidden_sentinel(self) -> None:
+        app = b"old\n"
+        hidden = b"\x00hidden\xff"
+        self.write("app.py", app)
+        self.write(".hidden-sentinel", hidden)
+        files = (digest("app.py", app), digest(".hidden-sentinel", hidden))
+        workspace = self.prepare(files)
+        patch = FilePatch(
+            "app.py",
+            hashlib.sha256(app).hexdigest(),
+            False,
+            (TextEdit("old", "new"),),
+        )
+        applied = apply_patch_manifest(manifest(patch), workspace)
+        expected = (digest("app.py", b"new\n"), digest(".hidden-sentinel", hidden))
+        self.assertEqual(
+            compute_workspace_tree_digest(expected), applied.workspace_tree_digest
+        )
+
+        second_source = self.root / "git-source"
+        second_source.mkdir()
+        (second_source / "app.py").write_bytes(app)
+        second_workspace = materialize_workspace(
+            second_source,
+            source_head_sha="a" * 40,
+            tracked_files=(digest("app.py", app),),
+            destination=self.root / "git-workspace",
+        )
+        (second_workspace.root / ".git").mkdir()
+        (second_workspace.root / ".git/index").write_bytes(b"forged")
+        with self.assertRaisesRegex(ValueError, "git_metadata_forbidden"):
+            apply_patch_manifest(manifest(patch), second_workspace)
+
+    def test_registry_snapshot_is_not_aliased_to_returned_file_digest(self) -> None:
+        content = b"old\n"
+        self.write("app.py", content)
+        workspace = self.prepare((digest("app.py", content),))
+        returned_digest = workspace.source_files[0]
+        object.__setattr__(returned_digest, "sha256", "0" * 64)
+        patch = FilePatch(
+            "app.py",
+            hashlib.sha256(content).hexdigest(),
+            False,
+            (TextEdit("old", "new"),),
+        )
+        with self.assertRaisesRegex(ValueError, "untrusted_workspace"):
+            apply_patch_manifest(manifest(patch), workspace)
 
     def test_rejects_source_symlink_and_destination_collision(self) -> None:
         self.write("real.py", b"ok\n")
@@ -198,6 +318,23 @@ class TestPatchApplication(WorkspaceFixture):
                     digest("real.py", b"ok\n"),
                     digest("link.py", b"ok\n"),
                 )
+            )
+
+    def test_rejects_destination_parent_symlink(self) -> None:
+        self.write("a.py", b"a\n")
+        real_parent = self.root / "real-parent"
+        real_parent.mkdir()
+        linked_parent = self.root / "linked-parent"
+        try:
+            os.symlink(real_parent, linked_parent, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "unsafe_destination_parent"):
+            materialize_workspace(
+                self.source,
+                source_head_sha="a" * 40,
+                tracked_files=(digest("a.py", b"a\n"),),
+                destination=linked_parent / "workspace",
             )
 
     def test_applies_exact_edits_preserves_newlines_and_hashes_full_workspace(self) -> None:
@@ -284,6 +421,12 @@ class TestPatchApplication(WorkspaceFixture):
         applied = apply_patch_manifest(manifest(create), workspace)
         self.assertEqual(b"created\n", (workspace.root / "new/deep/file.py").read_bytes())
         self.assertEqual(("new/deep/file.py",), tuple(item.path for item in applied.files))
+        self.assertEqual("100644", applied.files[0].mode)
+        if os.name != "nt":
+            self.assertEqual(
+                0o644,
+                stat.S_IMODE((workspace.root / "new/deep/file.py").stat().st_mode),
+            )
 
         other_source = self.root / "policy-source"
         other_source.mkdir()
@@ -420,18 +563,27 @@ class TestPatchApplication(WorkspaceFixture):
                 with self.assertRaisesRegex(ValueError, error):
                     compute_workspace_tree_digest((item,))
 
-    def test_rejects_oversized_or_unstable_source_read(self) -> None:
+    def test_rejects_resource_exhaustion_or_unstable_source_read(self) -> None:
         oversized_source = self.root / "oversized"
         oversized_source.mkdir()
-        oversized = b"x" * (256 * 1024 + 1)
+        oversized = b"12345"
         (oversized_source / "large.txt").write_bytes(oversized)
-        with self.assertRaisesRegex(ValueError, "source_file_too_large"):
-            materialize_workspace(
-                oversized_source,
-                source_head_sha="a" * 40,
-                tracked_files=(digest("large.txt", oversized),),
-                destination=self.root / "oversized-out",
-            )
+        with mock.patch("tools.qykw.patches._MAX_SOURCE_FILE_BYTES", 4):
+            with self.assertRaisesRegex(ValueError, "source_file_too_large"):
+                materialize_workspace(
+                    oversized_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest("large.txt", oversized),),
+                    destination=self.root / "oversized-out",
+                )
+        with mock.patch("tools.qykw.patches._MAX_WORKSPACE_BYTES", 4):
+            with self.assertRaisesRegex(ValueError, "workspace_too_large"):
+                materialize_workspace(
+                    oversized_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest("large.txt", oversized),),
+                    destination=self.root / "workspace-limit-out",
+                )
 
         stable_source = self.root / "unstable"
         stable_source.mkdir()
@@ -527,6 +679,130 @@ class TestPatchApplication(WorkspaceFixture):
             with self.assertRaisesRegex(ValueError, "workspace_file_list_changed"):
                 apply_patch_manifest(manifest(patch), workspace3)
 
+    def test_materialization_fails_closed_for_copy_phase_races(self) -> None:
+        def fresh_source(name: str, content: bytes = b"actual\n") -> Path:
+            source = self.root / name
+            source.mkdir()
+            (source / "a.py").write_bytes(content)
+            return source
+
+        wrong_source = fresh_source("copy-digest-source")
+        claimed = b"claimed\n"
+        claimed_digest = digest("a.py", claimed)
+        with mock.patch(
+            "tools.qykw.patches._hash_stable_file",
+            return_value=(claimed_digest.sha256, len(claimed)),
+        ):
+            with self.assertRaisesRegex(ValueError, "source_digest_mismatch"):
+                materialize_workspace(
+                    wrong_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(claimed_digest,),
+                    destination=self.root / "copy-digest-out",
+                )
+
+        unstable_source = fresh_source("copy-unstable-source")
+        with mock.patch(
+            "tools.qykw.patches._same_file", side_effect=(True, False)
+        ):
+            with self.assertRaisesRegex(ValueError, "source_file_changed"):
+                materialize_workspace(
+                    unstable_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest("a.py", b"actual\n"),),
+                    destination=self.root / "copy-unstable-out",
+                )
+
+        large_source = fresh_source("copy-limit-source", b"12345")
+        expected = digest("a.py", b"12345")
+        with mock.patch(
+            "tools.qykw.patches._hash_stable_file",
+            return_value=(expected.sha256, 5),
+        ), mock.patch("tools.qykw.patches._MAX_SOURCE_FILE_BYTES", 4):
+            with self.assertRaisesRegex(ValueError, "source_file_too_large"):
+                materialize_workspace(
+                    large_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(expected,),
+                    destination=self.root / "copy-limit-out",
+                )
+
+        collision_source = fresh_source("copy-collision-source")
+        with mock.patch(
+            "tools.qykw.patches.os.link", side_effect=FileExistsError
+        ):
+            with self.assertRaisesRegex(ValueError, "create_path_exists"):
+                materialize_workspace(
+                    collision_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(digest("a.py", b"actual\n"),),
+                    destination=self.root / "copy-collision-out",
+                )
+
+        growth_source = fresh_source("copy-growth-source")
+        expected_growth = digest("a.py", b"actual\n")
+        with mock.patch(
+            "tools.qykw.patches._hash_stable_file",
+            return_value=(expected_growth.sha256, 4),
+        ), mock.patch(
+            "tools.qykw.patches._copy_tracked_file", return_value=5
+        ), mock.patch("tools.qykw.patches._MAX_WORKSPACE_BYTES", 4):
+            with self.assertRaisesRegex(ValueError, "workspace_too_large"):
+                materialize_workspace(
+                    growth_source,
+                    source_head_sha="a" * 40,
+                    tracked_files=(expected_growth,),
+                    destination=self.root / "copy-growth-out",
+                )
+
+    def test_creation_races_and_mode_checks_fail_closed(self) -> None:
+        content = b"old\n"
+        self.write("app.py", content)
+        files = (digest("app.py", content),)
+        create = FilePatch("new.py", None, True, (TextEdit("", "new\n"),))
+
+        workspace = self.prepare(files)
+
+        def create_during_lookup(root: Path, relative: str) -> bool:
+            (root / relative).write_bytes(b"raced\n")
+            return False
+
+        with mock.patch(
+            "tools.qykw.patches._member_exists", side_effect=create_during_lookup
+        ):
+            with self.assertRaisesRegex(ValueError, "create_path_exists"):
+                apply_patch_manifest(manifest(create), workspace)
+
+        second_source = self.root / "atomic-source"
+        second_source.mkdir()
+        (second_source / "app.py").write_bytes(content)
+        workspace2 = materialize_workspace(
+            second_source,
+            source_head_sha="a" * 40,
+            tracked_files=files,
+            destination=self.root / "atomic-workspace",
+        )
+        with mock.patch(
+            "tools.qykw.patches.os.link", side_effect=FileExistsError
+        ):
+            with self.assertRaisesRegex(ValueError, "create_path_exists"):
+                apply_patch_manifest(manifest(create), workspace2)
+
+        patches_module = __import__("tools.qykw.patches", fromlist=["patches"])
+        with self.assertRaisesRegex(ValueError, "unsupported_file_mode"):
+            patches_module._set_and_verify_mode(self.root / "missing", "120000")
+        fake_metadata = mock.Mock(st_mode=stat.S_IFREG | 0o600)
+        with mock.patch("tools.qykw.patches.os.name", "posix"), mock.patch.object(
+            Path, "lstat", return_value=fake_metadata
+        ):
+            with self.assertRaisesRegex(ValueError, "workspace_mode_mismatch"):
+                patches_module._verify_actual_mode(self.root / "mode", "100644")
+        with mock.patch("tools.qykw.patches.os.name", "posix"), mock.patch(
+            "tools.qykw.patches.os.chmod", side_effect=OSError
+        ):
+            with self.assertRaisesRegex(ValueError, "workspace_mode_mismatch"):
+                patches_module._set_and_verify_mode(self.root / "mode", "100644")
+
     def test_rejects_untrusted_path_symlink_and_tampering_before_write(self) -> None:
         content = b"old\n"
         self.write("dir/app.py", content)
@@ -606,7 +882,7 @@ class TestPatchApplication(WorkspaceFixture):
         with self.assertRaisesRegex(ValueError, "duplicate_file_path"):
             compute_workspace_tree_digest((right, right))
         with self.assertRaisesRegex(ValueError, "unsupported_file_mode"):
-            compute_workspace_tree_digest((replace(right, mode="100755"),))
+            compute_workspace_tree_digest((replace(right, mode="120000"),))
 
 
 class TestProfiles(unittest.TestCase):
