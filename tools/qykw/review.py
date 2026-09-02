@@ -29,6 +29,10 @@ class _SourcedCandidate:
     chunk_id: str
 
 
+class _InvalidModelOutput(Exception):
+    """Signal a structurally invalid model result without masking execution failures."""
+
+
 class ReviewEngine:
     """Run fixed triage, deep-review, counterexample, then local validation stages."""
 
@@ -41,8 +45,8 @@ class ReviewEngine:
     def review(self, run: RunContext, snapshot: PullSnapshot, plan: ContextPlan) -> ReviewResult:
         if not _same_review_identity(run, snapshot, plan):
             raise ValueError("review_identity_mismatch")
+        _validate_plan_chunks(run, plan)
         try:
-            _validate_plan_chunks(run, plan)
             self._triage(build_triage_request(run, plan.manifest), plan)
             candidates: list[_SourcedCandidate] = []
             for chunk in plan.chunks:
@@ -56,14 +60,11 @@ class ReviewEngine:
                     ("没有可验证的本地候选。",),
                     ("未执行 PR 代码。",),
                 )
-            validation = self._validation(build_validation_request(
+            conclusion, retained, notes, limitations = self._validation(build_validation_request(
                 run,
                 tuple(item.candidate for item in candidates),
                 candidate_sources=tuple(item.chunk_id for item in candidates),
             ))
-            if validation is None:
-                return _failure(plan.coverage)
-            conclusion, retained, notes, limitations = validation
             allowed = _validation_intersection(candidates, retained)
             findings = validate_findings((item.candidate for item in allowed), commentable_lines=plan.commentable_lines,
                                          max_findings=self.max_findings, manifest_order=plan.manifest.risk_order)
@@ -74,7 +75,7 @@ class ReviewEngine:
                 ("已执行候选反证验证。", *notes),
                 ("未执行 PR 代码。", *limitations),
             )
-        except Exception:
+        except _InvalidModelOutput:
             return _failure(plan.coverage)
 
     def _triage(self, request: object, plan: ContextPlan) -> tuple[str, ...]:
@@ -82,7 +83,7 @@ class ReviewEngine:
         response = self.provider.complete(request)  # type: ignore[arg-type]
         priorities = parse_triage_response(response.value, plan.manifest.paths)
         if priorities is None:
-            raise ValueError("invalid_triage_response")
+            raise _InvalidModelOutput from None
         return priorities
 
     def _review_candidates(self, request: object, chunk: object) -> tuple[_SourcedCandidate, ...]:
@@ -90,13 +91,16 @@ class ReviewEngine:
         response = self.provider.complete(request)  # type: ignore[arg-type]
         parsed = _parse_review_candidate_envelope(response.value, chunk)
         if parsed is None:
-            raise ValueError("invalid_review_response")
+            raise _InvalidModelOutput from None
         return parsed
 
-    def _validation(self, request: object) -> tuple[str, tuple[FindingCandidate, ...], tuple[str, ...], tuple[str, ...]] | None:
+    def _validation(self, request: object) -> tuple[str, tuple[FindingCandidate, ...], tuple[str, ...], tuple[str, ...]]:
         validate_provider_capabilities(self.provider, request)  # type: ignore[arg-type]
         response = self.provider.complete(request)  # type: ignore[arg-type]
-        return parse_validation_response(response.value)
+        parsed = parse_validation_response(response.value)
+        if parsed is None:
+            raise _InvalidModelOutput from None
+        return parsed
 
 
 def parse_candidates(value: object) -> tuple[FindingCandidate, ...]:

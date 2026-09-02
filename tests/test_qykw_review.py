@@ -91,6 +91,30 @@ class TestFindingValidation(unittest.TestCase):
 
 
 class TestReviewEngine(unittest.TestCase):
+    def test_provider_capabilities_failure_propagates_without_public_result(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        failure = RuntimeError("raw capability failure must stay internal")
+
+        class FailingCapabilitiesProvider(RecordingProvider):
+            def capabilities(self) -> ProviderCapabilities:
+                raise failure
+
+        provider = FailingCapabilitiesProvider([])
+        with self.assertRaises(RuntimeError) as raised:
+            ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(provider.calls, [])
+
+    def test_provider_complete_failure_propagates_without_public_result(self) -> None:
+        from tools.qykw.review import ReviewEngine
+        failure = RuntimeError("raw completion failure must stay internal")
+        provider = RecordingProvider([failure])
+
+        with self.assertRaises(RuntimeError) as raised:
+            ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(len(provider.calls), 1)
+
     def test_staged_provider_sequence_and_validation_can_reject_candidates(self) -> None:
         from tools.qykw.review import ReviewEngine
         rejected = candidate_value(candidate())
