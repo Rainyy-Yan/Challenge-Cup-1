@@ -737,6 +737,11 @@ class TestPatchGeneration(unittest.TestCase):
                 "machine api.example login bot password aaaaaaaa\n",
                 "connection.txt",
             ),
+            ('password="secret-password"\n', "settings.py"),
+            ('token="test-secret-password"\n', "settings.py"),
+            ("Authorization: Bearer secret-token-value\n", "header.txt"),
+            ("password secret-password\n", "connection.txt"),
+            ('api_key="your-secret-key"\n', "settings.py"),
         )
         for content, path in credentials:
             source = changed_file(path, content=content)

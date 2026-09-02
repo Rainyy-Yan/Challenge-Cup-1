@@ -128,41 +128,23 @@ _NETRC_PASSWORD = re.compile(
     r"(?:"
     r"^[ \t]*machine[ \t]+\S+[ \t]+login[ \t]+\S+[ \t]+password[ \t]+"
     r"(?P<machine_value>[^\s#]{8,})[ \t]*(?:#.*)?$|"
-    r"^[ \t]*password[ \t]+(?P<line_value>[^\s#]{16,})[ \t]*(?:#.*)?$"
+    r"^[ \t]*password[ \t]+(?P<line_value>[^\s#]{8,})[ \t]*(?:#.*)?$"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
-_PLACEHOLDER_WORDS = frozenset(
+_PLACEHOLDER_VALUES = frozenset(
     {
-        "placeholder",
-        "example",
-        "test",
-        "tests",
-        "dummy",
-        "fake",
-        "sample",
-        "changeme",
-        "change",
-        "me",
-        "before",
-        "use",
-        "your",
-        "redacted",
-        "xxx",
-        "token",
-        "value",
-        "api",
-        "key",
-        "here",
-        "password",
-        "auth",
-        "secret",
-        "for",
+        "placeholder_token_value",
+        "your_api_key_here",
+        "change-me-before-use",
+        "example-token-for-tests",
+        "dummy-secret-value",
+        "fake-token-value",
+        "sample-api-key-value",
+        "changeme-before-use",
+        "redacted-token-value",
+        "xxx-token-placeholder",
     }
-)
-_PLACEHOLDER_TEMPLATE = re.compile(
-    r"[a-z0-9]+(?:[-_./: ]+[a-z0-9]+)*",
-    re.IGNORECASE,
 )
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
@@ -728,10 +710,7 @@ def _contains_high_confidence_secret(content: str) -> bool:
 
 
 def _is_placeholder_secret_value(value: str) -> bool:
-    if _PLACEHOLDER_TEMPLATE.fullmatch(value) is None:
-        return False
-    words = re.findall(r"[a-z0-9]+", value.casefold())
-    return bool(words) and all(word in _PLACEHOLDER_WORDS for word in words)
+    return value.casefold() in _PLACEHOLDER_VALUES
 
 
 def _validate_text(value: str, *, allow_empty: bool) -> int:
