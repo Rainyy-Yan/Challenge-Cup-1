@@ -150,9 +150,15 @@ class TestDockerSandboxExecutor(unittest.TestCase):
             mounts = [run[index + 1] for index, item in enumerate(run) if item == "--mount"]
             self.assertEqual(
                 mounts,
-                [f"type=bind,source={workspace.resolve()},target=/workspace,rw"],
+                [f"type=bind,source={workspace.resolve()},target=/workspace,readonly"],
             )
             self.assertEqual(run.count("--mount"), 1)
+            self.assertIs(executor.workspace_read_only, True)
+            self.assertEqual(executor.actual_image_digest, "sha256:" + "a" * 64)
+            with self.assertRaises(AttributeError):
+                executor.workspace_read_only = False  # type: ignore[misc]
+            with self.assertRaises(AttributeError):
+                executor.actual_image_digest = "sha256:" + "2" * 64  # type: ignore[misc]
             self.assertEqual(run[run.index(_IMAGE) + 1], "env")
             self.assertEqual(run[run.index(_IMAGE) + 2], "-i")
             forbidden = (
@@ -178,7 +184,7 @@ class TestDockerSandboxExecutor(unittest.TestCase):
             self.assertIn("PYTHONHASHSEED=0", command)
             self.assertNotIn(os.environ.get("PATH", "host-path-never-present"), command)
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.output_excerpt, "Ran 2 tests\nOK")
+            self.assertEqual(result.output_excerpt, "ok")
 
     def test_session_starts_once_and_reuses_tmp_until_close(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -318,10 +324,7 @@ class TestDockerSandboxExecutor(unittest.TestCase):
             )
             self.assertEqual(result.output_digest, hashlib.sha256(raw).hexdigest())
             self.assertLessEqual(len(result.output_excerpt.encode("utf-8")), 2048)
-            self.assertEqual(
-                result.output_excerpt,
-                "ValueError\nRan 123 tests\nFAILED (failures=2, errors=1)",
-            )
+            self.assertEqual(result.output_excerpt, "failed")
             for leaked in (secret, source, str(workspace), "should not expose"):
                 self.assertNotIn(leaked, result.output_excerpt)
 
@@ -339,7 +342,7 @@ class TestDockerSandboxExecutor(unittest.TestCase):
                 timeout_seconds=10,
                 output_limit_bytes=4096,
             )
-        self.assertEqual(result.output_excerpt, "Error\nException")
+        self.assertEqual(result.output_excerpt, "error")
         self.assertNotIn("73656e74696e656c", result.output_excerpt)
 
     def test_binary_output_cannot_break_excerpt_or_digest(self) -> None:
@@ -356,7 +359,7 @@ class TestDockerSandboxExecutor(unittest.TestCase):
                 output_limit_bytes=4096,
             )
             self.assertEqual(result.output_digest, hashlib.sha256(raw).hexdigest())
-            self.assertEqual(result.output_excerpt, "Ran 1 test\nOK")
+            self.assertEqual(result.output_excerpt, "ok")
 
     def test_nonzero_exit_returns_result_and_cleans_container(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -376,9 +379,45 @@ class TestDockerSandboxExecutor(unittest.TestCase):
                 output_limit_bytes=4096,
             )
             self.assertEqual(result.exit_code, 2)
-            self.assertEqual(result.output_excerpt, "SyntaxError")
+            self.assertEqual(result.output_excerpt, "error")
             self.assertIn(("docker", "kill", "qykw-failed"), backend.control_calls)
             self.assertIn(("docker", "rm", "--force", "qykw-failed"), backend.control_calls)
+
+    def test_excerpt_cannot_encode_unbounded_candidate_numbers(self) -> None:
+        sentinel = "7" * 10000
+        raw = (
+            f"Ran {sentinel} tests in 1.0s\n"
+            f"FAILED (failures={sentinel}, errors={sentinel})\n"
+        ).encode()
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self._workspace(root)
+            result = DockerSandboxExecutor(
+                workspace, _IMAGE, backend=_Backend([_Process(raw)])
+            ).run(
+                ("python", "tests.py"),
+                cwd=workspace,
+                env=(),
+                timeout_seconds=10,
+                output_limit_bytes=len(raw) + 1,
+            )
+        self.assertEqual(result.output_excerpt, "failed")
+        self.assertNotRegex(result.output_excerpt, r"\d")
+        self.assertNotIn(sentinel, result.output_excerpt)
+
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self._workspace(root)
+            benign = DockerSandboxExecutor(
+                workspace,
+                _IMAGE,
+                backend=_Backend([_Process(b"candidate arbitrary text 123456\n")]),
+            ).run(
+                ("python", "tests.py"),
+                cwd=workspace,
+                env=(),
+                timeout_seconds=10,
+                output_limit_bytes=4096,
+            )
+        self.assertEqual("", benign.output_excerpt)
 
     def test_context_manager_cleans_container_when_caller_raises(self) -> None:
         with tempfile.TemporaryDirectory() as root:

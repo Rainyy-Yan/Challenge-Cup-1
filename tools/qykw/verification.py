@@ -32,7 +32,6 @@ _IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_TIMEOUT_SECONDS = 900
 _MAX_OUTPUT_LIMIT_BYTES = 1024 * 1024
-_EXCERPT_LIMIT_BYTES = 2048
 
 
 @dataclass(frozen=True)
@@ -78,6 +77,12 @@ class VerificationRuntimeMetadata:
 class CommandExecutor(Protocol):
     """Persistent sandbox session owned and removed by one verification run."""
 
+    @property
+    def workspace_read_only(self) -> bool: ...
+
+    @property
+    def actual_image_digest(self) -> str: ...
+
     def run(
         self,
         argv: tuple[str, ...],
@@ -96,6 +101,8 @@ _BACKEND_COMMANDS = (
         "backend-compile",
         (
             "python",
+            "-X",
+            "pycache_prefix=/tmp/qykw-pyc",
             "-m",
             "compileall",
             "-q",
@@ -145,7 +152,14 @@ _FRONTEND_COMMANDS = (
         ),
     ),
     VerificationCommand(
-        "frontend-showcase", ("python", "build_showcase.py")
+        "frontend-showcase",
+        (
+            "python",
+            "-c",
+            "import build_showcase; from pathlib import Path; "
+            "build_showcase.OUT=Path('/tmp/qykw-showcase.html'); "
+            "build_showcase.main()",
+        ),
     ),
 )
 
@@ -182,9 +196,10 @@ def verify_change(
     """Apply and verify one manifest without trusting candidate-owned state."""
 
     closed = False
-    pending: dict[str, object] | None = None
+    attestation: VerificationAttestation | None = None
     try:
         _validate_verification_inputs(request, manifest, runtime)
+        _validate_executor_boundary(executor, runtime)
         root, source_files = _require_trusted_workspace(workspace)
         baseline_files = tuple(source_files)
         baseline_digest = compute_workspace_tree_digest(baseline_files)
@@ -195,6 +210,7 @@ def verify_change(
         output_tree_digest = compute_workspace_tree_digest(())
         workspace_tree_digest = baseline_digest
         expected_files = baseline_files
+        eligible_success = False
 
         if not canceled:
             applied = apply_patch_manifest(manifest, workspace)
@@ -202,6 +218,7 @@ def verify_change(
             output_tree_digest = applied.output_tree_digest
             workspace_tree_digest = applied.workspace_tree_digest
             expected_files = _patched_tree(baseline_files, output_files)
+            _prepare_read_only_workspace(root, expected_files)
             _verify_workspace(root, expected_files, output_files)
             profile = get_verification_profile(request.verification_profile)
 
@@ -228,13 +245,8 @@ def verify_change(
                     failed = True
                     break
 
-            if not canceled:
-                _verify_workspace(root, expected_files, output_files)
-                canceled = _cancel_requested(state_store, request)
-
-            success = (
-                not canceled
-                and not failed
+            eligible_success = (
+                not failed
                 and len(results) == len(profile.commands)
                 and all(
                     result.exit_code == 0 and not result.timed_out
@@ -243,38 +255,40 @@ def verify_change(
             )
         else:
             _verify_workspace(root, baseline_files, ())
-            success = False
 
-        # Stop all candidate processes before the last host-side tree proof.
+        # Stop candidate processes, prove the final tree, then read cancel state.
         executor.close()
         closed = True
         _verify_workspace(root, expected_files, output_files)
-        pending = {
-            "schema_version": 1,
-            "workflow_run_id": runtime.workflow_run_id,
-            "run_id": request.context.run_id,
-            "source_repository": request.source_repository,
-            "source_head_sha": request.source_head_sha,
-            "target_repository": request.target_repository,
-            "target_base_sha": request.target_base_sha,
-            "target_base_ref": request.target_base_ref,
-            "manifest_digest": manifest.digest,
-            "profile": request.verification_profile,
-            "image_digest": runtime.image_digest,
-            "output_tree_digest": output_tree_digest,
-            "workspace_tree_digest": workspace_tree_digest,
-            "output_files": output_files,
-            "success": success,
-            "canceled": canceled,
-            "results": tuple(results),
-        }
+        final_cancel = _cancel_requested(state_store, request)
+        canceled = canceled or final_cancel
+        success = eligible_success and not canceled
+        attestation = VerificationAttestation(
+            schema_version=1,
+            workflow_run_id=runtime.workflow_run_id,
+            run_id=request.context.run_id,
+            source_repository=request.source_repository,
+            source_head_sha=request.source_head_sha,
+            target_repository=request.target_repository,
+            target_base_sha=request.target_base_sha,
+            target_base_ref=request.target_base_ref,
+            manifest_digest=manifest.digest,
+            profile=request.verification_profile,
+            image_digest=runtime.image_digest,
+            output_tree_digest=output_tree_digest,
+            workspace_tree_digest=workspace_tree_digest,
+            output_files=output_files,
+            success=success,
+            canceled=canceled,
+            results=tuple(results),
+        )
     finally:
         if not closed:
             executor.close()
 
-    if pending is None:  # pragma: no cover - defensive, exceptions leave above
+    if attestation is None:  # pragma: no cover - defensive, exceptions leave above
         raise RuntimeError("verification_attestation_unavailable")
-    return VerificationAttestation(**pending)  # type: ignore[arg-type]
+    return attestation
 
 
 def _validate_verification_inputs(
@@ -305,6 +319,23 @@ def _validate_verification_inputs(
     get_verification_profile(request.verification_profile)
 
 
+def _validate_executor_boundary(
+    executor: CommandExecutor, runtime: VerificationRuntimeMetadata
+) -> None:
+    try:
+        read_only = executor.workspace_read_only
+        image_digest = executor.actual_image_digest
+    except (AttributeError, RuntimeError):
+        raise ValueError("untrusted_verification_executor") from None
+    if (
+        read_only is not True
+        or type(image_digest) is not str
+        or _IMAGE_DIGEST_PATTERN.fullmatch(image_digest) is None
+        or image_digest != runtime.image_digest
+    ):
+        raise ValueError("untrusted_verification_executor")
+
+
 def _cancel_requested(state_store: RunStateStore, request: ChangeRequest) -> bool:
     value = state_store.is_cancel_requested(
         request.context.pr_number, request.context.run_id
@@ -320,6 +351,50 @@ def _patched_tree(
     combined = {item.path: item for item in source_files}
     combined.update({item.path: item for item in output_files})
     return tuple(combined[path] for path in sorted(combined))
+
+
+def _prepare_read_only_workspace(
+    root: Path, expected_files: tuple[FileDigest, ...]
+) -> None:
+    """Make the trusted tree readable by uid 65532 before a read-only bind."""
+
+    if os.name != "posix":
+        return
+    directories = {root}
+    for item in expected_files:
+        path = root / item.path
+        directories.update(path.parents)
+        mode = 0o555 if item.mode == "100755" else 0o444
+        _fchmod_no_follow(path, mode, directory=False)
+    for directory in sorted(
+        (path for path in directories if path == root or root in path.parents),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        _fchmod_no_follow(directory, 0o755, directory=True)
+
+
+def _fchmod_no_follow(path: Path, mode: int, *, directory: bool) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        metadata = os.fstat(fd)
+        expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected_kind(metadata.st_mode):
+            raise ValueError("verification_workspace_permission_failed")
+        os.fchmod(fd, mode)
+        if stat.S_IMODE(os.fstat(fd).st_mode) != mode:
+            raise ValueError("verification_workspace_permission_failed")
+    except ValueError:
+        raise
+    except OSError:
+        raise ValueError("verification_workspace_permission_failed") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _verify_workspace(
@@ -376,31 +451,50 @@ def _snapshot_workspace(
 
 
 def _hash_workspace_file(path: Path, expected: FileDigest) -> FileDigest:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd: int | None = None
     try:
-        before = path.lstat()
+        fd = os.open(path, flags)
+        before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("verification_workspace_changed")
         digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(64 * 1024):
-                digest.update(chunk)
-        after = path.lstat()
+        while chunk := os.read(fd, 64 * 1024):
+            digest.update(chunk)
+        after = os.fstat(fd)
+        current = path.lstat()
     except ValueError:
         raise
     except OSError:
         raise ValueError("verification_workspace_unreadable") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
     if (
-        before.st_dev != after.st_dev
-        or before.st_ino != after.st_ino
-        or before.st_size != after.st_size
-        or before.st_mtime_ns != after.st_mtime_ns
+        not _same_file_state(before, after)
+        or not _same_file_state(after, current)
         or not stat.S_ISREG(after.st_mode)
+        or not stat.S_ISREG(current.st_mode)
     ):
         raise ValueError("verification_workspace_changed")
     mode = expected.mode
     if os.name == "posix":
         mode = "100755" if stat.S_IMODE(after.st_mode) & 0o111 else "100644"
     return FileDigest(expected.path, mode, digest.hexdigest())
+
+
+def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+    )
 
 
 def _trusted_command_result(
@@ -439,17 +533,14 @@ def _argv_digest(argv: tuple[str, ...]) -> str:
 
 
 def _sanitize_excerpt(value: str) -> str:
-    safe: list[str] = []
-    patterns = (
-        re.compile(r"^Ran \d+ tests?$"),
-        re.compile(r"^OK(?: \(skipped=\d+\))?$"),
-        re.compile(
-            r"^FAILED \((?:(?:failures|errors|skipped)=\d+)(?:, (?:failures|errors|skipped)=\d+)*\)$"
-        ),
-        re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)$"),
-    )
-    for line in value.splitlines():
-        stripped = line.strip()
-        if any(pattern.fullmatch(stripped) for pattern in patterns):
-            safe.append(stripped)
-    return "\n".join(safe).encode("ascii")[:_EXCERPT_LIMIT_BYTES].decode("ascii")
+    lines = tuple(line.strip() for line in value.splitlines())
+    if "failed" in lines or any(line.startswith("FAILED") for line in lines):
+        return "failed"
+    if "error" in lines or any(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)", line)
+        for line in lines
+    ):
+        return "error"
+    if "ok" in lines or "OK" in lines:
+        return "ok"
+    return ""

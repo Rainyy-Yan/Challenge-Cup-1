@@ -34,6 +34,7 @@ from tools.qykw.verification import (
     get_verification_profile,
     verify_change,
 )
+import tools.qykw.verification as verification_module
 
 
 def digest(path: str, content: bytes, mode: str = "100644") -> FileDigest:
@@ -904,6 +905,8 @@ class TestProfiles(unittest.TestCase):
             (
                 (
                     "python",
+                    "-X",
+                    "pycache_prefix=/tmp/qykw-pyc",
                     "-m",
                     "compileall",
                     "-q",
@@ -935,7 +938,25 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual("python", frontend.commands[3].argv[0])
         self.assertEqual("-c", frontend.commands[3].argv[1])
         self.assertIn("{'P-A', 'P-B', 'P-C'}", frontend.commands[3].argv[2])
-        self.assertEqual(("python", "build_showcase.py"), frontend.commands[4].argv)
+        self.assertEqual(
+            (
+                "python",
+                "-c",
+                "import build_showcase; from pathlib import Path; "
+                "build_showcase.OUT=Path('/tmp/qykw-showcase.html'); "
+                "build_showcase.main()",
+            ),
+            frontend.commands[4].argv,
+        )
+        self.assertTrue(
+            all(
+                any(item.startswith("pycache_prefix=/tmp/") for item in command.argv)
+                or "--out" in command.argv
+                or "/tmp/qykw-showcase.html" in command.argv[-1]
+                or command.name not in {"backend-compile", "frontend-snapshot", "frontend-showcase"}
+                for command in get_verification_profile("full").commands
+            )
+        )
 
         full = get_verification_profile("full")
         expected = tuple(
@@ -977,7 +998,13 @@ class _StateStore:
 
 class _Executor:
     def __init__(
-        self, *, on_run=None, on_close=None, failure: Exception | None = None
+        self,
+        *,
+        on_run=None,
+        on_close=None,
+        failure: Exception | None = None,
+        workspace_read_only: bool = True,
+        actual_image_digest: str = "sha256:" + "c" * 64,
     ) -> None:
         self.on_run = on_run
         self.on_close = on_close
@@ -987,6 +1014,8 @@ class _Executor:
         ] = []
         self.close_calls = 0
         self.cleanup_error: Exception | None = None
+        self.workspace_read_only = workspace_read_only
+        self.actual_image_digest = actual_image_digest
 
     def run(
         self,
@@ -1249,6 +1278,206 @@ class TestVerificationIntegration(WorkspaceFixture):
         with self.assertRaisesRegex(ValueError, "verification_workspace_changed"):
             self.verify(executor)
         self.assertEqual(1, executor.close_calls)
+
+    def test_requires_read_only_executor_and_exact_runtime_image(self) -> None:
+        for executor in (
+            _Executor(workspace_read_only=False),
+            _Executor(actual_image_digest="sha256:" + "d" * 64),
+        ):
+            with self.subTest(executor=executor):
+                with self.assertRaisesRegex(ValueError, "untrusted_verification_executor"):
+                    self.verify(executor)
+                self.assertEqual([], executor.calls)
+                self.assertEqual(1, executor.close_calls)
+
+        class MissingCapabilities:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.close_calls = 0
+
+            def run(self, *args: object, **kwargs: object) -> CommandResult:
+                self.calls += 1
+                raise AssertionError("must not execute")
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        missing = MissingCapabilities()
+        with self.assertRaisesRegex(ValueError, "untrusted_verification_executor"):
+            verify_change(
+                self.request,
+                self.manifest,
+                self.workspace,
+                missing,  # type: ignore[arg-type]
+                _StateStore(),
+                runtime=self.runtime,
+            )
+        self.assertEqual(0, missing.calls)
+        self.assertEqual(1, missing.close_calls)
+
+    def test_close_then_final_tree_check_then_cancel_decides_attestation(self) -> None:
+        closed = False
+
+        class CloseAwareState(_StateStore):
+            def is_cancel_requested(self, pr_number: int, run_id: str) -> bool:
+                self.calls.append((pr_number, run_id))
+                return closed
+
+        def mark_closed() -> None:
+            nonlocal closed
+            closed = True
+
+        attestation = self.verify(_Executor(on_close=mark_closed), CloseAwareState())
+        self.assertTrue(attestation.canceled)
+        self.assertFalse(attestation.success)
+
+    def test_attestation_excerpt_has_only_fixed_finite_status(self) -> None:
+        sentinel = "8" * 10000
+
+        def numeric_result(_count: int, _cwd: Path, argv: tuple[str, ...]):
+            return CommandResult(
+                "ignored",
+                _argv_digest(argv),
+                2,
+                False,
+                1,
+                hashlib.sha256(b"numeric output").hexdigest(),
+                f"Ran {sentinel} tests\nFAILED (errors={sentinel})",
+            )
+
+        attestation = self.verify(_Executor(on_run=numeric_result))
+        self.assertEqual("failed", attestation.results[0].output_excerpt)
+        self.assertNotRegex(attestation.results[0].output_excerpt, r"\d")
+        self.assertNotIn(sentinel, repr(attestation))
+
+    def test_workspace_hash_uses_one_descriptor_and_no_follow_when_available(self) -> None:
+        expected = digest("app.py", self.original)
+        real_open = os.open
+        real_fstat = os.fstat
+        opened: list[tuple[object, int]] = []
+        fstat_fds: list[int] = []
+
+        def recording_open(path: object, flags: int) -> int:
+            opened.append((path, flags))
+            return real_open(path, flags)
+
+        def recording_fstat(fd: int):
+            fstat_fds.append(fd)
+            return real_fstat(fd)
+
+        with mock.patch.object(
+            verification_module.os, "open", side_effect=recording_open
+        ), mock.patch.object(
+            verification_module.os, "fstat", side_effect=recording_fstat
+        ):
+            actual = verification_module._hash_workspace_file(
+                self.workspace.root / "app.py", expected
+            )
+
+        self.assertEqual(expected, actual)
+        self.assertEqual(1, len(opened))
+        self.assertEqual(2, len(fstat_fds))
+        self.assertEqual(1, len(set(fstat_fds)))
+        if hasattr(os, "O_NOFOLLOW"):
+            self.assertTrue(opened[0][1] & os.O_NOFOLLOW)
+
+    @unittest.skipUnless(os.name == "posix", "Linux permission contract")
+    def test_linux_workspace_permissions_are_world_readable_and_not_writable(self) -> None:
+        executor = _Executor()
+        self.verify(executor)
+        self.assertEqual(0o755, stat.S_IMODE(self.workspace.root.stat().st_mode))
+        self.assertEqual(0o444, stat.S_IMODE((self.workspace.root / "app.py").stat().st_mode))
+
+    def test_read_only_permission_plan_covers_root_directories_and_file_modes(self) -> None:
+        files = (
+            digest("plain.py", b"plain\n", "100644"),
+            digest("bin/tool", b"#!/bin/sh\n", "100755"),
+        )
+        with mock.patch.object(verification_module.os, "name", "posix"), mock.patch.object(
+            verification_module, "_fchmod_no_follow"
+        ) as chmod:
+            verification_module._prepare_read_only_workspace(self.workspace.root, files)
+
+        self.assertIn(
+            mock.call(self.workspace.root / "plain.py", 0o444, directory=False),
+            chmod.call_args_list,
+        )
+        self.assertIn(
+            mock.call(self.workspace.root / "bin/tool", 0o555, directory=False),
+            chmod.call_args_list,
+        )
+        self.assertIn(
+            mock.call(self.workspace.root / "bin", 0o755, directory=True),
+            chmod.call_args_list,
+        )
+        self.assertIn(
+            mock.call(self.workspace.root, 0o755, directory=True),
+            chmod.call_args_list,
+        )
+
+    def test_permission_update_uses_no_follow_fd_and_fails_closed(self) -> None:
+        regular_before = mock.Mock(st_mode=stat.S_IFREG | 0o600)
+        regular_after = mock.Mock(st_mode=stat.S_IFREG | 0o444)
+        with mock.patch.object(verification_module.os, "O_NOFOLLOW", 0x100, create=True), mock.patch.object(
+            verification_module.os, "O_CLOEXEC", 0x200, create=True
+        ), mock.patch.object(
+            verification_module.os, "open", return_value=17
+        ) as opened, mock.patch.object(
+            verification_module.os, "fstat", side_effect=(regular_before, regular_after)
+        ), mock.patch.object(
+            verification_module.os, "fchmod", create=True
+        ) as chmod, mock.patch.object(
+            verification_module.os, "close"
+        ) as closed:
+            verification_module._fchmod_no_follow(
+                self.workspace.root / "app.py", 0o444, directory=False
+            )
+        self.assertTrue(opened.call_args.args[1] & 0x100)
+        chmod.assert_called_once_with(17, 0o444)
+        closed.assert_called_once_with(17)
+
+        with mock.patch.object(
+            verification_module.os, "open", side_effect=OSError
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "verification_workspace_permission_failed"
+            ):
+                verification_module._fchmod_no_follow(
+                    self.workspace.root, 0o755, directory=True
+                )
+
+        wrong_kind = mock.Mock(st_mode=stat.S_IFDIR | 0o755)
+        with mock.patch.object(
+            verification_module.os, "open", return_value=19
+        ), mock.patch.object(
+            verification_module.os, "fstat", return_value=wrong_kind
+        ), mock.patch.object(
+            verification_module.os, "close"
+        ) as closed:
+            with self.assertRaisesRegex(
+                ValueError, "verification_workspace_permission_failed"
+            ):
+                verification_module._fchmod_no_follow(
+                    self.workspace.root / "app.py", 0o444, directory=False
+                )
+        closed.assert_called_once_with(19)
+
+        wrong_mode = mock.Mock(st_mode=stat.S_IFREG | 0o600)
+        with mock.patch.object(
+            verification_module.os, "open", return_value=23
+        ), mock.patch.object(
+            verification_module.os, "fstat", side_effect=(regular_before, wrong_mode)
+        ), mock.patch.object(
+            verification_module.os, "fchmod", create=True
+        ), mock.patch.object(
+            verification_module.os, "close"
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "verification_workspace_permission_failed"
+            ):
+                verification_module._fchmod_no_follow(
+                    self.workspace.root / "app.py", 0o444, directory=False
+                )
 
     def test_rejects_untrusted_runtime_and_request_manifest_mismatch(self) -> None:
         for kwargs in (

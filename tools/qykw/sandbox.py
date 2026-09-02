@@ -44,31 +44,8 @@ _FIXED_ENV = (
 _FIXED_ENV_NAMES = frozenset(item.split("=", 1)[0] for item in _FIXED_ENV)
 _MAX_TIMEOUT_SECONDS = 900
 _MAX_OUTPUT_LIMIT_BYTES = 1024 * 1024
-_EXCERPT_LIMIT_BYTES = 2048
 _DIAGNOSTIC_SAMPLE_BYTES = 64 * 1024
 _CONTROL_OUTPUT_LIMIT_BYTES = 4096
-_SAFE_ERROR_TYPES = frozenset(
-    {
-        "AssertionError",
-        "ConnectionError",
-        "FileNotFoundError",
-        "ImportError",
-        "JSONDecodeError",
-        "MemoryError",
-        "ModuleNotFoundError",
-        "OSError",
-        "PermissionError",
-        "RecursionError",
-        "RuntimeError",
-        "SyntaxError",
-        "TimeoutError",
-        "TypeError",
-        "UnicodeError",
-        "ValueError",
-    }
-)
-
-
 class SandboxError(RuntimeError):
     """Stable sandbox failure that is safe to expose outside the runner."""
 
@@ -188,6 +165,7 @@ class DockerSandboxExecutor:
 
         self.workspace_root = root
         self.image_ref = image_ref
+        self._actual_image_digest = image_ref.rsplit("@", 1)[1]
         self.container_name = name
         self._backend = backend or _SubprocessBackend()
         self._monotonic = monotonic
@@ -195,6 +173,18 @@ class DockerSandboxExecutor:
         self._started = False
         self._closed = False
         self._terminal_error: str | None = None
+
+    @property
+    def workspace_read_only(self) -> bool:
+        """Declare the enforced candidate mount capability."""
+
+        return True
+
+    @property
+    def actual_image_digest(self) -> str:
+        """Return the exact digest parsed from the validated image reference."""
+
+        return self._actual_image_digest
 
     def __enter__(self) -> DockerSandboxExecutor:
         return self
@@ -337,7 +327,7 @@ class DockerSandboxExecutor:
     def _ensure_started(self) -> None:
         if self._started:
             return
-        mount = f"type=bind,source={self.workspace_root},target=/workspace,rw"
+        mount = f"type=bind,source={self.workspace_root},target=/workspace,readonly"
         run_argv = (
             "docker",
             "run",
@@ -470,23 +460,15 @@ def _argv_digest(argv: tuple[str, ...]) -> str:
 
 
 def _safe_excerpt(sample: bytes) -> str:
-    """Extract only structural test diagnostics, never arbitrary raw lines."""
+    """Collapse candidate output to one fixed, non-parameterized status."""
 
     text = sample.decode("utf-8", errors="replace")
-    safe: list[str] = []
-    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\s*:", text):
-        item = match.group(1)
-        if item not in _SAFE_ERROR_TYPES:
-            item = "Exception" if item.endswith("Exception") else "Error"
-        if item not in safe:
-            safe.append(item)
-    for match in re.finditer(r"(?m)\bRan\s+(\d+)\s+tests?\s+in\s+[0-9.]+s\s*$", text):
-        safe.append(f"Ran {match.group(1)} test" + ("s" if match.group(1) != "1" else ""))
-    for match in re.finditer(r"(?m)^FAILED\s*\(([^\r\n)]*)\)\s*$", text):
-        counts = re.findall(r"(failures|errors|skipped)=(\d+)", match.group(1))
-        if counts:
-            safe.append("FAILED (" + ", ".join(f"{name}={count}" for name, count in counts) + ")")
+    if re.search(r"(?m)^FAILED(?:\s|\()", text):
+        return "failed"
+    if re.search(
+        r"\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\s*:", text
+    ):
+        return "error"
     if re.search(r"(?m)^OK(?:\s+\(skipped=\d+\))?\s*$", text):
-        safe.append("OK")
-    excerpt = "\n".join(safe)
-    return excerpt.encode("ascii")[:_EXCERPT_LIMIT_BYTES].decode("ascii")
+        return "ok"
+    return ""
