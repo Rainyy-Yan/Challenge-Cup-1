@@ -63,7 +63,8 @@ def build(inject: float, drift: float) -> dict:
     orch = Orchestrator()
     for c in orch.retriever.chunks:
         kb[c.id] = {"title": c.title, "source": c.source, "kp": c.kp,
-                    "text": c.text}
+                    "text": c.text, "verified": c.verified,
+                    "source_note": c.source_note}
 
     items = json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
     kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]

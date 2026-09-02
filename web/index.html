@@ -239,6 +239,18 @@ async function api(path, body){
   return d;
 }
 
+function sourceWithLink(source){
+  return String(source || '').split(/(https?:\/\/[^\s<]+)/g).map(part => {
+    if(!/^https?:\/\//.test(part)) return esc(part);
+    return `<a class="source-link" href="${esc(part)}" target="_blank" rel="noopener noreferrer">打开原始来源</a>`;
+  }).join('');
+}
+function claimSource(c){
+  const kb = (S.kb || {})[c.source_id] || {};
+  const status = kb.verified ? '已人工核实' : '待人工核实';
+  return `<div class="src">${esc(c.source_id || '无引用')} · ${sourceWithLink(kb.source)} · ${status} · 证据 ${c.evidence_score}</div>`;
+}
+
 /* ---- 学习者列表 ---- */
 async function loadProfiles(){
   profiles = await api('/api/profiles');
@@ -323,7 +335,7 @@ function render(){
       <div class="ttl">${esc(r.title)}</div>
       <details><summary>展开断言与出处</summary>
         ${r.claims.map(c => `<div class="claim">${esc(c.text)}
-          <div class="src">${esc(c.source_id || '无引用')} · 证据 ${c.evidence_score}</div></div>`).join('')}
+          ${claimSource(c)}</div>`).join('')}
       </details>
     </div>`).join('') || '<p class="empty">尚未生成</p>';
 
@@ -373,7 +385,7 @@ function render0(){
       <div class="ttl">${esc(r.title)}</div>
       <details><summary>展开断言与出处</summary>
         ${r.claims.map(c => `<div class="claim">${esc(c.text)}
-          <div class="src">${esc(c.source_id || '无引用')} · 证据 ${c.evidence_score}</div></div>`).join('')}
+          ${claimSource(c)}</div>`).join('')}
       </details></div>`).join('');
   drawFit(); drawPath();
 }

@@ -37,7 +37,9 @@ _KP_INDEX = {k["id"]: k for k in _KPS}
 def _examiner():
     if not config.EXAMINER_ENABLED:
         return None
-    return ExaminerAgent(build_llm(), Retriever.from_jsonl(config.KB_PATH), _KP_INDEX)
+    return ExaminerAgent(
+        build_llm(), Retriever.from_jsonl(config.KB_PATH, demo_only=True), _KP_INDEX
+    )
 
 
 def list_profiles() -> list[dict]:
@@ -62,6 +64,16 @@ def session_payload(sid: str) -> dict:
     data["state"] = orch.state
     data["kp_index"] = kp_index
     data["path_names"] = [kp_index[k]["name"] for k in session.path]
+    # Resource displays carry their source, review status, and reviewer note.
+    data["kb"] = {
+        c.id: {
+            "title": c.title,
+            "source": c.source,
+            "verified": c.verified,
+            "source_note": c.source_note,
+        }
+        for c in orch.retriever.chunks
+    }
     return data
 
 

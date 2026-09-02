@@ -143,7 +143,7 @@ class TestParity(unittest.TestCase):
         from core.retrieval import Retriever
         from core.schema import Claim
         cases = [
-            ("报警SRVO-005含义为机器人超程。", "KB-017"),
+            ("FANUC 的报警含义必须按报警代码、控制器软件版本和机型在官方 Alarm Code Lookup 或对应技术手册中查询。", "KB-017"),
             ("T1模式下末端法兰中心的移动速度被限制在200毫米每秒以内。", "KB-004"),
             ("机器人安全围栏高度不低于1.4米。", "KB-022"),
             ("报警SRVO-002含义为机器人超程。", "KB-016"),

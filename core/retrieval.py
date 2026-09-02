@@ -58,7 +58,13 @@ class Retriever:
         self._n = len(chunks)
 
     @classmethod
-    def from_jsonl(cls, path: str | Path) -> "Retriever":
+    def from_jsonl(cls, path: str | Path, *, demo_only: bool = False) -> "Retriever":
+        """从知识库读取切片。
+
+        ``demo_only`` 只加载允许在正式 Demo 中使用的切片。被排除的
+        资料仍留在原始库中，便于补齐可访问的原始来源后重新复核；它们不能
+        因为仍在 JSONL 文件里就重新出现在演示内容中。
+        """
         chunks = []
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -77,7 +83,10 @@ class Retriever:
                 # 读取端必须对未知字段容错，否则任何一个工具加字段
                 # 都会把整个系统打死。
                 known = {f.name for f in dataclasses.fields(Chunk)}
-                chunks.append(Chunk(**{k: v for k, v in rec.items() if k in known}))
+                chunk = Chunk(**{k: v for k, v in rec.items() if k in known})
+                if demo_only and not chunk.demo_eligible:
+                    continue
+                chunks.append(chunk)
         return cls(chunks)
 
     def _idf(self, term: str) -> float:
