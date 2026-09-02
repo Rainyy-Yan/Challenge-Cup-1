@@ -803,6 +803,80 @@ class TestTruthValidation(unittest.TestCase):
             validate_truth(truth),
         )
 
+    def test_validates_uncovered_point_evidence_before_rejecting_it(self):
+        cases = (
+            (
+                "unknown",
+                "missing-evidence",
+                None,
+                "coverage point kp-001 references unknown evidence_id: missing-evidence",
+            ),
+            (
+                "wrong-kind",
+                "case-artifact-000",
+                None,
+                "coverage point kp-001 evidence_id must resolve to coverage_evidence",
+            ),
+            (
+                "wrong-subject",
+                "e-001",
+                _artifact(
+                    "e-001",
+                    "coverage_evidence",
+                    subject_id="kp-002",
+                    citation_ids=["citation-approved"],
+                ),
+                "coverage point kp-001 evidence subject_id mismatch",
+            ),
+            (
+                "valid-artifact",
+                "e-001",
+                _artifact(
+                    "e-001",
+                    "coverage_evidence",
+                    subject_id="kp-001",
+                    citation_ids=["citation-approved"],
+                ),
+                None,
+            ),
+        )
+        for name, evidence_id, artifact, validation_error in cases:
+            with self.subTest(name=name):
+                truth = valid_truth()
+                truth["coverage_universe"][0]["evidence_ids"] = [evidence_id]
+                if artifact is not None:
+                    truth["artifact_manifest"]["artifacts"].append(artifact)
+                    _refresh_manifest_hash(truth)
+
+                errors = validate_truth(truth)
+
+                self.assertIn(
+                    "uncovered coverage point kp-001 must not have evidence",
+                    errors,
+                )
+                if validation_error is not None:
+                    self.assertIn(validation_error, errors)
+
+    def test_coverage_evidence_ids_must_be_a_unique_trimmed_list(self):
+        cases = (
+            (None, "coverage point kp-001 evidence_ids must be a list"),
+            ([" e-002 "], "coverage point kp-001 has an invalid evidence_id"),
+            (["e-002", "E-002"], "coverage point kp-001 has a duplicate evidence_id"),
+        )
+        for evidence_ids, expected in cases:
+            with self.subTest(evidence_ids=evidence_ids):
+                truth = valid_truth()
+                truth["coverage_universe"][0]["evidence_ids"] = evidence_ids
+
+                self.assertIn(expected, validate_truth(truth))
+
+    def test_accepts_uncovered_point_with_empty_evidence_list(self):
+        truth = valid_truth()
+
+        self.assertFalse(truth["coverage_universe"][0]["covered"])
+        self.assertEqual(truth["coverage_universe"][0]["evidence_ids"], [])
+        self.assertEqual(validate_truth(truth), [])
+
     def test_rejects_normalized_duplicate_coverage_ids(self):
         truth = valid_truth()
         truth["coverage_universe"][0]["kp_id"] = " KP-001 "

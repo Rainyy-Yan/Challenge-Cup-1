@@ -753,7 +753,10 @@ def _validate_records(
 
 
 def _validate_artifact_closure(
-    data: dict, artifacts: dict[str, dict], errors: list[str]
+    data: dict,
+    artifacts: dict[str, dict],
+    coverage_artifact_ids: set[str],
+    errors: list[str],
 ) -> None:
     manifest_ids = {
         kind: {
@@ -793,16 +796,7 @@ def _validate_artifact_closure(
             if canonical is not None:
                 referenced_ids[kind].add(canonical)
 
-    coverage = data.get("coverage_universe")
-    if isinstance(coverage, list):
-        for point in coverage:
-            evidence_ids = point.get("evidence_ids") if isinstance(point, dict) else None
-            if not isinstance(evidence_ids, list):
-                continue
-            for evidence_id in evidence_ids:
-                canonical = _normalise_identity(evidence_id)
-                if canonical is not None:
-                    referenced_ids["coverage_evidence"].add(canonical)
+    referenced_ids["coverage_evidence"] = coverage_artifact_ids
 
     for kind in sorted(ARTIFACT_KINDS):
         if manifest_ids[kind] != referenced_ids[kind]:
@@ -1088,6 +1082,7 @@ def validate_truth(data: dict) -> list[str]:
                 errors.append(f"{key} common reviewer pair share is below 0.95")
 
     coverage = data.get("coverage_universe")
+    referenced_coverage_artifact_ids: set[str] = set()
     if not isinstance(coverage, list):
         errors.append("coverage_universe must be a list")
     else:
@@ -1137,33 +1132,63 @@ def validate_truth(data: dict) -> list[str]:
             if covered is True:
                 if isinstance(weight, (int, float)) and not isinstance(weight, bool) and math.isfinite(weight) and weight > 0:
                     covered_weights.append(float(weight))
-                evidence_ids = point.get("evidence_ids")
-                if not (
-                    isinstance(evidence_ids, list)
-                    and evidence_ids
-                    and all(
-                        isinstance(evidence_id, str)
-                        and bool(evidence_id.strip())
-                        and evidence_id == evidence_id.strip()
-                        for evidence_id in evidence_ids
-                    )
+            evidence_ids = point.get("evidence_ids")
+            if not isinstance(evidence_ids, list):
+                errors.append(f"coverage point {display_id} evidence_ids must be a list")
+                evidence_ids = []
+            elif covered is False and evidence_ids:
+                errors.append(
+                    f"uncovered coverage point {display_id} must not have evidence"
+                )
+            if covered is True and not (
+                evidence_ids
+                and all(
+                    isinstance(evidence_id, str)
+                    and bool(evidence_id.strip())
+                    and evidence_id == evidence_id.strip()
+                    for evidence_id in evidence_ids
+                )
+            ):
+                errors.append(f"covered coverage point {display_id} needs evidence")
+
+            seen_evidence_ids: set[str] = set()
+            for evidence_id in evidence_ids:
+                canonical_evidence_id = _normalise_identity(evidence_id)
+                if (
+                    canonical_evidence_id is None
+                    or not isinstance(evidence_id, str)
+                    or evidence_id != evidence_id.strip()
                 ):
-                    errors.append(f"covered coverage point {display_id} needs evidence")
+                    errors.append(
+                        f"coverage point {display_id} has an invalid evidence_id"
+                    )
+                    continue
+                if canonical_evidence_id in seen_evidence_ids:
+                    errors.append(
+                        f"coverage point {display_id} has a duplicate evidence_id"
+                    )
+                    continue
+                seen_evidence_ids.add(canonical_evidence_id)
+                artifact = artifacts.get(canonical_evidence_id)
+                coverage_label = (
+                    "covered coverage point"
+                    if covered is True
+                    else "coverage point"
+                )
+                if artifact is None:
+                    errors.append(
+                        f"{coverage_label} {display_id} references unknown evidence_id: {evidence_id}"
+                    )
+                elif artifact.get("kind") != "coverage_evidence":
+                    errors.append(
+                        f"{coverage_label} {display_id} evidence_id must resolve to coverage_evidence"
+                    )
+                elif _normalise_identity(artifact.get("subject_id")) != _normalise_identity(point_id):
+                    errors.append(
+                        f"coverage point {display_id} evidence subject_id mismatch"
+                    )
                 else:
-                    for evidence_id in evidence_ids:
-                        artifact = artifacts.get(evidence_id.strip().casefold())
-                        if artifact is None:
-                            errors.append(
-                                f"covered coverage point {display_id} references unknown evidence_id: {evidence_id}"
-                            )
-                        elif artifact.get("kind") != "coverage_evidence":
-                            errors.append(
-                                f"covered coverage point {display_id} evidence_id must resolve to coverage_evidence"
-                            )
-                        elif _normalise_identity(artifact.get("subject_id")) != _normalise_identity(point_id):
-                            errors.append(
-                                f"coverage point {display_id} evidence subject_id mismatch"
-                            )
+                    referenced_coverage_artifact_ids.add(canonical_evidence_id)
         if all_weights_valid:
             total_weight = _finite_fsum(valid_weights)
             covered_weight = _finite_fsum(covered_weights)
@@ -1176,7 +1201,12 @@ def validate_truth(data: dict) -> list[str]:
                 if not math.isfinite(coverage_ratio):
                     errors.append("coverage ratio must be finite")
 
-    _validate_artifact_closure(data, artifacts, errors)
+    _validate_artifact_closure(
+        data,
+        artifacts,
+        referenced_coverage_artifact_ids,
+        errors,
+    )
 
     if reviewer_ids is not None:
         for records, allowed, metric in (
