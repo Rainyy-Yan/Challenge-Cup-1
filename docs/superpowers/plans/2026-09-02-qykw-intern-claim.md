@@ -94,7 +94,7 @@
 
 **Interfaces:**
 - Consumes: Task 1 normalized events.
-- Produces: `IssueSnapshot`, `PullSnapshot`, `InternRecord`, `InternGateway`, `HttpInternGateway`, `encode_marker(record)`, `decode_marker(body)`, `reduce_records(records)`.
+- Produces: `IssueSnapshot`, `PullSnapshot`, `InternRecord`, `InternGateway`, `HttpInternGateway`, `encode_marker(record)`, `decode_marker(body)`, `reduce_records(records)`; records can be read from both Issue and PR conversation comments.
 
 - [ ] **Step 1: Write failing gateway and codec tests**
 
@@ -114,6 +114,7 @@
       def assert_bot_identity(self, expected_login: str = "qykw") -> None: ...
       def get_issue(self, issue_number: int) -> IssueSnapshot: ...
       def list_issue_comments(self, issue_number: int) -> tuple[IssueComment, ...]: ...
+      def list_pull_comments(self, pull_number: int) -> tuple[IssueComment, ...]: ...
       def get_pull(self, pull_number: int) -> PullSnapshot: ...
       def add_reaction(self, comment_id: int) -> None: ...
       def add_assignee(self, issue_number: int, login: str) -> None: ...
@@ -211,7 +212,7 @@
 
 - [ ] **Step 3: Implement frozen Issue–PR binding**
 
-  For first association, re-read PR and Issue, require one canonical target and author/claimant equality, then persist the immutable binding before moving `status:in-progress` to `status:in-review`. For later events, use only the stored binding. On `closed`, re-read `merged`; close the Issue only when true, otherwise clear the active binding and restore in-progress. Do not call merge, approve, review submission, branch mutation, or code execution APIs.
+  For first association, re-read PR and Issue, require one canonical target and author/claimant equality, then persist the immutable binding in both the Issue status and a PR status comment before moving `status:in-progress` to `status:in-review`. For later events, resolve and use only the stored PR-comment binding. On `closed`, re-read `merged`; close the Issue only when true, otherwise clear the active binding and restore in-progress. Do not call merge, approve, review submission, branch mutation, or code execution APIs.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -234,11 +235,11 @@
 
 **Interfaces:**
 - Consumes: `GITHUB_EVENT_PATH`, `GITHUB_EVENT_NAME`, `GITHUB_ACTION`, `GITHUB_API_URL`, `GITHUB_REPOSITORY`, `QYKW_INTERN_TOKEN`.
-- Produces: `python -m tools.qykw.intern_claim` exit status and bounded GitHub annotations.
+- Produces: `python -m tools.qykw.intern_claim` exit status, a bounded resolver artifact, `issue_number` job output, and bounded GitHub annotations.
 
 - [ ] **Step 1: Write failing CLI and workflow contract tests**
 
-  Test safe environment validation, malformed/missing event files, bounded JSON input, idempotent success/no-op exit 0 and typed operational failure exit 1. Parse the workflow as text/YAML-compatible data and assert the exact event types, per-Issue `queue: max`, `cancel-in-progress: false`, top-level `contents: none`, job-level minimal permissions, default-branch checkout, `persist-credentials: false`, Python 3.11, full action SHA pins, no candidate checkout, and absence of inference/change secrets.
+  Test safe environment validation, malformed/missing event files, bounded JSON input, PR resolver output validation, idempotent success/no-op exit 0 and typed operational failure exit 1. Parse the workflow as text/YAML-compatible data and assert the exact event types, Issue-command and resolved-PR write jobs both use per-Issue `queue: max` with `cancel-in-progress: false`, top-level `contents: none`, resolver has no write permission, mutation jobs have minimal permissions, default-branch checkout, `persist-credentials: false`, Python 3.11, full action SHA pins, no candidate checkout, and absence of inference/change secrets.
 
 - [ ] **Step 2: Verify RED**
 
@@ -247,17 +248,17 @@
 
 - [ ] **Step 3: Implement CLI and workflow**
 
-  The workflow must invoke only:
+  The mutating jobs must invoke only:
 
   ```yaml
   - name: Run qykw intern controller
     working-directory: controller
     env:
       QYKW_INTERN_TOKEN: ${{ secrets.QYKW_INTERN_TOKEN }}
-    run: python -m tools.qykw.intern_claim
+    run: python -m tools.qykw.intern_claim --phase issue-command
   ```
 
-  Checkout `${{ github.event.repository.default_branch }}` into `controller`. Use an Issue command job for non-PR comments and a PR lifecycle job for `pull_request_target`; both use the same repository-bound controller. Keep existing `qykw-review.yml` unchanged and document that its current initial-review subscription supplies code review for the same PR event.
+  Checkout `${{ github.event.repository.default_branch }}` into `controller`. Use an Issue command job for non-PR comments. For `pull_request_target`, add a read-only `resolve_pr` job that invokes `--phase resolve-pr`, validates and exports the Issue number, followed by a `reconcile_pr` job that invokes `--phase reconcile-pr` and enters `qykw-intern-${{ github.repository_id }}-${{ needs.resolve_pr.outputs.issue_number }}` concurrency. Keep existing `qykw-review.yml` unchanged and document that its current initial-review subscription supplies code review for the same PR event.
 
 - [ ] **Step 4: Verify GREEN**
 

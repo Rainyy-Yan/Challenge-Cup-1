@@ -55,14 +55,19 @@ Assignee 多于一人、Assignee 与领取标记不一致或人工修改造成�
 
 ## 4. 并发、幂等与恢复
 
-工作流使用每个 Issue 独立的并发组：
+Issue 评论 job 可直接使用 Issue 编号进入独立并发组：
 
 ```yaml
 concurrency:
-  group: qykw-intern-${{ github.repository_id }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: qykw-intern-${{ github.repository_id }}-${{ github.event.issue.number }}
   queue: max
   cancel-in-progress: false
 ```
+
+PR 事件先由无写权限的解析 job 读取 PR 评论中的既有绑定 marker，或从首次合法
+`Closes #N` 得到候选 Issue；后续写入 job 使用
+`${{ needs.resolve_pr.outputs.issue_number }}` 进入同一种 Issue 级并发组。PR 编号不能
+作为写入并发键，因为两个不同 PR 可能同时指向同一个 Issue。
 
 GitHub 的运行开始顺序不等于评论创建顺序，因此处理器必须分页读取全部评论，
 严格解析命令，并按数值 `comment_id` 从小到大处理尚未终结的操作。第一条合法
@@ -90,7 +95,8 @@ PR 正文仅接受非引用、非代码块中的一个规范 `Closes #N`。拒�
 目标、跨仓引用、URL、裸 `#N` 和 `Fixes/Resolves`。目标必须是当前 base 仓库的
 普通 Issue；PR 作者必须与唯一领取人大小写不敏感相等。
 
-第一次合法关联后冻结 `repository_id + PR number + Issue number + PR author`。
+第一次合法关联后冻结 `repository_id + PR number + Issue number + PR author`，并在
+PR 状态评论中保存同一版本化绑定 marker，使关闭事件不依赖可变的 PR 正文。
 一个 Issue 只能有一个活动 PR。后续正文编辑不能换绑；未合并关闭后，原领取人
 可以用新 PR 再次关联。PR 合并状态以关闭事件后的实时 API 结果为准。
 
