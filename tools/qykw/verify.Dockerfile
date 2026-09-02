@@ -10,7 +10,11 @@ RUN printf '%s\n' \
       > /etc/apt/sources.list \
     && rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
-    && apt-get install -y --no-install-recommends git=1:2.39.5-0+deb12u2 \
+    && apt-get install -y --no-install-recommends \
+      git=1:2.39.5-0+deb12u2 \
+      python3-yaml=6.0-3+b2 \
+    && printf '%s\n' '/usr/lib/python3/dist-packages' \
+      > /usr/local/lib/python3.11/site-packages/debian-dist-packages.pth \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node

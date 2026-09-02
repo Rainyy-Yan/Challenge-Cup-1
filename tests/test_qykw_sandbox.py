@@ -730,6 +730,11 @@ class TestVerificationDockerfile(unittest.TestCase):
         lowered = dockerfile.lower()
         self.assertIn("snapshot.debian.org/archive/debian/20251020t000000z", lowered)
         self.assertIn("git=1:2.39.5-0+deb12u2", dockerfile)
+        self.assertIn("python3-yaml=6.0-3+b2", dockerfile)
+        self.assertIn(
+            "/usr/local/lib/python3.11/site-packages/debian-dist-packages.pth",
+            dockerfile,
+        )
         self.assertIn("--no-install-recommends", dockerfile)
         self.assertNotIn("latest", lowered)
         self.assertNotRegex(lowered, r"curl\s.*\|\s*(?:ba)?sh")
