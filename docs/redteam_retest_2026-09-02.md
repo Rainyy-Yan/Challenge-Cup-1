@@ -35,7 +35,7 @@ H5、H6 各漏 1 条。随后来源治理改写或下架了若干知识切片，
 ## 复现命令
 
 ```powershell
-py -3 -X utf8 -m unittest tests.test_audit tests.test_redteam tests.test_parity -v
+py -3 -X utf8 -m unittest tests.test_audit tests.test_redteam -v
 py -3 -X utf8 -m evalkit.redteam
 ```
 

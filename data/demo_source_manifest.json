@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "scope": {
-    "snapshot": "web/snapshot.json",
+    "runtime": "server.py -> web/index.html",
     "profiles": ["P-A", "P-B", "P-C"],
-    "description": "Every source slice exposed to the final static Demo runtime is listed here. This manifest is an audit queue, not a machine verification result."
+    "description": "Every source slice exposed to the online Demo runtime is listed here. This manifest is an audit queue, not a machine verification result."
   },
   "records": [
     {"id": "KB-001", "profiles": ["P-C"], "source_title": "Yaskawa Motoman, Beginner's Guide to Yaskawa Motoman Robot Motion", "version": "public web page; version not stated", "locator": "The Robot's Joints", "url": "https://knowledge.motoman.com/hc/en-us/articles/33604823339666-Beginner-s-Guide-to-Yaskawa-Motoman-Robot-Motion", "review_status": "pending_manual_review", "reviewer": "", "reviewed_on": "", "conclusion": "", "authorization": ""},

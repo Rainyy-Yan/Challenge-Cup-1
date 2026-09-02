@@ -50,7 +50,7 @@ jobs:
         run: >-
           python -m compileall -q
           agents core evalkit tools
-          build_showcase.py cli.py config.py orchestrator.py server.py
+          cli.py config.py orchestrator.py server.py
 
       - name: Run complete backend test suite
         run: python -m unittest discover -s tests -v
@@ -58,7 +58,7 @@ jobs:
   frontend:
     name: Frontend and generated assets
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
@@ -71,34 +71,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
+      - name: Display Python version
+        run: python --version
 
-      - name: Display runtime versions
-        run: |
-          python --version
-          node --version
-
-      - name: Check browser engine syntax
-        run: node --check web/engine.js
-
-      - name: Verify frontend and backend parity
-        run: python -m unittest tests.test_parity -v
-
-      - name: Generate and validate a fresh snapshot
-        env:
-          SNAPSHOT_OUT: ${{ runner.temp }}/snapshot.json
-        run: |
-          python -m evalkit.snapshot --out "$SNAPSHOT_OUT"
-          python -c "import json, os; data = json.load(open(os.environ['SNAPSHOT_OUT'], encoding='utf-8')); assert set(data['sessions']) == {'P-A', 'P-B', 'P-C'}; assert data['items'] and data['kb']"
-
-      - name: Rebuild standalone showcase
-        run: python build_showcase.py
-
-      - name: Verify standalone showcase is current
-        run: git diff --exit-code -- web/showcase.html
+      - name: Verify online frontend contract
+        run: python -m unittest tests.test_server.TestOnlineFrontend -v
 
   smoke:
     name: Backend service smoke test
