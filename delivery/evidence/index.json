@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "XH-202630",
-  "updated_on": "2026-09-02",
+  "updated_on": "2026-09-03",
   "entries": [
     {
       "id": "EV-G0-BASELINE-001",
@@ -58,6 +58,62 @@
       "repo_commit": null,
       "visibility": "public",
       "limitations": "规则评测数据，不是独立人工真值。"
+    },
+    {
+      "id": "EV-G2-FORMAL-TRUTH-CONTRACT-001",
+      "gate": "G2",
+      "category": "specification",
+      "title": "正式独立真值契约模板",
+      "path": "data/evaluation/formal_truth.template.json",
+      "status": "working",
+      "owner": "xyh202131",
+      "related_issues": [67],
+      "source": "data/evaluation/README.md",
+      "repo_commit": null,
+      "visibility": "public",
+      "limitations": "模板刻意保持 draft 且无人工身份、标签或结论；运行后应为 not_assessable，不能作为正式指标证据。"
+    },
+    {
+      "id": "EV-G2-FORMAL-SCORECARD-IMPLEMENTATION-001",
+      "gate": "G2",
+      "category": "runtime-artifact",
+      "title": "正式指标离线评分器实现",
+      "path": "evalkit/formal_scorecard.py",
+      "status": "working",
+      "owner": "xyh202131",
+      "related_issues": [67],
+      "source": "py -3 -X utf8 -m evalkit.formal_scorecard --truth <formal_truth.json> --out <report-directory>",
+      "repo_commit": null,
+      "visibility": "public",
+      "limitations": "评分器只验证冻结输入并计算证据门禁；它不生成或认证人工真值、签字、仲裁或官方达标结论。"
+    },
+    {
+      "id": "EV-G2-FORMAL-SCORECARD-TESTS-001",
+      "gate": "G2",
+      "category": "runtime-artifact",
+      "title": "正式评分器公式与命令行测试",
+      "path": "tests/test_formal_scorecard.py",
+      "status": "working",
+      "owner": "xyh202131",
+      "related_issues": [67],
+      "source": "py -3 -X utf8 -m unittest tests.test_formal_scorecard -v",
+      "repo_commit": null,
+      "visibility": "public",
+      "limitations": "自动测试覆盖实现与错误路径，不替代独立人工审阅、仲裁或正式赛事评分。"
+    },
+    {
+      "id": "EV-G2-FORMAL-SCORECARD-APPROVED-001",
+      "gate": "G2",
+      "category": "statistical-result",
+      "title": "经人工签字批准的正式指标计分卡",
+      "path": "delivery/evidence/formal-scorecard/scorecard.json",
+      "status": "planned",
+      "owner": "unassigned",
+      "related_issues": [67],
+      "source": "externally signed frozen formal truth, independent reviews, and adjudication",
+      "repo_commit": null,
+      "visibility": "restricted",
+      "limitations": "外部独立评分、仲裁、签字和冻结真值尚未实际形成；本计划条目不能作为正式指标或官方验收已完成的证明。"
     },
     {
       "id": "EV-G2-EVAL-SUMMARY-001",
