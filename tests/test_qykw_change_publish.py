@@ -77,6 +77,37 @@ def tree_digest(files: tuple[FileDigest, ...]) -> str:
     return hashlib.sha256(b"qykw-workspace-tree-v1\0" + encoded).hexdigest()
 
 
+def source_index_digest(
+    root_tree_sha: str,
+    entries: tuple[SourceTreeEntry, ...],
+    blobs: tuple[SourceBlob, ...],
+) -> str:
+    payload = {
+        "blobs": [
+            {
+                "git_sha": item.git_sha,
+                "mode": item.mode,
+                "path": item.path,
+                "sha256": hashlib.sha256(item.content).hexdigest(),
+            }
+            for item in sorted(blobs, key=lambda item: item.path)
+        ],
+        "entries": [
+            {
+                "git_sha": item.git_sha,
+                "kind": item.kind,
+                "mode": item.mode,
+                "path": item.path,
+            }
+            for item in sorted(entries, key=lambda item: item.path)
+        ],
+        "root_tree_sha": root_tree_sha,
+        "schema_version": 1,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(b"qykw-source-tree-index-v1\0" + encoded).hexdigest()
+
+
 def argv_digest(command: VerificationCommand) -> str:
     encoded = json.dumps(
         {"argv": list(command.argv), "env": [list(item) for item in command.env]},
@@ -305,6 +336,11 @@ class FakeGateway:
         self.after_ref: Callable[[], None] | None = None
         self.after_pull: Callable[[], None] | None = None
         self.find_inconclusive = False
+        self.published_draft = True
+        self.published_author = "qykw"
+        self.published_head: str | None = None
+        self.published_base = "main"
+        self.published_unavailable = False
         self._trees: dict[str, dict[str, tuple[str, bytes]]] = {
             SOURCE_HEAD: dict(BASE_FILES)
         }
@@ -373,6 +409,38 @@ class FakeGateway:
         )
         return tuple(entries)
 
+    def get_source_tree_index(self, repository: str, commit_sha: str):
+        entries = self.list_tree_entries(repository, commit_sha)
+        blobs = tuple(
+            self.get_blob_at_commit(repository, commit_sha, entry.path)
+            for entry in entries
+            if entry.kind == "blob"
+        )
+        return subject.SourceTreeIndex(
+            self.get_commit_tree_sha(repository, commit_sha),
+            True,
+            entries,
+            blobs,
+            source_index_digest(
+                self.get_commit_tree_sha(repository, commit_sha), entries, blobs
+            ),
+        )
+
+    def get_published_pull_snapshot(self, repository: str, pr_number: int):
+        self._read("published_pull", (repository, pr_number))
+        if self.published_unavailable:
+            raise RuntimeError("snapshot unavailable")
+        return subject.PublishedPullSnapshot(
+            pr_number,
+            "open",
+            self.published_draft,
+            self.published_author,
+            BRANCH,
+            self.published_head or self.branch_target,
+            self.published_base,
+            self.base_target,
+        )
+
     def get_changed_paths(
         self, repository: str, base_sha: str, head_sha: str
     ) -> tuple[str, ...]:
@@ -405,21 +473,19 @@ class FakeGateway:
         repository: str,
         *,
         branch_name: str,
-        head_sha: str,
         base_ref: str,
         run_id: str,
-    ) -> int | None:
-        self._read("find_pull", (repository, branch_name, head_sha, base_ref, run_id))
+    ):
+        self._read("find_pull", (repository, branch_name, base_ref, run_id))
         if self.find_inconclusive:
             raise RuntimeError("read unavailable")
         if (
             self._pull_number is not None
-            and self.branch_target == head_sha
             and branch_name == BRANCH
             and base_ref == "main"
             and run_id == RUN_ID
         ):
-            return self._pull_number
+            return self.get_published_pull_snapshot(repository, self._pull_number)
         return None
 
     def create_blob(self, *, repository: str, content: bytes) -> str:
@@ -520,6 +586,31 @@ class PublicationFixture:
             policy=self.policy,
         )
 
+    def journal_entry(
+        self,
+        operation_id: str,
+        stage: PublicationStage,
+        kind: WriteKind,
+        target: str,
+        object_id: str | None,
+        state: WriteState,
+    ) -> PublicationJournalEntry:
+        return PublicationJournalEntry(
+            1,
+            RUN_ID,
+            operation_id,
+            stage,
+            kind,
+            target,
+            object_id,
+            state,
+            repository=REPOSITORY,
+            source_head_sha=SOURCE_HEAD,
+            target_base_sha=BASE_SHA,
+            manifest_digest=self.request.manifest.digest,
+            workflow_run_id=RUNTIME.workflow_run_id,
+        )
+
 
 class TestAttestationBoundary(unittest.TestCase):
     def test_canonical_argv_digest_is_stable_and_binds_environment(self) -> None:
@@ -542,7 +633,8 @@ class TestAttestationBoundary(unittest.TestCase):
                 TrustedPublicationRuntime(*values)  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
             PublicationJournalEntry(
-                2, "", "", PublicationStage.PREFLIGHT, WriteKind.BLOB, "", None, WriteState.UNKNOWN
+                2, "", "", PublicationStage.PREFLIGHT, WriteKind.BLOB, "", None,
+                WriteState.UNKNOWN, "", "", "", "", 0,
             )
         for code, disposition in (("BAD", PublicationWriteDisposition.DEFINITELY_NOT_SENT), ("ok", "bad")):
             with self.subTest(code=code), self.assertRaises(ValueError):
@@ -856,7 +948,7 @@ class TestPublicationWrites(unittest.TestCase):
         fixture.gateway.after_ref = lambda: setattr(fixture.state, "canceled", True)
         result = fixture.publish()
         self.assertEqual(result.stage, PublicationStage.PULL)
-        self.assertEqual(result.error_code, "orphan_branch")
+        self.assertEqual(result.error_code, "change_canceled")
         self.assertEqual(result.branch_state, WriteState.CREATED)
         self.assertEqual(result.pull_state, WriteState.NOT_CREATED)
         self.assertFalse(any(call[0] == "pull" for call in fixture.gateway.write_calls))
@@ -869,7 +961,7 @@ class TestPublicationWrites(unittest.TestCase):
                 fixture = PublicationFixture()
                 fixture.gateway.failures[stage] = "before"
                 result = fixture.publish()
-                self.assertTrue(result.partial)
+                self.assertEqual(result.partial, stage != "blob")
                 self.assertEqual(sum(name == stage for name, _ in fixture.gateway.write_calls), 1)
                 receipt = next(item for item in result.receipts if item.kind.value == stage)
                 self.assertEqual(receipt.state, WriteState.NOT_CREATED)
@@ -901,7 +993,14 @@ class TestPublicationWrites(unittest.TestCase):
 
         fixture = PublicationFixture()
         fixture.gateway.failures["pull"] = "after"
-        fixture.gateway.find_inconclusive = True
+        original_find = fixture.gateway.find_draft_pull_by_run_marker
+
+        def fail_after_pull(*args: object, **kwargs: object):
+            if fixture.gateway._pull_number is not None:
+                raise RuntimeError("read unavailable")
+            return original_find(*args, **kwargs)
+
+        fixture.gateway.find_draft_pull_by_run_marker = fail_after_pull
         result = fixture.publish()
         self.assertEqual(result.pull_state, WriteState.UNKNOWN)
         self.assertEqual(result.error_code, "pull_write_unknown")
@@ -934,7 +1033,14 @@ class TestPublicationWrites(unittest.TestCase):
                     )
 
                 fixture.gateway.create_draft_pull_request = uncertain_pull
-                fixture.gateway.find_draft_pull_by_run_marker = lambda *args, **kwargs: found
+                lookup_count = 0
+
+                def find_after_write(*args: object, **kwargs: object):
+                    nonlocal lookup_count
+                    lookup_count += 1
+                    return None if lookup_count == 1 else found
+
+                fixture.gateway.find_draft_pull_by_run_marker = find_after_write
                 result = fixture.publish()
                 self.assertEqual(result.pull_state, expected)
                 self.assertEqual(sum(name == "pull" for name, _ in fixture.gateway.write_calls), 1)
@@ -1037,8 +1143,8 @@ class TestPublicationWrites(unittest.TestCase):
         fixture.gateway.after_pull = lambda: setattr(fixture.gateway, "base_target", "f" * 40)
         result = fixture.publish()
         self.assertEqual(result.stage, PublicationStage.PULL)
-        self.assertEqual(result.error_code, "stale_target_base_after_pull")
-        self.assertEqual(result.pull_state, WriteState.CREATED)
+        self.assertEqual(result.error_code, "pull_write_unknown")
+        self.assertEqual(result.pull_state, WriteState.UNKNOWN)
         self.assertTrue(result.partial)
 
     def test_journal_failure_happens_before_external_write(self) -> None:
@@ -1063,8 +1169,7 @@ class TestPublicationWrites(unittest.TestCase):
     def test_incomplete_journal_and_inconsistent_recovery_never_write(self) -> None:
         fixture = PublicationFixture()
         fixture.journal.records.append(
-            PublicationJournalEntry(
-                1, RUN_ID,
+            fixture.journal_entry(
                 "blob:0:" + fixture.request.attestation.output_files[0].sha256,
                 PublicationStage.BLOBS, WriteKind.BLOB,
                 "src/app.py", None, WriteState.UNKNOWN,
@@ -1076,8 +1181,8 @@ class TestPublicationWrites(unittest.TestCase):
 
         fixture = PublicationFixture()
         fixture.journal.records.append(
-            PublicationJournalEntry(
-                1, RUN_ID, "commit:published", PublicationStage.COMMIT, WriteKind.COMMIT,
+            fixture.journal_entry(
+                "commit:published", PublicationStage.COMMIT, WriteKind.COMMIT,
                 "tree", "e" * 40, WriteState.CREATED,
             )
         )
@@ -1088,9 +1193,12 @@ class TestPublicationWrites(unittest.TestCase):
 
         fixture = PublicationFixture()
         fixture.journal.records.append(
-            PublicationJournalEntry(
-                1, "OTHER", "blob:0:x", PublicationStage.BLOBS, WriteKind.BLOB,
-                "src/app.py", None, WriteState.UNKNOWN,
+            replace(
+                fixture.journal_entry(
+                    "blob:0:x", PublicationStage.BLOBS, WriteKind.BLOB,
+                    "src/app.py", None, WriteState.UNKNOWN,
+                ),
+                run_id="OTHER",
             )
         )
         fixture.journal.load = lambda run_id: tuple(fixture.journal.records)
@@ -1100,8 +1208,8 @@ class TestPublicationWrites(unittest.TestCase):
 
         fixture = PublicationFixture()
         fixture.journal.records.append(
-            PublicationJournalEntry(
-                1, RUN_ID, "blob:0:" + fixture.request.attestation.output_files[0].sha256,
+            fixture.journal_entry(
+                "blob:0:" + fixture.request.attestation.output_files[0].sha256,
                 PublicationStage.BLOBS, WriteKind.BLOB, "TOKEN-SHOULD-NOT-SURFACE",
                 None, WriteState.UNKNOWN,
             )
@@ -1118,7 +1226,7 @@ class TestPublicationWrites(unittest.TestCase):
         fixture.gateway.write_calls.clear()
         fixture.gateway.find_inconclusive = True
         result = fixture.publish()
-        self.assertEqual(result.error_code, "orphan_branch")
+        self.assertEqual(result.error_code, "pull_lookup_failed")
         self.assertEqual(fixture.gateway.write_calls, [])
 
         fixture = PublicationFixture()
@@ -1164,6 +1272,219 @@ class TestPublicationWrites(unittest.TestCase):
         result = fixture.publish()
         self.assertEqual(result.error_code, "branch_collision")
         self.assertEqual(fixture.gateway.write_calls, [])
+
+    def test_preflight_always_resolves_existing_run_marker_before_any_write(self) -> None:
+        for lookup, expected in ((77, "publication_collision"), (RuntimeError("down"), "pull_lookup_failed")):
+            with self.subTest(lookup=lookup):
+                fixture = PublicationFixture()
+
+                def find(*args: object, **kwargs: object):
+                    fixture.gateway._read("find_pull", (args, kwargs))
+                    if isinstance(lookup, Exception):
+                        raise lookup
+                    return lookup
+
+                fixture.gateway.find_draft_pull_by_run_marker = find
+                result = fixture.publish()
+                self.assertEqual(result.error_code, expected)
+                self.assertEqual(fixture.gateway.write_calls, [])
+                find_index = next(
+                    index
+                    for index, event in enumerate(fixture.gateway.read_calls)
+                    if event[0] == "find_pull"
+                )
+                self.assertLess(find_index, len(fixture.gateway.read_calls))
+
+        fixture = PublicationFixture()
+        result = fixture.publish()
+        self.assertEqual(result.stage, PublicationStage.COMPLETED)
+        first_write = fixture.events.index("write:blob")
+        self.assertTrue(any(event[0] == "find_pull" for event in fixture.gateway.read_calls))
+        self.assertNotIn("write:blob", fixture.events[: fixture.events.index("write:blob")])
+        self.assertGreater(first_write, 0)
+
+    def test_trusted_complete_tree_index_rejects_filtered_sentinel_and_forged_attestation(self) -> None:
+        fixture = PublicationFixture()
+        full_entries = fixture.gateway.list_tree_entries(REPOSITORY, SOURCE_HEAD)
+        full_blobs = tuple(
+            fixture.gateway.get_blob_at_commit(REPOSITORY, SOURCE_HEAD, entry.path)
+            for entry in full_entries
+            if entry.kind == "blob"
+        )
+        filtered_entries = tuple(entry for entry in full_entries if entry.path != "sentinel.bin")
+        filtered_blobs = tuple(blob for blob in full_blobs if blob.path != "sentinel.bin")
+        fixture.gateway.list_tree_entries = lambda *args: filtered_entries
+        fixture.gateway.get_source_tree_index = lambda *args: subject.SourceTreeIndex(
+            ROOT_TREE,
+            True,
+            filtered_entries,
+            filtered_blobs,
+            source_index_digest(ROOT_TREE, full_entries, full_blobs),
+        )
+        forged_complete = tuple(
+            file_digest(path, mode, content)
+            for path, (mode, content) in sorted(OUTPUT_FILES.items())
+            if path != "sentinel.bin"
+        )
+        fixture.request = replace(
+            fixture.request,
+            attestation=replace(
+                fixture.request.attestation,
+                workspace_tree_digest=tree_digest(forged_complete),
+            ),
+        )
+        result = fixture.publish()
+        self.assertEqual(result.error_code, "parent_tree_incomplete")
+        self.assertEqual(fixture.gateway.write_calls, [])
+
+    def test_journal_fsm_requires_created_before_next_operation_and_binds_context(self) -> None:
+        fixture = PublicationFixture()
+        result = fixture.publish()
+        self.assertEqual(result.stage, PublicationStage.COMPLETED)
+        for record in fixture.journal.records:
+            self.assertEqual(getattr(record, "repository", None), REPOSITORY)
+            self.assertEqual(getattr(record, "source_head_sha", None), SOURCE_HEAD)
+            self.assertEqual(getattr(record, "target_base_sha", None), BASE_SHA)
+            self.assertEqual(getattr(record, "manifest_digest", None), fixture.request.manifest.digest)
+            self.assertEqual(getattr(record, "workflow_run_id", None), RUNTIME.workflow_run_id)
+
+        malformed = PublicationFixture()
+        first_operation = "blob:0:" + malformed.request.attestation.output_files[0].sha256
+        second_operation = "blob:1:" + malformed.request.attestation.output_files[1].sha256
+        malformed.journal.records.extend(
+            (
+                malformed.journal_entry(
+                    first_operation, PublicationStage.BLOBS, WriteKind.BLOB,
+                    "src/app.py", None, WriteState.UNKNOWN,
+                ),
+                malformed.journal_entry(
+                    first_operation, PublicationStage.BLOBS, WriteKind.BLOB,
+                    "src/app.py", None, WriteState.UNKNOWN,
+                ),
+                malformed.journal_entry(
+                    second_operation, PublicationStage.BLOBS, WriteKind.BLOB,
+                    "src/new.py", None, WriteState.UNKNOWN,
+                ),
+            )
+        )
+        result = malformed.publish()
+        self.assertEqual(result.error_code, "journal_read_failed")
+        self.assertEqual(malformed.gateway.write_calls, [])
+
+    def test_recovery_reconciles_lone_unknown_ref_without_rewriting(self) -> None:
+        fixture = PublicationFixture()
+        fixture.journal.fail_at = 9
+        first = fixture.publish()
+        self.assertEqual(first.error_code, "journal_write_unknown")
+        self.assertIsNotNone(fixture.gateway.branch_target)
+        fixture.journal.fail_at = None
+        fixture.gateway.write_calls.clear()
+        before = len(fixture.journal.records)
+        second = fixture.publish()
+        self.assertNotEqual(second.stage, PublicationStage.COMPLETED)
+        self.assertEqual(fixture.gateway.write_calls, [])
+        self.assertEqual(len(fixture.journal.records), before + 1)
+        self.assertEqual(fixture.journal.records[-1].kind, WriteKind.REF)
+        self.assertEqual(fixture.journal.records[-1].state, WriteState.CREATED)
+
+        fixture = PublicationFixture()
+        fixture.journal.fail_at = 9
+        fixture.gateway.failures["ref"] = "before"
+        first = fixture.publish()
+        self.assertEqual(first.error_code, "journal_write_unknown")
+        fixture.journal.fail_at = None
+        fixture.gateway.write_calls.clear()
+        second = fixture.publish()
+        self.assertEqual(second.error_code, "publication_recovery_required")
+        self.assertEqual(second.branch_state, WriteState.NOT_CREATED)
+        self.assertEqual(fixture.gateway.write_calls, [])
+
+        fixture = PublicationFixture()
+        fixture.journal.fail_at = 9
+        first = fixture.publish()
+        self.assertEqual(first.error_code, "journal_write_unknown")
+        fixture.gateway.write_calls.clear()
+        second = fixture.publish()
+        self.assertEqual(second.error_code, "journal_write_unknown")
+        self.assertEqual(fixture.gateway.write_calls, [])
+
+    def test_recovery_reconciles_lone_unknown_pull_without_rewriting(self) -> None:
+        fixture = PublicationFixture()
+        fixture.journal.fail_at = 11
+        first = fixture.publish()
+        self.assertEqual(first.error_code, "journal_write_unknown")
+        self.assertEqual(fixture.gateway._pull_number, 77)
+        fixture.journal.fail_at = None
+        fixture.gateway.write_calls.clear()
+        second = fixture.publish()
+        self.assertEqual(second.stage, PublicationStage.COMPLETED)
+        self.assertEqual(second.pull_number, 77)
+        self.assertEqual(fixture.gateway.write_calls, [])
+        self.assertEqual(fixture.journal.records[-1].kind, WriteKind.PULL)
+        self.assertEqual(fixture.journal.records[-1].state, WriteState.CREATED)
+
+        fixture = PublicationFixture()
+        fixture.journal.fail_at = 11
+        fixture.gateway.failures["pull"] = "before"
+        first = fixture.publish()
+        self.assertEqual(first.error_code, "journal_write_unknown")
+        fixture.journal.fail_at = None
+        fixture.gateway.write_calls.clear()
+        second = fixture.publish()
+        self.assertEqual(second.error_code, "publication_recovery_required")
+        self.assertEqual(second.pull_state, WriteState.NOT_CREATED)
+        self.assertEqual(fixture.gateway.write_calls, [])
+
+    def test_created_pull_requires_authoritative_draft_snapshot_and_stable_ref(self) -> None:
+        mutators = {
+            "branch": lambda fixture: setattr(
+                fixture.gateway,
+                "after_pull",
+                lambda: setattr(fixture.gateway, "branch_target", "f" * 40),
+            ),
+            "not_draft": lambda fixture: setattr(fixture.gateway, "published_draft", False),
+            "wrong_author": lambda fixture: setattr(fixture.gateway, "published_author", "attacker"),
+            "wrong_head": lambda fixture: setattr(fixture.gateway, "published_head", "f" * 40),
+            "wrong_base": lambda fixture: setattr(fixture.gateway, "published_base", "release"),
+            "unavailable": lambda fixture: setattr(fixture.gateway, "published_unavailable", True),
+        }
+        for name, mutate in mutators.items():
+            with self.subTest(name=name):
+                fixture = PublicationFixture()
+                mutate(fixture)
+                result = fixture.publish()
+                self.assertEqual(result.stage, PublicationStage.PULL)
+                self.assertEqual(result.pull_state, WriteState.UNKNOWN)
+                self.assertTrue(result.partial)
+                self.assertNotEqual(result.stage, PublicationStage.COMPLETED)
+
+    def test_race_guard_rejects_non_boolean_cancel_and_not_created_is_not_partial(self) -> None:
+        for value in (None, 0):
+            with self.subTest(value=value):
+                fixture = PublicationFixture()
+                fixture.gateway.after_commit = lambda value=value: setattr(
+                    fixture.state, "canceled", value
+                )
+                result = fixture.publish()
+                self.assertEqual(result.stage, PublicationStage.REF)
+                self.assertEqual(result.error_code, "authorization_recheck_failed")
+                self.assertFalse(any(name in {"ref", "pull"} for name, _ in fixture.gateway.write_calls))
+
+            with self.subTest(value=value, gate="after_ref"):
+                fixture = PublicationFixture()
+                fixture.gateway.after_ref = lambda value=value: setattr(
+                    fixture.state, "canceled", value
+                )
+                result = fixture.publish()
+                self.assertEqual(result.stage, PublicationStage.PULL)
+                self.assertEqual(result.error_code, "authorization_recheck_failed")
+                self.assertFalse(any(name == "pull" for name, _ in fixture.gateway.write_calls))
+
+        fixture = PublicationFixture()
+        fixture.gateway.failures["blob"] = "before"
+        result = fixture.publish()
+        self.assertEqual(result.receipts[0].state, WriteState.NOT_CREATED)
+        self.assertFalse(result.partial)
 
     def test_gateway_protocol_exposes_no_destructive_or_general_write_capability(self) -> None:
         attributes = set(ChangeGitHubGateway.__dict__)

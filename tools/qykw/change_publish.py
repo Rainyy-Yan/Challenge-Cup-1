@@ -67,6 +67,31 @@ _MAX_RESULT_EXCERPT = 4_000
 _MAX_TREE_ENTRIES = 100_000
 
 
+@dataclass(frozen=True)
+class SourceTreeIndex:
+    """Gateway-certified complete recursive index for one commit tree."""
+
+    root_tree_sha: str
+    complete: bool
+    entries: tuple[SourceTreeEntry, ...]
+    blobs: tuple[SourceBlob, ...]
+    index_digest: str
+
+
+@dataclass(frozen=True)
+class PublishedPullSnapshot:
+    """Authoritative minimal snapshot of a qykw-created draft pull request."""
+
+    number: int
+    state: str
+    draft: bool
+    author_login: str
+    head_ref: str
+    head_sha: str | None
+    base_ref: str
+    base_sha: str
+
+
 class ChangeGitHubGateway(Protocol):
     """Repository-bound capability; deliberately omits destructive operations."""
 
@@ -78,9 +103,9 @@ class ChangeGitHubGateway(Protocol):
     def get_authenticated_user(self) -> AuthenticatedUser: ...
     def commit_exists(self, repository: str, commit_sha: str) -> bool: ...
     def get_commit_tree_sha(self, repository: str, commit_sha: str) -> str: ...
-    def list_tree_entries(
+    def get_source_tree_index(
         self, repository: str, commit_sha: str
-    ) -> tuple[SourceTreeEntry, ...]: ...
+    ) -> SourceTreeIndex: ...
     def get_changed_paths(
         self, repository: str, base_sha: str, head_sha: str
     ) -> tuple[str, ...]: ...
@@ -94,10 +119,12 @@ class ChangeGitHubGateway(Protocol):
         repository: str,
         *,
         branch_name: str,
-        head_sha: str,
         base_ref: str,
         run_id: str,
-    ) -> int | None: ...
+    ) -> PublishedPullSnapshot | None: ...
+    def get_published_pull_snapshot(
+        self, repository: str, pr_number: int
+    ) -> PublishedPullSnapshot: ...
     def create_blob(self, *, repository: str, content: bytes) -> str: ...
     def create_tree(
         self,
@@ -163,6 +190,11 @@ class PublicationJournalEntry:
     target: str
     object_id: str | None
     state: WriteState
+    repository: str
+    source_head_sha: str
+    target_base_sha: str
+    manifest_digest: str
+    workflow_run_id: int
 
     def __post_init__(self) -> None:
         if (
@@ -177,6 +209,12 @@ class PublicationJournalEntry:
             or not self.target
             or (self.object_id is not None and type(self.object_id) is not str)
             or type(self.state) is not WriteState
+            or not _is_repository(self.repository)
+            or not _is_oid(self.source_head_sha)
+            or not _is_oid(self.target_base_sha)
+            or not _is_sha256(self.manifest_digest)
+            or type(self.workflow_run_id) is not int
+            or self.workflow_run_id <= 0
         ):
             raise ValueError("invalid_publication_journal_entry")
 
@@ -236,6 +274,8 @@ class _PreparedPublication:
     pull_title: str
     pull_body: str
     existing_branch_target: str | None
+    existing_pull: PublishedPullSnapshot | None
+    workflow_run_id: int
 
 
 class _Failure(RuntimeError):
@@ -289,6 +329,39 @@ def compute_verification_argv_digest(command: VerificationCommand) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(b"qykw-verification-argv-v1\0" + encoded).hexdigest()
+
+
+def compute_source_tree_index_digest(
+    root_tree_sha: str,
+    entries: tuple[SourceTreeEntry, ...],
+    blobs: tuple[SourceBlob, ...],
+) -> str:
+    """Digest the complete recursive tree certificate without trusting its order."""
+
+    payload = {
+        "blobs": [
+            {
+                "git_sha": item.git_sha,
+                "mode": item.mode,
+                "path": item.path,
+                "sha256": hashlib.sha256(item.content).hexdigest(),
+            }
+            for item in sorted(blobs, key=lambda item: item.path)
+        ],
+        "entries": [
+            {
+                "git_sha": item.git_sha,
+                "kind": item.kind,
+                "mode": item.mode,
+                "path": item.path,
+            }
+            for item in sorted(entries, key=lambda item: item.path)
+        ],
+        "root_tree_sha": root_tree_sha,
+        "schema_version": 1,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(b"qykw-source-tree-index-v1\0" + encoded).hexdigest()
 
 
 def validate_attestation(
@@ -402,8 +475,12 @@ def publish_verified_change(
             )
             if records:
                 records = _validate_journal_for_prepared(records, prepared)
-            if records or prepared.existing_branch_target is not None:
-                return _recover_existing(prepared, gateway, records)
+            if (
+                records
+                or prepared.existing_branch_target is not None
+                or prepared.existing_pull is not None
+            ):
+                return _recover_existing(prepared, gateway, journal, records)
             return _publish_prepared(
                 prepared, gateway, state_store, journal, policy
             )
@@ -433,6 +510,13 @@ def _preflight(
     repository = change.target_repository
     if getattr(gateway, "repository", None) != repository:
         raise _Failure("target_repository_mismatch")
+    existing_pull = _find_existing_pull(
+        gateway,
+        repository,
+        branch_name=request.branch_name,
+        base_ref=change.target_base_ref,
+        run_id=change.context.run_id,
+    )
     _check_canceled(change, state_store)
     pull = _read_pull(gateway, change.context.pr_number)
     _validate_pull_snapshot(change, pull)
@@ -516,6 +600,8 @@ def _preflight(
         pull_title=f"qykw: {change.kind.value} {change.context.run_id.lower()}",
         pull_body=_build_pull_body(request, runtime),
         existing_branch_target=branch_target,
+        existing_pull=existing_pull,
+        workflow_run_id=runtime.workflow_run_id,
     )
 
 
@@ -539,15 +625,14 @@ def _publish_prepared(
         validate: Callable[[_T], tuple[str | None, _T]],
         reconcile: Callable[[], tuple[WriteState, str | None, _T | None]] | None = None,
     ) -> _T:
-        unknown = PublicationJournalEntry(
-            1,
-            prepared.change.context.run_id,
-            operation_id,
-            stage,
-            kind,
-            target,
-            None,
-            WriteState.UNKNOWN,
+        unknown = _new_journal_entry(
+            prepared,
+            operation_id=operation_id,
+            stage=stage,
+            kind=kind,
+            target=target,
+            object_id=None,
+            state=WriteState.UNKNOWN,
         )
         try:
             journal.append_synced(unknown)
@@ -573,15 +658,14 @@ def _publish_prepared(
                     state, object_id, value = WriteState.UNKNOWN, None, None
         except Exception:
             state, object_id, value = WriteState.UNKNOWN, None, None
-        final = PublicationJournalEntry(
-            1,
-            prepared.change.context.run_id,
-            operation_id,
-            stage,
-            kind,
-            target,
-            object_id,
-            state,
+        final = _new_journal_entry(
+            prepared,
+            operation_id=operation_id,
+            stage=stage,
+            kind=kind,
+            target=target,
+            object_id=object_id,
+            state=state,
         )
         try:
             journal.append_synced(final)
@@ -699,22 +783,27 @@ def _publish_prepared(
                 commit_sha=commit.commit_sha,
                 receipts=tuple(receipts),
                 partial=True,
-                error_code="orphan_branch",
+                error_code=race_error,
             )
 
         def reconcile_pull() -> tuple[WriteState, str | None, int | None]:
-            number = gateway.find_draft_pull_by_run_marker(
-                prepared.repository,
-                branch_name=prepared.branch_name,
-                head_sha=commit.commit_sha,
-                base_ref=prepared.change.target_base_ref,
-                run_id=prepared.change.context.run_id,
-            )
-            if number is None:
-                return WriteState.NOT_CREATED, None, None
-            if type(number) is not int or number <= 0:
+            try:
+                snapshot = _find_existing_pull(
+                    gateway,
+                    prepared.repository,
+                    branch_name=prepared.branch_name,
+                    base_ref=prepared.change.target_base_ref,
+                    run_id=prepared.change.context.run_id,
+                )
+            except _Failure:
                 return WriteState.UNKNOWN, None, None
-            return WriteState.CREATED, str(number), number
+            if snapshot is None:
+                return WriteState.NOT_CREATED, None, None
+            try:
+                _validate_created_pull(prepared, gateway, snapshot, commit.commit_sha)
+            except _Failure:
+                return WriteState.UNKNOWN, None, None
+            return WriteState.CREATED, str(snapshot.number), snapshot.number
 
         pull_number = perform(
             operation_id="pull:draft",
@@ -728,21 +817,11 @@ def _publish_prepared(
                 title=prepared.pull_title,
                 body=prepared.pull_body,
             ),
-            validate=lambda value: (_require_pull_number(value), value),
+            validate=lambda value: _validate_created_pull_number(
+                prepared, gateway, value, commit.commit_sha
+            ),
             reconcile=reconcile_pull,
         )
-        if _read_ref(gateway, prepared.repository, prepared.change.target_base_ref) != prepared.change.target_base_sha:
-            return _result(
-                stage=PublicationStage.PULL,
-                branch_name=prepared.branch_name,
-                branch_state=WriteState.CREATED,
-                pull_state=WriteState.CREATED,
-                commit_sha=commit.commit_sha,
-                pull_number=pull_number,
-                receipts=tuple(receipts),
-                partial=True,
-                error_code="stale_target_base_after_pull",
-            )
         return _result(
             stage=PublicationStage.COMPLETED,
             branch_name=prepared.branch_name,
@@ -785,52 +864,112 @@ def _publish_prepared(
 def _recover_existing(
     prepared: _PreparedPublication,
     gateway: ChangeGitHubGateway,
+    journal: PublicationJournal,
     records: tuple[PublicationJournalEntry, ...],
 ) -> ChangePublication:
+    if not records:
+        return _result(
+            stage=PublicationStage.PREFLIGHT,
+            branch_name=prepared.branch_name,
+            error_code=(
+                "publication_collision"
+                if prepared.existing_pull is not None
+                else "branch_collision"
+            ),
+        )
+    last_operation = records[-1].operation_id
+    same_operation = tuple(
+        record for record in records if record.operation_id == last_operation
+    )
+    if len(same_operation) == 1:
+        unknown = same_operation[0]
+        state = WriteState.UNKNOWN
+        object_id: str | None = None
+        if unknown.kind is WriteKind.REF:
+            expected_commit = _latest_object(
+                _receipts_from_journal(records), WriteKind.COMMIT
+            )
+            try:
+                actual = gateway.get_ref_target(
+                    prepared.repository, prepared.branch_name
+                )
+                if expected_commit is not None and actual == expected_commit:
+                    state, object_id = WriteState.CREATED, expected_commit
+                elif actual is None:
+                    state = WriteState.NOT_CREATED
+            except Exception:
+                pass
+        elif unknown.kind is WriteKind.PULL:
+            expected_commit = _latest_object(
+                _receipts_from_journal(records), WriteKind.COMMIT
+            )
+            if prepared.existing_pull is None:
+                state = WriteState.NOT_CREATED
+            elif expected_commit is not None:
+                try:
+                    _validate_created_pull(
+                        prepared, gateway, prepared.existing_pull, expected_commit
+                    )
+                    state = WriteState.CREATED
+                    object_id = str(prepared.existing_pull.number)
+                except _Failure:
+                    pass
+        terminal = _new_journal_entry(
+            prepared,
+            operation_id=unknown.operation_id,
+            stage=unknown.stage,
+            kind=unknown.kind,
+            target=unknown.target,
+            object_id=object_id,
+            state=state,
+        )
+        try:
+            journal.append_synced(terminal)
+        except Exception:
+            return _result(
+                stage=unknown.stage,
+                branch_name=prepared.branch_name,
+                receipts=_receipts_from_journal(records),
+                error_code="journal_write_unknown",
+            )
+        records = _validate_journal_for_prepared(records + (terminal,), prepared)
     receipts = _receipts_from_journal(records)
     commit_sha = _latest_object(receipts, WriteKind.COMMIT)
     branch_target = prepared.existing_branch_target
-    if commit_sha is None and branch_target is not None:
-        commit_sha = branch_target
-    if branch_target is None:
+    expected_count = len(prepared.published_files) + 4
+    if (
+        len(receipts) != expected_count
+        or any(receipt.state is not WriteState.CREATED for receipt in receipts)
+        or receipts[-1].kind is not WriteKind.PULL
+    ):
         return _result(
             stage=PublicationStage.PREFLIGHT,
             branch_name=prepared.branch_name,
             receipts=receipts,
-            partial=bool(receipts),
             error_code="publication_recovery_required",
         )
-    if commit_sha != branch_target or not _is_oid(branch_target):
+    if commit_sha is None or commit_sha != branch_target or not _is_oid(branch_target):
         return _result(
             stage=PublicationStage.PREFLIGHT,
             branch_name=prepared.branch_name,
-            branch_state=WriteState.CREATED if records else WriteState.NOT_CREATED,
+            branch_state=WriteState.CREATED,
             commit_sha=commit_sha,
             receipts=receipts,
-            partial=bool(records),
             error_code="branch_collision",
         )
-    try:
-        pull_number = gateway.find_draft_pull_by_run_marker(
-            prepared.repository,
-            branch_name=prepared.branch_name,
-            head_sha=branch_target,
-            base_ref=prepared.change.target_base_ref,
-            run_id=prepared.change.context.run_id,
-        )
-    except Exception:
-        pull_number = None
-    if type(pull_number) is not int or pull_number <= 0:
+    if prepared.existing_pull is None:
         return _result(
             stage=PublicationStage.PREFLIGHT,
             branch_name=prepared.branch_name,
-            branch_state=WriteState.CREATED if records else WriteState.NOT_CREATED,
+            branch_state=WriteState.CREATED,
             commit_sha=branch_target,
             receipts=receipts,
-            partial=bool(records),
-            error_code="orphan_branch" if records else "branch_collision",
+            error_code="orphan_branch",
         )
     try:
+        _validate_created_pull(
+            prepared, gateway, prepared.existing_pull, branch_target
+        )
         _verify_published_commit(prepared, gateway, branch_target, None)
     except _Failure as error:
         return _result(
@@ -839,9 +978,8 @@ def _recover_existing(
             branch_state=WriteState.CREATED,
             pull_state=WriteState.CREATED,
             commit_sha=branch_target,
-            pull_number=pull_number,
+            pull_number=prepared.existing_pull.number,
             receipts=receipts,
-            partial=True,
             error_code=error.code,
         )
     return _result(
@@ -850,7 +988,7 @@ def _recover_existing(
         branch_state=WriteState.CREATED,
         pull_state=WriteState.CREATED,
         commit_sha=branch_target,
-        pull_number=pull_number,
+        pull_number=prepared.existing_pull.number,
         receipts=receipts,
     )
 
@@ -865,7 +1003,12 @@ def _race_guard(
 ) -> str | None:
     change = prepared.change
     try:
-        if state_store.is_cancel_requested(change.context.pr_number, change.context.run_id):
+        canceled = state_store.is_cancel_requested(
+            change.context.pr_number, change.context.run_id
+        )
+        if type(canceled) is not bool:
+            return "authorization_recheck_failed"
+        if canceled is True:
             return "change_canceled"
         pull = gateway.get_pull_snapshot(change.context.pr_number)
         _validate_pull_snapshot(change, pull)
@@ -914,13 +1057,30 @@ def _load_complete_tree(
 ) -> _CompleteTree:
     try:
         root_tree_sha = gateway.get_commit_tree_sha(repository, commit_sha)
-        entries = gateway.list_tree_entries(repository, commit_sha)
+        index = gateway.get_source_tree_index(repository, commit_sha)
     except Exception:
         raise _Failure("parent_tree_incomplete") from None
-    if not _is_oid(root_tree_sha) or type(entries) is not tuple or len(entries) > _MAX_TREE_ENTRIES:
+    if (
+        not _is_oid(root_tree_sha)
+        or type(index) is not SourceTreeIndex
+        or index.complete is not True
+        or index.root_tree_sha != root_tree_sha
+        or type(index.entries) is not tuple
+        or type(index.blobs) is not tuple
+        or len(index.entries) > _MAX_TREE_ENTRIES
+        or not _is_sha256(index.index_digest)
+    ):
+        raise _Failure("parent_tree_incomplete")
+    try:
+        actual_index_digest = compute_source_tree_index_digest(
+            index.root_tree_sha, index.entries, index.blobs
+        )
+    except Exception:
+        raise _Failure("parent_tree_incomplete") from None
+    if actual_index_digest != index.index_digest:
         raise _Failure("parent_tree_incomplete")
     seen: dict[str, SourceTreeEntry] = {}
-    for entry in entries:
+    for entry in index.entries:
         if type(entry) is not SourceTreeEntry:
             raise _Failure("parent_tree_incomplete")
         path = _normalize_tree_path(entry.path)
@@ -943,18 +1103,28 @@ def _load_complete_tree(
         parent_entry = seen.get(unicodedata.normalize("NFC", parent.as_posix()).casefold())
         if parent_entry is None or parent_entry.kind != "tree" or parent_entry.path != parent.as_posix():
             raise _Failure("parent_tree_incomplete")
+    indexed_blobs: dict[str, SourceBlob] = {}
+    for blob in index.blobs:
+        if type(blob) is not SourceBlob:
+            raise _Failure("source_blob_mismatch")
+        path = _normalize_tree_path(blob.path)
+        key = unicodedata.normalize("NFC", path).casefold()
+        if key in indexed_blobs or path != blob.path:
+            raise _Failure("source_blob_mismatch")
+        indexed_blobs[key] = blob
+    expected_blob_keys = {
+        key for key, entry in seen.items() if entry.kind == "blob"
+    }
+    if set(indexed_blobs) != expected_blob_keys:
+        raise _Failure("source_blob_mismatch")
     blobs: list[SourceBlob] = []
     digests: list[FileDigest] = []
-    for entry in sorted(seen.values(), key=lambda item: item.path):
+    for key, entry in sorted(seen.items(), key=lambda item: item[1].path):
         if entry.kind != "blob":
             continue
-        try:
-            blob = gateway.get_blob_at_commit(repository, commit_sha, entry.path)
-        except Exception:
-            raise _Failure("source_blob_mismatch") from None
+        blob = indexed_blobs[key]
         if (
-            type(blob) is not SourceBlob
-            or blob.path != entry.path
+            blob.path != entry.path
             or blob.mode != entry.mode
             or blob.git_sha != entry.git_sha
             or not _blob_matches_oid(blob.content, blob.git_sha)
@@ -964,7 +1134,7 @@ def _load_complete_tree(
         digests.append(
             FileDigest(blob.path, blob.mode, hashlib.sha256(blob.content).hexdigest())
         )
-    return _CompleteTree(root_tree_sha, entries, tuple(blobs), tuple(digests))
+    return _CompleteTree(root_tree_sha, index.entries, tuple(blobs), tuple(digests))
 
 
 def _write_source_tree(root: Path, blobs: tuple[SourceBlob, ...]) -> None:
@@ -1128,6 +1298,30 @@ def _read_user(gateway: ChangeGitHubGateway) -> AuthenticatedUser:
     return user
 
 
+def _find_existing_pull(
+    gateway: ChangeGitHubGateway,
+    repository: str,
+    *,
+    branch_name: str,
+    base_ref: str,
+    run_id: str,
+) -> PublishedPullSnapshot | None:
+    try:
+        value = gateway.find_draft_pull_by_run_marker(
+            repository,
+            branch_name=branch_name,
+            base_ref=base_ref,
+            run_id=run_id,
+        )
+    except Exception:
+        raise _Failure("pull_lookup_failed") from None
+    if value is None:
+        return None
+    if type(value) is not PublishedPullSnapshot:
+        raise _Failure("publication_collision")
+    return value
+
+
 def _read_ref(
     gateway: ChangeGitHubGateway, repository: str, branch: str
 ) -> str | None:
@@ -1188,6 +1382,33 @@ def _validate_journal_records(
     return records
 
 
+def _new_journal_entry(
+    prepared: _PreparedPublication,
+    *,
+    operation_id: str,
+    stage: PublicationStage,
+    kind: WriteKind,
+    target: str,
+    object_id: str | None,
+    state: WriteState,
+) -> PublicationJournalEntry:
+    return PublicationJournalEntry(
+        1,
+        prepared.change.context.run_id,
+        operation_id,
+        stage,
+        kind,
+        target,
+        object_id,
+        state,
+        prepared.repository,
+        prepared.parent_sha,
+        prepared.change.target_base_sha,
+        prepared.manifest.digest,
+        prepared.workflow_run_id,
+    )
+
+
 def _receipts_from_journal(
     records: tuple[PublicationJournalEntry, ...]
 ) -> tuple[WriteReceipt, ...]:
@@ -1242,6 +1463,11 @@ def _validate_journal_for_prepared(
             or record.kind is not kind
             or (target is not None and record.target != target)
             or (target is None and not _is_oid(record.target))
+            or record.repository != prepared.repository
+            or record.source_head_sha != prepared.parent_sha
+            or record.target_base_sha != prepared.change.target_base_sha
+            or record.manifest_digest != prepared.manifest.digest
+            or record.workflow_run_id != prepared.workflow_run_id
         ):
             raise _Failure("journal_read_failed")
         transitions = seen.setdefault(record.operation_id, [])
@@ -1249,16 +1475,32 @@ def _validate_journal_for_prepared(
             first_indexes.append(index)
             if record.state is not WriteState.UNKNOWN or record.object_id is not None:
                 raise _Failure("journal_read_failed")
-        elif len(transitions) != 1:
+        elif len(transitions) != 1 or any(
+            getattr(record, field) != getattr(transitions[0], field)
+            for field in (
+                "operation_id",
+                "stage",
+                "kind",
+                "target",
+                "repository",
+                "source_head_sha",
+                "target_base_sha",
+                "manifest_digest",
+                "workflow_run_id",
+            )
+        ):
             raise _Failure("journal_read_failed")
         transitions.append(record)
     if first_indexes != list(range(len(first_indexes))):
         raise _Failure("journal_read_failed")
-    for operation_id, transitions in seen.items():
+    for position, operation_id in enumerate(item[0] for item in expected[: len(first_indexes)]):
+        transitions = seen[operation_id]
         if len(transitions) == 1:
+            if position != len(first_indexes) - 1:
+                raise _Failure("journal_read_failed")
             continue
         final = transitions[-1]
-        if final.state is WriteState.NOT_CREATED and final.object_id is not None:
+        if final.state is not WriteState.CREATED and final.object_id is not None:
             raise _Failure("journal_read_failed")
         if final.state is WriteState.CREATED:
             if final.kind is WriteKind.PULL:
@@ -1272,6 +1514,21 @@ def _validate_journal_for_prepared(
             expected_oid = _git_blob_oid(prepared.published_files[index].content, 40)
             if final.object_id != expected_oid:
                 raise _Failure("journal_read_failed")
+        if position < len(first_indexes) - 1 and final.state is not WriteState.CREATED:
+            raise _Failure("journal_read_failed")
+    latest = {
+        operation_id: transitions[-1]
+        for operation_id, transitions in seen.items()
+    }
+    tree = latest.get("tree:manifest")
+    commit = latest.get("commit:published")
+    ref = latest.get("ref:branch")
+    if commit is not None and tree is not None:
+        if tree.state is not WriteState.CREATED or commit.target != tree.object_id:
+            raise _Failure("journal_read_failed")
+    if ref is not None and commit is not None and ref.state is WriteState.CREATED:
+        if commit.state is not WriteState.CREATED or ref.object_id != commit.object_id:
+            raise _Failure("journal_read_failed")
     return records
 
 
@@ -1332,6 +1589,51 @@ def _require_pull_number(value: object) -> str:
     if type(value) is not int or value <= 0:
         raise ValueError("invalid_pull_number")
     return str(value)
+
+
+def _validate_created_pull_number(
+    prepared: _PreparedPublication,
+    gateway: ChangeGitHubGateway,
+    value: object,
+    commit_sha: str,
+) -> tuple[str, int]:
+    object_id = _require_pull_number(value)
+    try:
+        snapshot = gateway.get_published_pull_snapshot(prepared.repository, value)
+    except Exception:
+        raise _Failure("published_pull_unconfirmed") from None
+    _validate_created_pull(prepared, gateway, snapshot, commit_sha)
+    return object_id, value
+
+
+def _validate_created_pull(
+    prepared: _PreparedPublication,
+    gateway: ChangeGitHubGateway,
+    snapshot: PublishedPullSnapshot,
+    commit_sha: str,
+) -> None:
+    if (
+        type(snapshot) is not PublishedPullSnapshot
+        or type(snapshot.number) is not int
+        or snapshot.number <= 0
+        or type(snapshot.state) is not str
+        or snapshot.state.casefold() != "open"
+        or snapshot.draft is not True
+        or snapshot.author_login != _BOT_LOGIN
+        or snapshot.head_ref != prepared.branch_name
+        or snapshot.head_sha != commit_sha
+        or snapshot.base_ref != prepared.change.target_base_ref
+        or snapshot.base_sha != prepared.change.target_base_sha
+    ):
+        raise _Failure("published_pull_mismatch")
+    if (
+        _read_ref(gateway, prepared.repository, prepared.branch_name) != commit_sha
+        or _read_ref(
+            gateway, prepared.repository, prepared.change.target_base_ref
+        )
+        != prepared.change.target_base_sha
+    ):
+        raise _Failure("published_pull_mismatch")
 
 
 def _raise_invalid_ref_response() -> str:
@@ -1412,6 +1714,9 @@ def _result(
     partial: bool = False,
     error_code: str | None = None,
 ) -> ChangePublication:
+    partial = error_code is not None and any(
+        receipt.state in {WriteState.CREATED, WriteState.UNKNOWN} for receipt in receipts
+    )
     return ChangePublication(
         stage,
         branch_name,
