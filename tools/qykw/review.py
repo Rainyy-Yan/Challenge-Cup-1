@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import hashlib
 
 from tools.qykw.domain import (
-    ChangedLine, ContextChunk, ContextPlan, CoverageReport, DiffSide, Finding, FindingCandidate,
+    ChangedLine, ContextChunk, ContextChunkKind, ContextPlan, CoverageReport, DiffSide, Finding, FindingCandidate,
     PullSnapshot, ReviewResult, RunContext, Severity,
 )
 from tools.qykw.prompts import build_review_request, build_validation_request
@@ -45,11 +45,19 @@ class ReviewEngine:
     def review(self, run: RunContext, snapshot: PullSnapshot, plan: ContextPlan) -> ReviewResult:
         if not _same_review_identity(run, snapshot, plan):
             raise ValueError("review_identity_mismatch")
-        _validate_plan_chunks(run, plan)
+        _validate_plan_chunks(run, snapshot, plan)
         try:
             candidates: list[_SourcedCandidate] = []
             for chunk in plan.chunks:
-                candidates.extend(self._review_candidates(build_review_request(run, chunk, plan=plan), chunk))
+                if chunk.kind is ContextChunkKind.REFERENCE:
+                    continue
+                request = build_review_request(
+                    run,
+                    chunk,
+                    snapshot.trusted_rules,
+                    plan=plan,
+                )
+                candidates.extend(self._review_candidates(request, chunk))
             candidates = _prepare_validation_batch(candidates, plan, max_findings=self.max_findings)
             if not candidates:
                 return ReviewResult(
@@ -59,11 +67,14 @@ class ReviewEngine:
                     ("没有可验证的本地候选。",),
                     ("未执行 PR 代码。",),
                 )
-            conclusion, retained, notes, limitations = self._validation(build_validation_request(
-                run,
-                tuple(item.candidate for item in candidates),
-                candidate_sources=tuple(item.chunk_id for item in candidates),
-            ))
+            conclusion, retained, notes, limitations = self._validation(
+                build_validation_request(
+                    run,
+                    tuple(item.candidate for item in candidates),
+                    snapshot.trusted_rules,
+                    candidate_sources=tuple(item.chunk_id for item in candidates),
+                )
+            )
             allowed = _validation_intersection(candidates, retained)
             findings = validate_findings((item.candidate for item in allowed), commentable_lines=plan.commentable_lines,
                                          max_findings=self.max_findings, manifest_order=plan.manifest.risk_order)
@@ -273,16 +284,26 @@ def _failure(coverage: CoverageReport) -> ReviewResult:
     return ReviewResult("审查未完成", (), coverage, ("结构化审查结果不可用。",), ("本次未发布未经验证的发现。",))
 
 
-def _validate_plan_chunks(run: RunContext, plan: ContextPlan) -> None:
+def _validate_plan_chunks(run: RunContext, snapshot: PullSnapshot, plan: ContextPlan) -> None:
     if not _plan_id_matches(run, plan) or len({chunk.chunk_id for chunk in plan.chunks}) != len(plan.chunks):
         raise ValueError("invalid_plan_chunk_binding")
+    allowed_paths = set(plan.manifest.paths)
+    allowed_paths.update(reference.path for reference in snapshot.trusted_rules)
+    allowed_paths.update(reference.path for reference in snapshot.related_files)
     prefix = (
         f"P run={run.run_id} rid={run.repository_id} repo={run.repository} pr={run.pr_number} "
         f"bs={run.target_base_sha} br={run.target_base_ref} hs={run.source_head_sha} "
     )
     for chunk in plan.chunks:
+        if chunk.kind is ContextChunkKind.REFERENCE:
+            kind_paths = {reference.path for reference in snapshot.trusted_rules + snapshot.related_files}
+        elif chunk.kind in {ContextChunkKind.DIFF, ContextChunkKind.TRIAGE}:
+            kind_paths = set(plan.manifest.paths)
+        else:
+            raise ValueError("invalid_plan_chunk_binding")
         if (not chunk.chunk_id.startswith(f"{plan.run_id}|chunk=") or not chunk.paths
-                or any(path not in plan.manifest.paths for path in chunk.paths)
+                or any(path not in kind_paths or path not in allowed_paths for path in chunk.paths)
+                or not _chunk_provenance_matches_kind(chunk)
                 or not chunk.text.startswith(prefix)):
             raise ValueError("invalid_plan_chunk_binding")
 
@@ -293,3 +314,14 @@ def _plan_id_matches(run: RunContext, plan: ContextPlan) -> bool:
         f"|base_sha={run.target_base_sha}|base_ref={run.target_base_ref}|head_sha={run.source_head_sha}"
     )
     return plan.run_id in {run.run_id, expected}
+
+
+def _chunk_provenance_matches_kind(chunk: ContextChunk) -> bool:
+    header, separator, _ = chunk.text.partition("\n")
+    if not separator or len(chunk.paths) != 1 or f" path={chunk.paths[0]} " not in header:
+        return False
+    if chunk.kind is ContextChunkKind.REFERENCE:
+        return " side=REFERENCE " in header
+    if chunk.kind is ContextChunkKind.TRIAGE:
+        return " side=TRIAGE " in header
+    return any(marker in header for marker in (" side=CONTEXT ", " side=LEFT ", " side=RIGHT "))

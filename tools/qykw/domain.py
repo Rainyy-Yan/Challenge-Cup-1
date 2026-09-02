@@ -27,6 +27,12 @@ class DiffSide(str, Enum):
     RIGHT = "RIGHT"
 
 
+class ContextChunkKind(str, Enum):
+    DIFF = "DIFF"
+    TRIAGE = "TRIAGE"
+    REFERENCE = "REFERENCE"
+
+
 class CommandName(Enum):
     HELP = "帮助"
     ANALYZE = "分析"
@@ -402,6 +408,7 @@ class ContextChunk:
     paths: tuple[str, ...]
     text: str
     estimated_tokens: int
+    kind: ContextChunkKind = ContextChunkKind.DIFF
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from tools.qykw.context import estimate_tokens
 from tools.qykw.domain import (
     ContextChunk,
+    ContextChunkKind,
     ContextPlan,
     FileManifest,
     FindingCandidate,
@@ -140,6 +141,26 @@ def build_validation_request(
         },
         idempotency_suffix=batch_id,
     )
+
+
+def estimate_trusted_rules_input_tokens(
+    run: RunContext,
+    trusted_rules: tuple[RepositoryFile, ...],
+) -> int:
+    """Return the exact incremental wire-input cost of trusted rules."""
+
+    def request(rules: tuple[RepositoryFile, ...]) -> InferenceRequest:
+        return _request(
+            run,
+            request_kind="review",
+            stage=RunStage.ANALYZING,
+            schema=_review_candidate_schema(),
+            task="Find only concrete, evidence-backed issues in this context chunk.",
+            trusted=_trusted_section(run, rules),
+            untrusted={},
+        )
+
+    return _request_tokens(request(trusted_rules)) - _request_tokens(request(()))
 
 
 def build_patch_request(
@@ -523,8 +544,11 @@ def _manifest_data(manifest: FileManifest) -> Mapping[str, object]:
 def _chunk_data(chunk: ContextChunk) -> Mapping[str, object]:
     """Encode untrusted code and diff text as data."""
 
+    if not isinstance(chunk.kind, ContextChunkKind):
+        raise PromptError("invalid_context_chunk_kind")
     return {
         "chunk_id": chunk.chunk_id,
+        "kind": chunk.kind.value,
         "paths": list(chunk.paths),
         "text": chunk.text,
         "estimated_tokens": chunk.estimated_tokens,

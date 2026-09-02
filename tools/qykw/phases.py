@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -15,11 +16,12 @@ from tools.qykw.context import build_context_plan
 from tools.qykw.domain import (
     Actor, CommentKind, CommandMode, CommandName, CommandRequest, CoverageReport, DiffSide,
     Finding, PullRef, ReviewResult, RunContext, RunRecord, RunStage, RunStatus,
-    Severity, TriggerRef,
+    InferenceError, Severity, TriggerRef,
 )
 from tools.qykw.github import HttpGitHubGateway
 from tools.qykw.policy import authorize_command
-from tools.qykw.provider import ResponsesInferenceProvider
+from tools.qykw.prompts import estimate_trusted_rules_input_tokens
+from tools.qykw.provider import ProviderError, ResponsesInferenceProvider
 from tools.qykw.publish import ReviewPublisher, sanitize_public_text
 from tools.qykw.review import ReviewEngine
 from tools.qykw.state import GitHubCommentStateStore
@@ -39,6 +41,20 @@ _ANALYZE_ENVIRONMENT = _COMMON_ENVIRONMENT | {
     "QYKW_INFERENCE_ALLOWED_HOSTS", "QYKW_INFERENCE_CONTEXT_WINDOW",
     "QYKW_INFERENCE_MAX_OUTPUT_TOKENS", "QYKW_INFERENCE_TIMEOUT_SECONDS",
 }
+
+
+class AnalyzePhaseErrorCode(str, Enum):
+    PROVIDER_SETUP_FAILED = "analysis_provider_setup_failed"
+    CONTEXT_BUILD_FAILED = "analysis_context_build_failed"
+    REVIEW_EXECUTION_FAILED = "analysis_review_execution_failed"
+
+
+class AnalyzePhaseError(RuntimeError):
+    """Content-free error that identifies only the failed analyze stage."""
+
+    def __init__(self, code: AnalyzePhaseErrorCode) -> None:
+        super().__init__(code.value)
+        self.code = code
 
 
 class ProductionPhaseController:
@@ -90,18 +106,33 @@ class ProductionPhaseController:
         if run.command.name in {CommandName.HELP, CommandName.STATUS, CommandName.SUMMARY}:
             result = _deterministic(run, record)
             return _analysis_artifact(run, {"kind": "advisory", "status": "completed", "advisory": _advisory_payload(result)})
-        provider = ResponsesInferenceProvider.from_env(self.environment)
-        capabilities = provider.capabilities()
-        plan = build_context_plan(snapshot, run_id=run.run_id, repository_id=run.repository_id,
-                                  repository_limit=capabilities.context_window,
-                                  backend_context_window=capabilities.context_window,
-                                  output_reserve=capabilities.max_output_tokens,
-                                  safety_reserve_ratio=config.context.safety_reserve_ratio,
-                                  max_chunk_ratio=config.context.max_chunk_ratio)
+        try:
+            provider = ResponsesInferenceProvider.from_env(self.environment)
+            capabilities = provider.capabilities()
+        except (ProviderError, InferenceError):
+            raise
+        except Exception:
+            raise AnalyzePhaseError(AnalyzePhaseErrorCode.PROVIDER_SETUP_FAILED) from None
+        try:
+            trusted_input_reserve = estimate_trusted_rules_input_tokens(run, snapshot.trusted_rules)
+            plan = build_context_plan(snapshot, run_id=run.run_id, repository_id=run.repository_id,
+                                      repository_limit=capabilities.context_window,
+                                      backend_context_window=capabilities.context_window,
+                                      output_reserve=capabilities.max_output_tokens,
+                                      safety_reserve_ratio=config.context.safety_reserve_ratio,
+                                      max_chunk_ratio=config.context.max_chunk_ratio,
+                                      trusted_input_reserve=trusted_input_reserve)
+        except Exception:
+            raise AnalyzePhaseError(AnalyzePhaseErrorCode.CONTEXT_BUILD_FAILED) from None
         if run.command.name in {CommandName.ANALYZE, CommandName.PLAN}:
-            result = AdvisoryService(provider).handle(run, plan, record)
+            result = AdvisoryService(provider).handle(run, plan, record, trusted_rules=snapshot.trusted_rules)
             return _analysis_artifact(run, {"kind": "advisory", "status": "completed", "advisory": _advisory_payload(result)})
-        review = ReviewEngine(provider, max_findings=config.review.max_findings).review(run, snapshot, plan)
+        try:
+            review = ReviewEngine(provider, max_findings=config.review.max_findings).review(run, snapshot, plan)
+        except (ProviderError, InferenceError):
+            raise
+        except Exception:
+            raise AnalyzePhaseError(AnalyzePhaseErrorCode.REVIEW_EXECUTION_FAILED) from None
         return _analysis_artifact(run, {"kind": "review", "status": "completed", "review": _review_payload(review)})
 
     def publish(self, artifact: dict[str, object]) -> dict[str, object]:
