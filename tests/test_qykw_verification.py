@@ -914,7 +914,6 @@ class TestProfiles(unittest.TestCase):
                     "core",
                     "evalkit",
                     "tools",
-                    "build_showcase.py",
                     "cli.py",
                     "config.py",
                     "orchestrator.py",
@@ -929,31 +928,34 @@ class TestProfiles(unittest.TestCase):
     def test_frontend_and_full_profiles_use_only_trusted_commands(self) -> None:
         frontend = get_verification_profile("frontend")
         self.assertEqual(
-            ("node", "--check", "web/engine.js"), frontend.commands[0].argv
-        )
-        self.assertEqual(
-            ("python", "-m", "evalkit.snapshot", "--out", "/tmp/qykw-snapshot.json"),
-            frontend.commands[2].argv,
-        )
-        self.assertEqual("python", frontend.commands[3].argv[0])
-        self.assertEqual("-c", frontend.commands[3].argv[1])
-        self.assertIn("{'P-A', 'P-B', 'P-C'}", frontend.commands[3].argv[2])
-        self.assertEqual(
             (
-                "python",
-                "-c",
-                "import build_showcase; from pathlib import Path; "
-                "build_showcase.OUT=Path('/tmp/qykw-showcase.html'); "
-                "build_showcase.main()",
+                ("node", "--check", "web/view-model.js"),
+                ("node", "--check", "web/app.js"),
+                ("node", "--test", "tests/frontend-ui.test.mjs"),
+                (
+                    "python",
+                    "-m",
+                    "unittest",
+                    "tests.test_server.TestOnlineFrontend",
+                    "-v",
+                ),
             ),
-            frontend.commands[4].argv,
+            tuple(command.argv for command in frontend.commands),
         )
+        removed_targets = {
+            "build_showcase.py",
+            "evalkit.snapshot",
+            "tests.test_parity",
+            "web/engine.js",
+        }
         self.assertTrue(
             all(
-                any(item.startswith("pycache_prefix=/tmp/") for item in command.argv)
-                or "--out" in command.argv
-                or "/tmp/qykw-showcase.html" in command.argv[-1]
-                or command.name not in {"backend-compile", "frontend-snapshot", "frontend-showcase"}
+                removed_targets.isdisjoint(command.argv)
+                and not any(
+                    target in argument
+                    for target in removed_targets
+                    for argument in command.argv
+                )
                 for command in get_verification_profile("full").commands
             )
         )

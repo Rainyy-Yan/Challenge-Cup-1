@@ -110,7 +110,6 @@ _BACKEND_COMMANDS = (
             "core",
             "evalkit",
             "tools",
-            "build_showcase.py",
             "cli.py",
             "config.py",
             "orchestrator.py",
@@ -125,40 +124,22 @@ _BACKEND_COMMANDS = (
 
 _FRONTEND_COMMANDS = (
     VerificationCommand(
-        "frontend-node-syntax", ("node", "--check", "web/engine.js")
+        "frontend-view-model-syntax", ("node", "--check", "web/view-model.js")
     ),
     VerificationCommand(
-        "frontend-parity",
-        ("python", "-m", "unittest", "tests.test_parity", "-v"),
+        "frontend-app-syntax", ("node", "--check", "web/app.js")
     ),
     VerificationCommand(
-        "frontend-snapshot",
+        "frontend-node-tests", ("node", "--test", "tests/frontend-ui.test.mjs")
+    ),
+    VerificationCommand(
+        "frontend-server-tests",
         (
             "python",
             "-m",
-            "evalkit.snapshot",
-            "--out",
-            "/tmp/qykw-snapshot.json",
-        ),
-    ),
-    VerificationCommand(
-        "frontend-snapshot-assert",
-        (
-            "python",
-            "-c",
-            "import json; data=json.load(open('/tmp/qykw-snapshot.json', encoding='utf-8')); "
-            "assert set(data['sessions']) == {'P-A', 'P-B', 'P-C'}; "
-            "assert data['items'] and data['kb']",
-        ),
-    ),
-    VerificationCommand(
-        "frontend-showcase",
-        (
-            "python",
-            "-c",
-            "import build_showcase; from pathlib import Path; "
-            "build_showcase.OUT=Path('/tmp/qykw-showcase.html'); "
-            "build_showcase.main()",
+            "unittest",
+            "tests.test_server.TestOnlineFrontend",
+            "-v",
         ),
     ),
 )
