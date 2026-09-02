@@ -306,12 +306,13 @@ def _parse_response(response: TransportResponse, schema: Mapping[str,object], ma
     content_type=next((v for k,v in response.headers.items() if k.lower()=="content-type"),"")
     if "application/json" not in content_type.lower() or len(response.body)>_MAX_RESPONSE_BODY_BYTES: raise ValueError
     document=_strict_json_loads(response.body)
-    required={"id","object","status","output","output_text","usage"}
+    required={"id","object","status","output","usage"}
     if not isinstance(document,dict) or not required<=set(document): raise ValueError
-    request_id,output,output_text,usage=document["id"],document["output"],document["output_text"],document["usage"]
+    request_id,output,usage=document["id"],document["output"],document["usage"]
     if not isinstance(request_id,str) or not request_id or len(request_id)>128 or not set(request_id)<=_SAFE_REQUEST_ID: raise ValueError
-    if document["object"]!="response" or document["status"]!="completed" or not isinstance(output,list) or not isinstance(output_text,str) or not output_text: raise ValueError
-    value=_strict_json_loads(output_text.encode("utf-8"))
+    if document["object"]!="response" or document["status"]!="completed" or not isinstance(output,list): raise ValueError
+    output_text=_response_output_text(document,output)
+    value=_strict_json_loads(_unwrap_json_fence(output_text).encode("utf-8"))
     if not isinstance(value,dict): raise ValueError
     if not isinstance(usage,dict) or not {"input_tokens","output_tokens"}<=set(usage): raise ValueError
     for count in (usage["input_tokens"],usage["output_tokens"]):
@@ -322,6 +323,34 @@ def _parse_response(response: TransportResponse, schema: Mapping[str,object], ma
     if input_tokens is not None and output_tokens is not None and input_tokens + output_tokens > context_window: raise ValueError
     _validate_schema(value,schema)
     return InferenceResponse(request_id,value,InferenceUsage(input_tokens,output_tokens))
+def _response_output_text(document: Mapping[str,object], output: list[object]) -> str:
+    convenience=document.get("output_text")
+    if isinstance(convenience,str) and convenience:
+        return convenience
+    values: list[str]=[]
+    for item in output:
+        if not isinstance(item,Mapping) or item.get("type")!="message":
+            continue
+        content=item.get("content")
+        if not isinstance(content,list):
+            raise ValueError
+        for part in content:
+            if not isinstance(part,Mapping):
+                raise ValueError
+            if part.get("type")=="output_text":
+                text=part.get("text")
+                if not isinstance(text,str) or not text:
+                    raise ValueError
+                values.append(text)
+    if not values:
+        raise ValueError
+    return "".join(values)
+def _unwrap_json_fence(value: str) -> str:
+    stripped=value.strip()
+    lines=stripped.splitlines()
+    if len(lines)>=3 and lines[0].strip().casefold() in {"```", "```json"} and lines[-1].strip()=="```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
 def _strict_json_loads(body: bytes) -> object:
     def object_from_pairs(pairs: list[tuple[str,object]]) -> dict[str,object]:
         result: dict[str,object]={}

@@ -72,7 +72,7 @@ class RecordingProvider:
 def capabilities(
     *,
     context_window: int = 32_000,
-    max_output_tokens: int = 8_000,
+    max_output_tokens: int = 20_000,
     structured_output: bool = True,
     profiles: frozenset[str] | None = None,
 ) -> ProviderCapabilities:
@@ -264,7 +264,7 @@ def secure_provider(
     clock: object | None = None,
     sleep: object | None = None,
     context_window: int = 100_000,
-    max_output_tokens: int = 8_000,
+    max_output_tokens: int = 20_000,
     timeout_seconds: int = 30,
     resolver_slots: object | None = None,
 ) -> ResponsesInferenceProvider:
@@ -295,6 +295,36 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         self.assertEqual(result.request_id, "safe-request-id")
         self.assertEqual(result.value, expected)
         self.assertEqual(result.usage, InferenceUsage(input_tokens=10, output_tokens=3))
+
+    def test_completed_response_accepts_one_exact_json_fence(self) -> None:
+        import json
+
+        document = json.loads(official_response().body)
+        document["output_text"] = f"```json\n{document['output_text']}\n```"
+        response = TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            json.dumps(document).encode(),
+        )
+
+        result = secure_provider(RecordingTransport([response])).complete(request())
+
+        self.assertEqual(result.value, empty_response_value())
+
+    def test_completed_response_can_derive_text_from_official_output_items(self) -> None:
+        import json
+
+        document = json.loads(official_response().body)
+        del document["output_text"]
+        response = TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            json.dumps(document).encode(),
+        )
+
+        result = secure_provider(RecordingTransport([response])).complete(request())
+
+        self.assertEqual(result.value, empty_response_value())
 
     def test_incomplete_and_failed_responses_fail_closed(self) -> None:
         for status in ("incomplete", "failed"):
@@ -839,7 +869,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         import json
 
         for usage in (
-            {"input_tokens": 10, "output_tokens": 4097},
+            {"input_tokens": 10, "output_tokens": 16_385},
             {"input_tokens": -1, "output_tokens": 3},
             {"input_tokens": 100_000, "output_tokens": 1},
         ):

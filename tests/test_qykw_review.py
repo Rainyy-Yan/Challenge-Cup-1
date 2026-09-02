@@ -51,7 +51,7 @@ class RecordingProvider:
         self.values = values
         self.calls: list[object] = []
     def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(100_000, 8_000, True, frozenset({"maximum"}))
+        return ProviderCapabilities(100_000, 20_000, True, frozenset({"maximum"}))
     def complete(self, request: object) -> InferenceResponse:
         self.calls.append(request)
         value = self.values.pop(0)
@@ -110,13 +110,20 @@ class TestReviewEngine(unittest.TestCase):
             3,
             ContextChunkKind.REFERENCE,
         )
+        triage = ContextChunk(
+            f"{base_plan.run_id}|chunk=4",
+            ("src/a.py",),
+            f"{prefix} path=src/a.py prev=- side=TRIAGE old=- new=-\nTRIAGE\n",
+            3,
+            ContextChunkKind.TRIAGE,
+        )
         bound_plan = replace(
             base_plan,
             manifest=FileManifest(
                 base_plan.manifest.paths + ("AGENTS.md",),
                 base_plan.manifest.risk_order + ("AGENTS.md",),
             ),
-            chunks=base_plan.chunks + (reference,),
+            chunks=base_plan.chunks + (reference, triage),
             commentable_lines=base_plan.commentable_lines | frozenset({
                 ChangedLine("AGENTS.md", 1, DiffSide.RIGHT)
             }),
@@ -127,9 +134,11 @@ class TestReviewEngine(unittest.TestCase):
 
         self.assertEqual(result.conclusion, "审查完成")
         self.assertEqual(len(provider.calls), 2)
-        self.assertNotIn(reference.chunk_id, [
+        requested_chunks = [
             request.payload["untrusted"]["context"]["chunk_id"] for request in provider.calls
-        ])
+        ]
+        self.assertNotIn(reference.chunk_id, requested_chunks)
+        self.assertNotIn(triage.chunk_id, requested_chunks)
         for request in provider.calls:
             self.assertEqual(request.payload["trusted"]["trusted_rules"][0]["path"], "AGENTS.md")
 
