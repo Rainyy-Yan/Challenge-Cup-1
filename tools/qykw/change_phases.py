@@ -70,6 +70,13 @@ CHANGE_ARTIFACT_KEYS = frozenset(
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_JOB_RESULT_VALUES = frozenset({"success", "failure", "cancelled", "skipped"})
+_JOB_RESULT_ENVIRONMENT = (
+    "QYKW_AUTHORIZE_JOB_RESULT",
+    "QYKW_PREPARE_JOB_RESULT",
+    "QYKW_VERIFY_JOB_RESULT",
+    "QYKW_PUBLISH_JOB_RESULT",
+)
 _COMMON_ENVIRONMENT = frozenset(
     {
         "GITHUB_ACTIONS",
@@ -103,7 +110,8 @@ _ALLOWED_ENVIRONMENT = {
     | {"GITHUB_TOKEN", "QYKW_VERIFICATION_IMAGE_DIGEST"},
     "publish-change": _COMMON_ENVIRONMENT
     | {"QYKW_PUBLISH_TOKEN", "QYKW_VERIFICATION_IMAGE_DIGEST", "RUNNER_TEMP"},
-    "record-change-result": _COMMON_ENVIRONMENT | {"QYKW_REVIEW_TOKEN"},
+    "record-change-result": _COMMON_ENVIRONMENT
+    | {"QYKW_REVIEW_TOKEN", *_JOB_RESULT_ENVIRONMENT},
 }
 _REQUIRED_CREDENTIALS = {
     "authorize-change": frozenset({"QYKW_REVIEW_TOKEN"}),
@@ -112,6 +120,23 @@ _REQUIRED_CREDENTIALS = {
     "publish-change": frozenset({"QYKW_PUBLISH_TOKEN"}),
     "record-change-result": frozenset({"QYKW_REVIEW_TOKEN"}),
 }
+
+
+@dataclass(frozen=True)
+class TrustedJobResults:
+    """Controller-owned GitHub job outcomes for terminal recording."""
+
+    authorize: str
+    prepare: str
+    verify: str
+    publish: str
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not str or value not in _JOB_RESULT_VALUES
+            for value in (self.authorize, self.prepare, self.verify, self.publish)
+        ):
+            raise ValueError("invalid_job_results")
 
 
 @dataclass(frozen=True)
@@ -124,6 +149,7 @@ class TrustedPhaseRuntime:
     verification_profile: str
     image_digest: str | None
     runner_temp: Path | None
+    job_results: TrustedJobResults | None = None
 
     def __post_init__(self) -> None:
         if self.phase not in CHANGE_PHASES:
@@ -143,6 +169,9 @@ class TrustedPhaseRuntime:
             or not self.runner_temp.is_absolute()
         ):
             raise ValueError("invalid_publication_journal_root")
+        needs_job_results = self.phase == "record-change-result"
+        if needs_job_results != (type(self.job_results) is TrustedJobResults):
+            raise ValueError("invalid_job_results")
 
 
 class ChangePhaseServices(Protocol):
@@ -485,6 +514,10 @@ def _validate_and_narrow_environment(
         raise ValueError("unexpected_qykw_environment")
     if any(not source.get(key) for key in _REQUIRED_CREDENTIALS[phase]):
         raise ValueError("phase_credentials_unavailable")
+    if phase == "record-change-result" and any(
+        key not in source for key in _JOB_RESULT_ENVIRONMENT
+    ):
+        raise ValueError("phase_job_results_unavailable")
     return {key: value for key, value in source.items() if key in allowed}
 
 
@@ -506,6 +539,11 @@ def _runtime_from_environment(
         if candidate.is_symlink() or not candidate.is_dir():
             raise ValueError("invalid_publication_journal_root")
         runner_temp = candidate.resolve()
+    job_results = None
+    if phase == "record-change-result":
+        job_results = TrustedJobResults(
+            *(environment[key] for key in _JOB_RESULT_ENVIRONMENT)
+        )
     return TrustedPhaseRuntime(
         phase=phase,
         workflow_run_id=workflow_run_id,
@@ -513,4 +551,5 @@ def _runtime_from_environment(
         verification_profile=environment.get("QYKW_VERIFICATION_PROFILE", ""),
         image_digest=image_digest,
         runner_temp=runner_temp,
+        job_results=job_results,
     )

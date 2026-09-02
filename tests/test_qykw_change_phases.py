@@ -17,6 +17,12 @@ HEAD = "a" * 40
 BASE = "b" * 40
 CONTROLLER_SHA = "c" * 40
 IMAGE_DIGEST = "sha256:" + "d" * 64
+JOB_RESULT_ENVIRONMENT = {
+    "QYKW_AUTHORIZE_JOB_RESULT": "success",
+    "QYKW_PREPARE_JOB_RESULT": "failure",
+    "QYKW_VERIFY_JOB_RESULT": "cancelled",
+    "QYKW_PUBLISH_JOB_RESULT": "skipped",
+}
 
 
 def run_binding(run_id: str = "QY-PR53-A1B2") -> dict[str, object]:
@@ -72,7 +78,7 @@ class FakeServices:
 
 class TestChangePhaseRouting(unittest.TestCase):
     def runtime(self, phase: str):
-        from tools.qykw.change_phases import TrustedPhaseRuntime
+        from tools.qykw.change_phases import TrustedJobResults, TrustedPhaseRuntime
 
         return TrustedPhaseRuntime(
             phase=phase,
@@ -81,6 +87,11 @@ class TestChangePhaseRouting(unittest.TestCase):
             verification_profile="backend",
             image_digest=IMAGE_DIGEST if phase in {"verify-change", "publish-change"} else None,
             runner_temp=None,
+            job_results=(
+                TrustedJobResults("success", "failure", "cancelled", "skipped")
+                if phase == "record-change-result"
+                else None
+            ),
         )
 
     def controller(self, phase: str, services: FakeServices | None = None):
@@ -107,7 +118,10 @@ class TestChangePhaseRouting(unittest.TestCase):
             "prepare-change": {"QYKW_INFERENCE_API_KEY": "inference-key", "GITHUB_TOKEN": "read-token"},
             "verify-change": {"GITHUB_TOKEN": "read-token"},
             "publish-change": {"QYKW_PUBLISH_TOKEN": "publish-token", "RUNNER_TEMP": "C:\\runner\\temp"},
-            "record-change-result": {"QYKW_REVIEW_TOKEN": "review-token"},
+            "record-change-result": {
+                "QYKW_REVIEW_TOKEN": "review-token",
+                **JOB_RESULT_ENVIRONMENT,
+            },
         }
         return {**common, **credentials[phase]}
 
@@ -656,6 +670,81 @@ class TestCredentialAndRuntimeIsolation(TestChangePhaseRouting):
         invalid_journal["RUNNER_TEMP"] = "missing-runner-temp"
         with self.assertRaisesRegex(ValueError, "invalid_publication_journal_root"):
             build_change_controller("publish-change", environment=invalid_journal, services=FakeServices())
+
+    def test_record_runtime_owns_immutable_job_results_from_its_environment(self) -> None:
+        from tools.qykw.change_phases import build_change_controller
+
+        services = FakeServices()
+        controller = build_change_controller(
+            "record-change-result",
+            environment={**self.environment("record-change-result"), **JOB_RESULT_ENVIRONMENT},
+            services=services,
+        )
+        results = controller.runtime.job_results
+        self.assertEqual(
+            (results.authorize, results.prepare, results.verify, results.publish),
+            ("success", "failure", "cancelled", "skipped"),
+        )
+        with self.assertRaises((AttributeError, TypeError)):
+            results.publish = "success"
+
+        forged = self.artifact("publish-change")
+        forged["payload"]["data"]["publication"] = {  # type: ignore[index]
+            "job_results": {"publish": "success"}
+        }
+        from tools.qykw.change_phases import _artifact_digest
+
+        forged["digest"] = _artifact_digest(forged)
+        controller.record_change_result(forged)
+        trusted_runtime = services.calls[-1][1]
+        self.assertEqual(trusted_runtime.job_results.publish, "skipped")
+
+    def test_record_job_results_are_all_required_and_strictly_enumerated(self) -> None:
+        from tools.qykw.change_phases import build_change_controller
+
+        base = {**self.environment("record-change-result"), **JOB_RESULT_ENVIRONMENT}
+        for key in JOB_RESULT_ENVIRONMENT:
+            missing = dict(base)
+            del missing[key]
+            with self.subTest(key=key, case="missing"), self.assertRaisesRegex(
+                ValueError, "phase_job_results_unavailable"
+            ):
+                build_change_controller("record-change-result", environment=missing, services=FakeServices())
+            for value in ("", "Success", "cancelled ", "unknown"):
+                invalid = {**base, key: value}
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(
+                    ValueError, "invalid_job_results"
+                ):
+                    build_change_controller("record-change-result", environment=invalid, services=FakeServices())
+
+    def test_job_result_environment_and_runtime_are_record_phase_only(self) -> None:
+        from tools.qykw.change_phases import ChangePhaseController, TrustedJobResults, TrustedPhaseRuntime
+
+        for phase in (
+            "authorize-change",
+            "prepare-change",
+            "verify-change",
+            "publish-change",
+        ):
+            with self.subTest(phase=phase), self.assertRaisesRegex(
+                ValueError, "unexpected_qykw_environment"
+            ):
+                ChangePhaseController(
+                    phase,
+                    {**self.environment(phase), **JOB_RESULT_ENVIRONMENT},
+                    services=FakeServices(),
+                    runtime=self.runtime(phase),
+                )
+        with self.assertRaisesRegex(ValueError, "invalid_job_results"):
+            TrustedPhaseRuntime(
+                "authorize-change",
+                44,
+                CONTROLLER_SHA,
+                "backend",
+                None,
+                None,
+                TrustedJobResults("success", "success", "success", "success"),
+            )
 
 
 class TestReviewChangeIsolation(unittest.TestCase):
