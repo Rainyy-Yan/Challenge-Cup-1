@@ -1,0 +1,108 @@
+name: qykw intern claim
+
+# qykw-review.yml remains subscribed to these PR lifecycle events and supplies
+# the existing initial code review; this workflow only reconciles intern state.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, edited, ready_for_review, reopened, closed]
+
+permissions:
+  contents: none
+
+# A PR-number lock begins before resolve_pr, so two edited/opened/closed events for
+# the same PR cannot resolve mutable bodies concurrently. Issue events use their
+# Issue number here and still share the narrower mutation lock below.
+concurrency:
+  group: qykw-intern-event-${{ github.repository_id }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  issue_command:
+    if: github.event_name == 'issue_comment' && !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: qykw-intern-${{ github.repository_id }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Run qykw intern controller
+        working-directory: controller
+        env:
+          QYKW_INTERN_TOKEN: ${{ secrets.QYKW_TOKEN }}
+        run: python -m tools.qykw.intern_claim --phase issue-command
+
+  resolve_pr:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      issue_number: ${{ steps.resolve.outputs.issue_number }}
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Run qykw intern controller
+        id: resolve
+        working-directory: controller
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m tools.qykw.intern_claim --phase resolve-pr
+
+  reconcile_pr:
+    needs: resolve_pr
+    if: needs.resolve_pr.outputs.issue_number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: qykw-intern-${{ github.repository_id }}-${{ needs.resolve_pr.outputs.issue_number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Run qykw intern controller
+        working-directory: controller
+        env:
+          QYKW_INTERN_TOKEN: ${{ secrets.QYKW_TOKEN }}
+          QYKW_RESOLVED_ISSUE_NUMBER: ${{ needs.resolve_pr.outputs.issue_number }}
+        run: python -m tools.qykw.intern_claim --phase reconcile-pr

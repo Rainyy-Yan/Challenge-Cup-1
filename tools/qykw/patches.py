@@ -1,0 +1,787 @@
+"""Safe materialization and deterministic replay of qykw text patches."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+from typing import BinaryIO
+import weakref
+
+from tools.qykw.change import (
+    AppliedPatch,
+    FileDigest,
+    PatchManifest,
+    PreparedWorkspace,
+    compute_manifest_digest,
+)
+
+
+_REGULAR_MODE = "100644"
+_EXECUTABLE_MODE = "100755"
+_TRACKED_MODES = frozenset({_REGULAR_MODE, _EXECUTABLE_MODE})
+_HEX_DIGITS = frozenset("0123456789abcdef")
+_TREE_DIGEST_DOMAIN = b"qykw-workspace-tree-v1\0"
+_MAX_PATCH_FILE_BYTES = 256 * 1024
+_MAX_SOURCE_FILE_BYTES = 32 * 1024 * 1024
+_MAX_WORKSPACE_BYTES = 256 * 1024 * 1024
+_COPY_CHUNK_BYTES = 64 * 1024
+_TRUSTED_WORKSPACES: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[PreparedWorkspace],
+        Path,
+        str,
+        tuple[tuple[str, str, str], ...],
+    ],
+] = {}
+
+
+def materialize_workspace(
+    source_root: Path,
+    *,
+    source_head_sha: str,
+    tracked_files: tuple[FileDigest, ...],
+    destination: Path,
+) -> PreparedWorkspace:
+    """Copy one complete trusted tracked-file tree into a new workspace."""
+
+    _validate_source_head(source_head_sha)
+    source = _require_real_directory(source_root, "invalid_source_root")
+    destination_path = _require_new_destination(destination)
+    trusted_files = _validate_file_digests(tracked_files)
+    actual_paths = _scan_tree_paths(
+        source,
+        symlink_error="source_symlink_forbidden",
+        allow_root_git_metadata=True,
+    )
+    expected_paths = tuple(item.path for item in trusted_files)
+    if actual_paths != tuple(sorted(expected_paths)):
+        raise ValueError("source_file_list_mismatch")
+
+    source_bytes = 0
+    for item in trusted_files:
+        source_path = _safe_member(
+            source, item.path, must_exist=True, symlink_error="source_symlink_forbidden"
+        )
+        source_digest, file_bytes = _hash_stable_file(
+            source_path,
+            root=source,
+            symlink_error="source_symlink_forbidden",
+            changed_error="source_file_changed",
+        )
+        if source_digest != item.sha256:
+            raise ValueError("source_digest_mismatch")
+        source_bytes += file_bytes
+        if source_bytes > _MAX_WORKSPACE_BYTES:
+            raise ValueError("workspace_too_large")
+
+    destination_path.mkdir(mode=0o700)
+    destination_root = destination_path.resolve(strict=True)
+    workspace_bytes = 0
+    for item in trusted_files:
+        source_path = _safe_member(
+            source, item.path, must_exist=True, symlink_error="source_symlink_forbidden"
+        )
+        target = _safe_member(
+            destination_root,
+            item.path,
+            must_exist=False,
+            symlink_error="workspace_symlink_forbidden",
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        workspace_bytes += _copy_tracked_file(
+            source_path,
+            source_root=source,
+            target=target,
+            target_root=destination_root,
+            expected=item,
+        )
+        if workspace_bytes > _MAX_WORKSPACE_BYTES:
+            raise ValueError("workspace_too_large")
+
+    copied = _digest_tree(
+        destination_root,
+        expected_paths,
+        modes={item.path: item.mode for item in trusted_files},
+        symlink_error="workspace_symlink_forbidden",
+    )
+    if copied != trusted_files:
+        raise ValueError("workspace_copy_mismatch")
+    public_files = _clone_file_digests(trusted_files)
+    workspace = PreparedWorkspace(destination_root, source_head_sha, public_files)
+    workspace_id = id(workspace)
+
+    def discard(_reference: object, *, key: int = workspace_id) -> None:
+        _TRUSTED_WORKSPACES.pop(key, None)
+
+    _TRUSTED_WORKSPACES[workspace_id] = (
+        weakref.ref(workspace, discard),
+        destination_root,
+        source_head_sha,
+        tuple((item.path, item.mode, item.sha256) for item in trusted_files),
+    )
+    return workspace
+
+
+def apply_patch_manifest(
+    manifest: PatchManifest, workspace: PreparedWorkspace
+) -> AppliedPatch:
+    """Replay a validated text manifest against one controller-owned workspace."""
+
+    root, source_files = _require_trusted_workspace(workspace)
+    _validate_manifest_binding(manifest, workspace)
+    patches = _validate_manifest_paths(manifest)
+    source_by_path = {item.path: item for item in source_files}
+    source_paths = tuple(sorted(source_by_path))
+    if _scan_tree_paths(root, symlink_error="workspace_symlink_forbidden") != source_paths:
+        raise ValueError("workspace_file_list_changed")
+
+    source_modes = {item.path: item.mode for item in source_files}
+    if _digest_tree(
+        root,
+        source_paths,
+        modes=source_modes,
+        symlink_error="workspace_symlink_forbidden",
+    ) != source_files:
+        raise ValueError("workspace_file_changed")
+
+    originals: dict[str, bytes] = {}
+    outputs: dict[str, bytes] = {}
+    for patch in patches:
+        if patch.create:
+            if patch.path in source_by_path or _member_exists(root, patch.path):
+                raise ValueError("create_path_exists")
+            if patch.base_sha256 is not None:
+                raise ValueError("new_file_base_digest_forbidden")
+            if len(patch.edits) != 1 or patch.edits[0].before != "":
+                raise ValueError("invalid_new_file_edit")
+            output = _encode_output(patch.edits[0].after)
+        else:
+            baseline = source_by_path.get(patch.path)
+            if baseline is None:
+                raise ValueError("unknown_source_path")
+            if baseline.mode != _REGULAR_MODE:
+                raise ValueError("patch_target_mode_forbidden")
+            if patch.base_sha256 != baseline.sha256:
+                raise ValueError("base_digest_mismatch")
+            original = _read_and_match(root, baseline, "workspace_file_changed")
+            originals[patch.path] = original
+            content = original.decode("utf-8")
+            for edit in patch.edits:
+                if not edit.before or edit.before == edit.after:
+                    raise ValueError("invalid_text_edit")
+                if content.count(edit.before) != 1:
+                    raise ValueError("ambiguous_edit")
+                content = content.replace(edit.before, edit.after, 1)
+            output = _encode_output(content)
+        outputs[patch.path] = output
+
+    # Close the broad validation-to-write window before the first mutation.
+    if _digest_tree(
+        root,
+        source_paths,
+        modes=source_modes,
+        symlink_error="workspace_symlink_forbidden",
+    ) != source_files:
+        raise ValueError("workspace_file_changed")
+
+    output_digests: list[FileDigest] = []
+    for patch in patches:
+        target = _safe_member(
+            root,
+            patch.path,
+            must_exist=not patch.create,
+            symlink_error="workspace_symlink_forbidden",
+        )
+        if patch.create:
+            if target.exists() or target.is_symlink():
+                raise ValueError("create_path_exists")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_create(target, outputs[patch.path], root)
+        else:
+            baseline = source_by_path[patch.path]
+            _read_and_match(root, baseline, "workspace_file_changed")
+            _atomic_replace(
+                target,
+                outputs[patch.path],
+                root,
+                expected=originals[patch.path],
+            )
+        _set_and_verify_mode(target, _REGULAR_MODE)
+        written = _read_stable_bytes(
+            target,
+            root=root,
+            symlink_error="workspace_symlink_forbidden",
+            changed_error="workspace_file_changed",
+        )
+        if written != outputs[patch.path]:
+            raise ValueError("workspace_write_mismatch")
+        output_digests.append(_digest_file(patch.path, written, _REGULAR_MODE))
+
+    final_paths = tuple(sorted(set(source_paths) | set(outputs)))
+    final_modes = dict(source_modes)
+    final_modes.update({path: _REGULAR_MODE for path in outputs})
+    final_files = _digest_tree(
+        root,
+        final_paths,
+        modes=final_modes,
+        symlink_error="workspace_symlink_forbidden",
+    )
+    if _scan_tree_paths(root, symlink_error="workspace_symlink_forbidden") != final_paths:
+        raise ValueError("workspace_file_list_changed")
+    final_by_path = {item.path: item for item in final_files}
+    for path, baseline in source_by_path.items():
+        if path not in outputs and final_by_path.get(path) != baseline:
+            raise ValueError("workspace_file_changed")
+    changed = tuple(sorted(output_digests, key=lambda item: item.path))
+    return AppliedPatch(
+        files=changed,
+        output_tree_digest=compute_workspace_tree_digest(changed),
+        workspace_tree_digest=compute_workspace_tree_digest(final_files),
+    )
+
+
+def compute_workspace_tree_digest(files: tuple[FileDigest, ...]) -> str:
+    """Hash a canonical, complete path/mode/content-digest listing."""
+
+    normalized = _validate_file_digests(files)
+    payload = [
+        {"mode": item.mode, "path": item.path, "sha256": item.sha256}
+        for item in normalized
+    ]
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(_TREE_DIGEST_DOMAIN + encoded).hexdigest()
+
+
+def _digest_file(
+    path: str, content: bytes, mode: str = _REGULAR_MODE
+) -> FileDigest:
+    return FileDigest(path, mode, hashlib.sha256(content).hexdigest())
+
+
+def _validate_manifest_binding(
+    manifest: PatchManifest, workspace: PreparedWorkspace
+) -> None:
+    if type(manifest) is not PatchManifest or manifest.schema_version != 1:
+        raise ValueError("unsupported_manifest_schema")
+    if manifest.source_head_sha != workspace.source_head_sha:
+        raise ValueError("source_head_mismatch")
+    if manifest.digest != compute_manifest_digest(manifest):
+        raise ValueError("manifest_digest_mismatch")
+    from tools.qykw.verification import get_verification_profile
+
+    get_verification_profile(manifest.verification_profile)
+
+
+def _validate_manifest_paths(manifest: PatchManifest) -> tuple[FilePatch, ...]:
+    # Use the same deterministic path policy that admitted the manifest.  The
+    # import remains local to avoid coupling module initialization order.
+    from tools.qykw.policy import _normalize_change_path
+
+    if not manifest.files:
+        raise ValueError("empty_patch_manifest")
+    seen: set[str] = set()
+    for patch in manifest.files:
+        normalized = _normalize_change_path(patch.path)
+        key = _collision_key(normalized)
+        if key in seen:
+            raise ValueError("duplicate_patch_path")
+        seen.add(key)
+        if not patch.edits:
+            raise ValueError("invalid_edit_count")
+    return manifest.files
+
+
+def _require_trusted_workspace(
+    workspace: PreparedWorkspace,
+) -> tuple[Path, tuple[FileDigest, ...]]:
+    if type(workspace) is not PreparedWorkspace:
+        raise ValueError("untrusted_workspace")
+    record = _TRUSTED_WORKSPACES.get(id(workspace))
+    if record is None or record[0]() is not workspace:
+        raise ValueError("untrusted_workspace")
+    _, root, head, file_snapshot = record
+    files = tuple(FileDigest(*item) for item in file_snapshot)
+    if (
+        workspace.root != root
+        or workspace.source_head_sha != head
+        or workspace.source_files != files
+        or root.is_symlink()
+        or root.resolve(strict=True) != root
+    ):
+        raise ValueError("untrusted_workspace")
+    return root, files
+
+
+def _clone_file_digests(files: tuple[FileDigest, ...]) -> tuple[FileDigest, ...]:
+    return tuple(FileDigest(item.path, item.mode, item.sha256) for item in files)
+
+
+def _validate_file_digests(files: tuple[FileDigest, ...]) -> tuple[FileDigest, ...]:
+    if type(files) is not tuple:
+        raise TypeError("tracked_files_must_be_tuple")
+    seen: set[str] = set()
+    normalized: list[FileDigest] = []
+    for item in files:
+        if type(item) is not FileDigest:
+            raise TypeError("invalid_file_digest")
+        path = _normalize_path(item.path)
+        key = _collision_key(path)
+        if key in seen:
+            error = "duplicate_file_path" if any(old.path == path for old in normalized) else "path_collision"
+            raise ValueError(error)
+        seen.add(key)
+        if item.mode not in _TRACKED_MODES:
+            raise ValueError("unsupported_file_mode")
+        if (
+            type(item.sha256) is not str
+            or len(item.sha256) != 64
+            or any(character not in _HEX_DIGITS for character in item.sha256)
+        ):
+            raise ValueError("invalid_file_digest")
+        normalized.append(FileDigest(path, item.mode, item.sha256))
+    return tuple(sorted(normalized, key=lambda item: item.path))
+
+
+def _normalize_path(value: object) -> str:
+    from tools.qykw.policy import _normalize_repository_path
+
+    normalized = _normalize_repository_path(value)  # type: ignore[arg-type]
+    parts = normalized.split("/")
+    if any(part.casefold() == ".git" for part in parts):
+        raise ValueError("git_metadata_forbidden")
+    return normalized
+
+
+def _collision_key(path: str) -> str:
+    return path.casefold()
+
+
+def _require_real_directory(value: Path, error: str) -> Path:
+    value = Path(value)
+    try:
+        if value.is_symlink() or not stat.S_ISDIR(value.lstat().st_mode):
+            raise ValueError(error)
+        resolved = value.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        raise ValueError(error) from None
+    return resolved
+
+
+def _require_new_destination(value: Path) -> Path:
+    destination = Path(value).absolute()
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("destination_must_not_exist")
+    try:
+        parent = destination.parent.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        raise ValueError("invalid_destination_parent") from None
+    if destination.parent != parent or destination.name in {"", ".", ".."}:
+        raise ValueError("unsafe_destination_parent")
+    return destination
+
+
+def _scan_tree_paths(
+    root: Path,
+    *,
+    symlink_error: str,
+    allow_root_git_metadata: bool = False,
+) -> tuple[str, ...]:
+    paths: list[str] = []
+    for current, directory_names, file_names in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        root_git_directories = [
+            name for name in directory_names if name.casefold() == ".git"
+        ]
+        root_git_files = [name for name in file_names if name.casefold() == ".git"]
+        if current_path == root and (root_git_directories or root_git_files):
+            if not allow_root_git_metadata:
+                raise ValueError("git_metadata_forbidden")
+            for name in root_git_directories:
+                directory_names.remove(name)
+            for name in root_git_files:
+                file_names.remove(name)
+        for directory_name in directory_names:
+            directory = current_path / directory_name
+            if directory.is_symlink():
+                raise ValueError(symlink_error)
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                raise ValueError("non_regular_source_entry")
+        for file_name in file_names:
+            file_path = current_path / file_name
+            if file_path.is_symlink():
+                raise ValueError(symlink_error)
+            if not stat.S_ISREG(file_path.lstat().st_mode):
+                raise ValueError("non_regular_source_entry")
+            relative = file_path.relative_to(root).as_posix()
+            paths.append(_normalize_path(relative))
+    return tuple(sorted(paths))
+
+
+def _safe_member(
+    root: Path,
+    relative: str,
+    *,
+    must_exist: bool,
+    symlink_error: str,
+) -> Path:
+    parts = _normalize_path(relative).split("/")
+    current = root
+    for index, part in enumerate(parts):
+        current = current / part
+        exists = current.exists() or current.is_symlink()
+        if exists:
+            try:
+                metadata = current.lstat()
+            except OSError:
+                raise ValueError("workspace_path_unavailable") from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(symlink_error)
+            if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("workspace_parent_not_directory")
+        elif must_exist:
+            raise ValueError("workspace_path_missing")
+    candidate = current
+    existing_parent = candidate if candidate.exists() else candidate.parent
+    while not existing_parent.exists() and existing_parent != root:
+        existing_parent = existing_parent.parent
+    try:
+        resolved_parent = existing_parent.resolve(strict=True)
+        resolved_parent.relative_to(root)
+    except (FileNotFoundError, OSError, ValueError):
+        raise ValueError("workspace_path_escape") from None
+    return candidate
+
+
+def _read_stable_bytes(
+    path: Path,
+    *,
+    root: Path,
+    symlink_error: str,
+    changed_error: str,
+) -> bytes:
+    relative = path.relative_to(root).as_posix()
+    checked = _safe_member(
+        root, relative, must_exist=True, symlink_error=symlink_error
+    )
+    try:
+        before = checked.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("non_regular_source_entry")
+        with _open_binary_no_follow(checked) as handle:
+            opened_before = os.fstat(handle.fileno())
+            content = handle.read(_MAX_PATCH_FILE_BYTES + 1)
+            opened_after = os.fstat(handle.fileno())
+        after = checked.lstat()
+    except (FileNotFoundError, OSError):
+        raise ValueError(changed_error) from None
+    if len(content) > _MAX_PATCH_FILE_BYTES:
+        raise ValueError("patch_file_too_large")
+    if not _same_file(before, opened_before, opened_after, after):
+        raise ValueError(changed_error)
+    return content
+
+
+def _hash_stable_file(
+    path: Path,
+    *,
+    root: Path,
+    symlink_error: str,
+    changed_error: str,
+) -> tuple[str, int]:
+    """Stream one regular file into a bounded SHA-256 digest."""
+
+    relative = path.relative_to(root).as_posix()
+    checked = _safe_member(
+        root, relative, must_exist=True, symlink_error=symlink_error
+    )
+    hasher = hashlib.sha256()
+    size = 0
+    try:
+        before = checked.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("non_regular_source_entry")
+        with _open_binary_no_follow(checked) as handle:
+            opened_before = os.fstat(handle.fileno())
+            while chunk := handle.read(_COPY_CHUNK_BYTES):
+                size += len(chunk)
+                if size > _MAX_SOURCE_FILE_BYTES:
+                    raise ValueError("source_file_too_large")
+                hasher.update(chunk)
+            opened_after = os.fstat(handle.fileno())
+        after = checked.lstat()
+    except (FileNotFoundError, OSError):
+        raise ValueError(changed_error) from None
+    if not _same_file(before, opened_before, opened_after, after):
+        raise ValueError(changed_error)
+    return hasher.hexdigest(), size
+
+
+def _copy_tracked_file(
+    source: Path,
+    *,
+    source_root: Path,
+    target: Path,
+    target_root: Path,
+    expected: FileDigest,
+) -> int:
+    """Stream-copy a Head-bound blob without interpreting its bytes as text."""
+
+    source = _safe_member(
+        source_root,
+        source.relative_to(source_root).as_posix(),
+        must_exist=True,
+        symlink_error="source_symlink_forbidden",
+    )
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".qykw-copy-", suffix=".tmp", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    hasher = hashlib.sha256()
+    size = 0
+    try:
+        before = source.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("non_regular_source_entry")
+        with _open_binary_no_follow(source) as reader, os.fdopen(
+            file_descriptor, "wb"
+        ) as writer:
+            opened_before = os.fstat(reader.fileno())
+            while chunk := reader.read(_COPY_CHUNK_BYTES):
+                size += len(chunk)
+                if size > _MAX_SOURCE_FILE_BYTES:
+                    raise ValueError("source_file_too_large")
+                hasher.update(chunk)
+                writer.write(chunk)
+            opened_after = os.fstat(reader.fileno())
+            writer.flush()
+            os.fsync(writer.fileno())
+        after = source.lstat()
+        if not _same_file(before, opened_before, opened_after, after):
+            raise ValueError("source_file_changed")
+        if hasher.hexdigest() != expected.sha256:
+            raise ValueError("source_digest_mismatch")
+        try:
+            temporary.resolve(strict=True).relative_to(target_root)
+            target.parent.resolve(strict=True).relative_to(target_root)
+        except (FileNotFoundError, OSError, ValueError):
+            raise ValueError("workspace_path_escape") from None
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            raise ValueError("create_path_exists") from None
+        temporary.unlink()
+        _set_and_verify_mode(target, expected.mode)
+        return size
+    finally:
+        # fdopen owns the descriptor only after both context managers enter.
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            pass
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _open_binary_no_follow(path: Path) -> BinaryIO:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    return os.fdopen(descriptor, "rb")
+
+
+def _set_and_verify_mode(path: Path, mode: str) -> None:
+    if mode not in _TRACKED_MODES:
+        raise ValueError("unsupported_file_mode")
+    if os.name != "nt":
+        try:
+            os.chmod(
+                path,
+                0o755 if mode == _EXECUTABLE_MODE else 0o644,
+                follow_symlinks=False,
+            )
+        except OSError:
+            raise ValueError("workspace_mode_mismatch") from None
+    _verify_actual_mode(path, mode)
+
+
+def _verify_actual_mode(path: Path, mode: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        raise ValueError("workspace_file_changed") from None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("workspace_symlink_forbidden")
+    if os.name != "nt":
+        expected = 0o755 if mode == _EXECUTABLE_MODE else 0o644
+        if stat.S_IMODE(metadata.st_mode) != expected:
+            raise ValueError("workspace_mode_mismatch")
+
+
+def _same_file(*stats: os.stat_result) -> bool:
+    first = stats[0]
+    identity = (first.st_dev, first.st_ino, first.st_mode, first.st_size, first.st_mtime_ns)
+    return all(
+        (item.st_dev, item.st_ino, item.st_mode, item.st_size, item.st_mtime_ns)
+        == identity
+        for item in stats[1:]
+    )
+
+
+def _validate_utf8_text(content: bytes, label: str) -> None:
+    if b"\x00" in content:
+        raise ValueError(f"binary_{label}_file")
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"non_utf8_{label}_file") from None
+
+
+def _same_digest(content: bytes, expected: str) -> bool:
+    return hashlib.sha256(content).hexdigest() == expected
+
+
+def _validate_source_head(value: object) -> None:
+    if (
+        type(value) is not str
+        or len(value) not in {40, 64}
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise ValueError("invalid_source_head_sha")
+
+
+def _encode_output(content: str) -> bytes:
+    if type(content) is not str or not content:
+        raise ValueError("empty_file_forbidden")
+    try:
+        encoded = content.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("non_utf8_text") from None
+    if b"\x00" in encoded:
+        raise ValueError("binary_content_forbidden")
+    if len(encoded) > _MAX_PATCH_FILE_BYTES:
+        raise ValueError("change_file_too_large")
+    return encoded
+
+
+def _read_and_match(root: Path, item: FileDigest, error: str) -> bytes:
+    if item.mode != _REGULAR_MODE:
+        raise ValueError("patch_target_mode_forbidden")
+    path = _safe_member(
+        root, item.path, must_exist=True, symlink_error="workspace_symlink_forbidden"
+    )
+    content = _read_stable_bytes(
+        path,
+        root=root,
+        symlink_error="workspace_symlink_forbidden",
+        changed_error=error,
+    )
+    _validate_utf8_text(content, "workspace")
+    if not _same_digest(content, item.sha256):
+        raise ValueError(error)
+    return content
+
+
+def _member_exists(root: Path, relative: str) -> bool:
+    path = _safe_member(
+        root,
+        relative,
+        must_exist=False,
+        symlink_error="workspace_symlink_forbidden",
+    )
+    return path.exists() or path.is_symlink()
+
+
+def _atomic_create(path: Path, content: bytes, root: Path) -> None:
+    _atomic_write(path, content, root, replace=False, expected=b"")
+
+
+def _atomic_replace(
+    path: Path, content: bytes, root: Path, *, expected: bytes
+) -> None:
+    _atomic_write(path, content, root, replace=True, expected=expected)
+
+
+def _atomic_write(
+    path: Path,
+    content: bytes,
+    root: Path,
+    *,
+    replace: bool,
+    expected: bytes,
+) -> None:
+    _safe_member(
+        root,
+        path.relative_to(root).as_posix(),
+        must_exist=replace,
+        symlink_error="workspace_symlink_forbidden",
+    )
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".qykw-", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            temporary.resolve(strict=True).relative_to(root)
+            path.parent.resolve(strict=True).relative_to(root)
+        except (FileNotFoundError, OSError, ValueError):
+            raise ValueError("workspace_path_escape") from None
+        if not replace and (path.exists() or path.is_symlink()):
+            raise ValueError("create_path_exists")
+        if replace:
+            current = _read_stable_bytes(
+                path,
+                root=root,
+                symlink_error="workspace_symlink_forbidden",
+                changed_error="workspace_file_changed",
+            )
+            if current != expected:
+                raise ValueError("workspace_file_changed")
+            os.replace(temporary, path)
+        else:
+            # Hard-linking is an atomic no-overwrite publication on supported hosts.
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                raise ValueError("create_path_exists") from None
+            temporary.unlink()
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _digest_tree(
+    root: Path,
+    paths: tuple[str, ...],
+    *,
+    modes: dict[str, str],
+    symlink_error: str,
+) -> tuple[FileDigest, ...]:
+    result: list[FileDigest] = []
+    for relative in paths:
+        path = _safe_member(
+            root, relative, must_exist=True, symlink_error=symlink_error
+        )
+        mode = modes.get(relative)
+        if mode not in _TRACKED_MODES:
+            raise ValueError("unsupported_file_mode")
+        _verify_actual_mode(path, mode)
+        sha256, _ = _hash_stable_file(
+            path,
+            root=root,
+            symlink_error=symlink_error,
+            changed_error="workspace_file_changed",
+        )
+        result.append(FileDigest(relative, mode, sha256))
+    return tuple(sorted(result, key=lambda item: item.path))

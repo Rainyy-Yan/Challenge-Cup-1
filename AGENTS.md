@@ -28,7 +28,7 @@ Tests use `unittest`. Name files `tests/test_<area>.py`, classes `Test<Behavior>
 
 ## Commit and pull request guidelines
 
-Git history is absent from this repository snapshot, so no existing message pattern can be verified. Use concise, imperative subjects such as `fix: reject dangling citations`. Commit `config.py` threshold changes separately before generating evaluation results. Pull requests should explain the behavior and rationale, list commands run, link the relevant issue, and include screenshots for `web/` changes or before/after metrics for evaluation changes.
+Git history follows short Conventional Commit subjects such as `feat: add trusted runtime`, `fix: reject dangling citations`, and `ci: isolate jobs`. Keep each commit focused; commit `config.py` threshold changes separately before generating evaluation results. Pull requests should explain the behavior and rationale, list commands run, link the relevant issue, and include screenshots for `web/` changes or before/after metrics for evaluation changes.
 
 ## Security and data integrity
 
