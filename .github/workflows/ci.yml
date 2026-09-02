@@ -13,12 +13,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUTF8: "1"
+
 jobs:
-  test:
-    name: Tests (${{ matrix.os }})
+  backend:
+    name: Backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -28,9 +32,33 @@ jobs:
           - ubuntu-latest
           - windows-latest
 
-    env:
-      PYTHONDONTWRITEBYTECODE: "1"
-      PYTHONUTF8: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Display Python version
+        run: python --version
+
+      - name: Compile backend modules
+        run: >-
+          python -m compileall -q
+          agents core evalkit tools
+          build_showcase.py cli.py config.py orchestrator.py server.py
+
+      - name: Run complete backend test suite
+        run: python -m unittest discover -s tests -v
+
+  frontend:
+    name: Frontend and generated assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -53,5 +81,55 @@ jobs:
           python --version
           node --version
 
-      - name: Run complete test suite
-        run: python -m unittest discover -s tests -v
+      - name: Check browser engine syntax
+        run: node --check web/engine.js
+
+      - name: Verify frontend and backend parity
+        run: python -m unittest tests.test_parity -v
+
+      - name: Generate and validate a fresh snapshot
+        env:
+          SNAPSHOT_OUT: ${{ runner.temp }}/snapshot.json
+        run: |
+          python -m evalkit.snapshot --out "$SNAPSHOT_OUT"
+          python -c "import json, os; data = json.load(open(os.environ['SNAPSHOT_OUT'], encoding='utf-8')); assert set(data['sessions']) == {'P-A', 'P-B', 'P-C'}; assert data['items'] and data['kb']"
+
+      - name: Rebuild standalone showcase
+        run: python build_showcase.py
+
+      - name: Verify standalone showcase is current
+        run: git diff --exit-code -- web/showcase.html
+
+  smoke:
+    name: Backend service smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Start backend and request the frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          python server.py 8765 >"$RUNNER_TEMP/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8765/ >"$RUNNER_TEMP/index.html"; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          curl --fail --show-error --silent http://127.0.0.1:8765/ >"$RUNNER_TEMP/index.html"
+          grep --ignore-case --quiet '<!doctype html>' "$RUNNER_TEMP/index.html"
