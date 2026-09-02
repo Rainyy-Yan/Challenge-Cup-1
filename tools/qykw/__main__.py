@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -32,7 +33,7 @@ _COMMAND_KEYS = frozenset({"name", "argument", "mode"})
 def main(argv: Sequence[str] | None = None, *, controller: object | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.qykw", allow_abbrev=False)
     parser.add_argument("--phase", required=True, choices=sorted(_CLI_PHASES))
-    parser.add_argument("--artifact", required=True)
+    parser.add_argument("--artifact")
     parser.add_argument("--output", required=True)
     parser.add_argument("--error-code")
     try:
@@ -40,8 +41,23 @@ def main(argv: Sequence[str] | None = None, *, controller: object | None = None)
     except SystemExit as error:
         return int(error.code)
     try:
-        artifact = _read_artifact(Path(args.artifact))
-        result = _run_phase(args.phase, artifact, controller, args.error_code)
+        root = args.phase in {"control", "authorize"} and (
+            not args.artifact or not Path(args.artifact).is_file()
+        )
+        if controller is None and (root or os.environ.get("GITHUB_ACTIONS") == "true"):
+            from tools.qykw.phases import build_production_controller
+            controller = build_production_controller(args.phase)
+        if root:
+            root_method = getattr(controller, "root", None)
+            if not callable(root_method):
+                raise ValueError("root_phase_not_available")
+            result = root_method()
+            _validate_artifact(result, expected_phase=args.phase)
+        else:
+            if not args.artifact:
+                raise ValueError("artifact_required")
+            artifact = _read_artifact(Path(args.artifact))
+            result = _run_phase(args.phase, artifact, controller, args.error_code)
         _write_artifact(Path(args.output), result)
     except (OSError, ValueError, TypeError) as error:
         return _error(_safe_code(error))
@@ -57,6 +73,15 @@ def _run_phase(phase: str, artifact: dict[str, object], controller: object | Non
     if phase == "record-failure":
         if not _error_code(error_code):
             raise ValueError("invalid_error_code")
+        method = getattr(controller, "record_failure", None) if controller is not None else None
+        if callable(method):
+            result = method(artifact, error_code)
+            if not isinstance(result, dict):
+                raise ValueError("invalid_phase_result")
+            _validate_artifact(result, expected_phase=phase)
+            if result["run"] != artifact["run"]:
+                raise ValueError("immutable_run_binding_changed")
+            return result
         return _artifact("record-failure", artifact["run"], {"error_code": error_code})
     if controller is None:
         raise ValueError("phase_controller_required")
@@ -102,7 +127,13 @@ def _validate_artifact(payload: object, *, expected_phase: str | None = None) ->
         raise ValueError("artifact_phase_mismatch")
     if payload.get("version") != 1:
         raise ValueError("unsupported_artifact_version")
-    _validate_run(payload.get("run"))
+    run = payload.get("run")
+    if run is None:
+        if not isinstance(payload.get("payload"), dict) or payload["payload"].get("status") != "skipped":
+            raise ValueError("invalid_run_binding")
+        _validate_skipped_payload(payload["payload"])
+        return
+    _validate_run(run)
     _validate_payload(phase, payload.get("payload"))
 
 
@@ -137,11 +168,67 @@ def _validate_payload(phase: object, payload: object) -> None:
         analysis = payload.get("analysis")
         if set(payload) == {"analysis"} and isinstance(analysis, dict) and set(analysis) == {"result_ref"} and _text(analysis.get("result_ref"), 512):
             return
+        if _valid_structured_analysis(payload):
+            return
     if phase == "publish" and payload == {"published": True}:
+        return
+    if phase == "publish" and set(payload) == {"published", "status"} and type(payload.get("published")) is bool and _text(payload.get("status"), 64):
         return
     if phase == "record-failure" and set(payload) == {"error_code"} and _error_code(payload.get("error_code")):
         return
     raise ValueError("invalid_phase_payload")
+
+
+def _validate_skipped_payload(payload: object) -> None:
+    if not isinstance(payload, dict) or set(payload) != {"status", "reason"}:
+        raise ValueError("invalid_phase_payload")
+    if payload.get("status") != "skipped" or not _text(payload.get("reason"), 80):
+        raise ValueError("invalid_phase_payload")
+
+
+def _valid_structured_analysis(payload: dict[str, object]) -> bool:
+    kind = payload.get("kind")
+    status = payload.get("status")
+    if kind == "none" and status in {"canceled", "stale"} and set(payload) == {"kind", "status"}:
+        return True
+    if kind == "advisory" and status == "completed" and set(payload) == {"kind", "status", "advisory"}:
+        value = payload.get("advisory")
+        return (isinstance(value, dict) and set(value) == {"title", "body", "evidence", "limitations"}
+                and _text(value.get("title"), 160) and _text(value.get("body"), 6000)
+                and all(isinstance(value[key], list) and len(value[key]) <= 20 and all(_text(item, 2000) for item in value[key]) for key in ("evidence", "limitations")))
+    if kind == "review" and status == "completed" and set(payload) == {"kind", "status", "review"}:
+        value = payload.get("review")
+        if not isinstance(value, dict) or set(value) != {"conclusion", "findings", "coverage", "validation_notes", "limitations"} or not _text(value.get("conclusion"), 500):
+            return False
+        if not isinstance(value.get("findings"), list) or len(value["findings"]) > 20 or not all(_valid_finding(item) for item in value["findings"]):
+            return False
+        coverage = value.get("coverage")
+        if not isinstance(coverage, dict) or set(coverage) != {"total_files", "reviewed_files", "total_hunks", "reviewed_hunks", "omissions", "explains_every_file"}:
+            return False
+        numeric = ("total_files", "reviewed_files", "total_hunks", "reviewed_hunks")
+        if (any(type(coverage.get(key)) is not int or not 0 <= coverage[key] <= 1_000_000 for key in numeric)
+                or coverage["reviewed_files"] > coverage["total_files"] or coverage["reviewed_hunks"] > coverage["total_hunks"]
+                or type(coverage.get("explains_every_file")) is not bool
+                or not _valid_text_list(coverage.get("omissions"))):
+            return False
+        return _valid_text_list(value.get("validation_notes")) and _valid_text_list(value.get("limitations"))
+    return False
+
+
+def _valid_text_list(value: object) -> bool:
+    return isinstance(value, list) and len(value) <= 20 and all(_text(item, 2000) for item in value)
+
+
+def _valid_finding(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"path", "line", "side", "severity", "failure_path", "impact", "evidence", "suggestion", "verification", "fingerprint"}:
+        return False
+    if type(value.get("line")) is not int or not 1 <= value["line"] <= 1_000_000:
+        return False
+    if value.get("side") not in {"LEFT", "RIGHT"} or value.get("severity") not in {"P0", "P1", "P2"}:
+        return False
+    maximums = {"path": 1024, "failure_path": 2000, "impact": 2000, "evidence": 2000,
+                "suggestion": 2000, "verification": 2000, "fingerprint": 128}
+    return all(_text(value.get(key), maximum) for key, maximum in maximums.items())
 
 
 def _text(value: object, maximum: int, *, allow_empty: bool = False) -> bool:

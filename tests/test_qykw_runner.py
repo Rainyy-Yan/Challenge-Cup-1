@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools.qykw.config import parse_qykw_config
 from tools.qykw.domain import (
     Actor, CommandMode, CommandName, CommandRequest, CoverageReport, EventContext,
-    CommentKind, PullRef, PullSnapshot, ReviewResult, RunStage, RunStatus,
+    CommentKind, PullRef, PullSnapshot, ReviewResult, RunRecord, RunStage, RunStatus,
 )
 from tools.qykw.runner import QykwRunner
 
@@ -239,6 +243,89 @@ class TestQykwRunner(unittest.TestCase):
     def test_cli_rejects_unknown_phase_without_reading_artifacts(self) -> None:
         from tools.qykw.__main__ import main
         self.assertEqual(main(["--phase", "model-selected-phase"]), 2)
+
+    def test_root_authorize_noop_uses_trusted_event_without_an_input_artifact(self) -> None:
+        from tools.qykw.__main__ import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            output_path = Path(directory) / "authorize.json"
+            event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
+                                              "issue": {"number": 53}, "comment": {"id": 77, "body": "ordinary issue"},
+                                              "sender": {"login": "alice"}}), encoding="utf-8")
+            environment = {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8",
+                           "GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_RUN_ID": "44"}
+            with patch.dict(os.environ, environment, clear=True):
+                result = main(["--phase", "authorize", "--artifact", str(Path(directory) / "missing-request.json"),
+                               "--output", str(output_path)])
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(result, 0)
+        self.assertEqual(payload, {"version": 1, "phase": "authorize", "run": None,
+                                   "payload": {"status": "skipped", "reason": "not_a_pull_request"}})
+
+    def test_real_module_entrypoint_roots_authorize_without_a_controller_or_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            output_path = Path(directory) / "authorize.json"
+            event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
+                                              "issue": {"number": 53}, "comment": {"id": 77, "body": "ordinary issue"},
+                                              "sender": {"login": "alice"}}), encoding="utf-8")
+            environment = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_PATH": str(event_path),
+                           "GITHUB_REPOSITORY_ID": "8", "GITHUB_REPOSITORY": "owner/repo",
+                           "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_RUN_ID": "44"}
+            process = subprocess.run([sys.executable, "-m", "tools.qykw", "--phase", "authorize", "--artifact", str(Path(directory) / "missing-request.json"),
+                                      "--output", str(output_path)],
+                                     cwd=Path(__file__).resolve().parents[1], env={**os.environ, **environment},
+                                     text=True, capture_output=True, check=False)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertNotIn("phase_controller_required", process.stderr)
+        self.assertEqual(payload["payload"]["status"], "skipped")
+
+    def test_analyze_phase_has_only_read_operations_and_never_saves_state(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        class TrackingState(FakeState):
+            def __init__(self) -> None:
+                super().__init__()
+                self.save_calls = 0
+
+            def save(self, record: object) -> None:
+                self.save_calls += 1
+                super().save(record)
+
+        binding = complete_run()
+        binding["command"] = {"name": "帮助", "argument": "", "mode": "read_only"}
+        artifact = artifact_for("authorize", binding, {"authorization": "accepted"})
+        run = _run_from_artifact(artifact)
+        self.assertIsNotNone(run)
+        gateway = FakeGateway()
+        state = TrackingState()
+        state.records[run.run_id] = RunRecord(run, RunStage.ACCEPTED, RunStatus.ACTIVE, "qykw-v1", None,
+                                               False, None, (), None, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z")
+        controller = ProductionPhaseController("analyze", {})
+        controller._read_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+        result = controller.analyze(artifact)
+        self.assertEqual(result["phase"], "analyze")
+        self.assertEqual(state.save_calls, 0)
+        self.assertNotIn("create_comment", gateway.write_calls)
+
+    def test_root_authorize_creates_the_fixed_run_before_reacting(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController
+
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
+                                              "issue": {"number": 53, "pull_request": {}},
+                                              "comment": {"id": 77, "body": "@qykw 审查"}, "sender": {"login": "alice"}}), encoding="utf-8")
+            controller = ProductionPhaseController("authorize", {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8",
+                                                                    "GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_RUN_ID": "44"})
+            gateway, state = FakeGateway(), FakeState()
+            controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+            result = controller.root()
+        self.assertEqual(result["payload"], {"authorization": "accepted"})
+        self.assertEqual(len(state.records), 1)
+        self.assertEqual(gateway.reaction_calls, [77])
 
     def test_cli_phase_chain_preserves_the_complete_immutable_run_binding(self) -> None:
         from tools.qykw.__main__ import main
