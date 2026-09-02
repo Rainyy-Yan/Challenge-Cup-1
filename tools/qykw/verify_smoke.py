@@ -24,6 +24,18 @@ _CLEAN_ENV = {
 }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        del request, file_pointer, code, message, headers, new_url
+        raise RuntimeError("smoke_redirect_forbidden")
+
+
+_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirect(),
+)
+
+
 def verify(workspace: Path, port: int = _PORT) -> None:
     """Start ``server.py`` and require a bounded HTML DOCTYPE response."""
 
@@ -57,7 +69,9 @@ def verify(workspace: Path, port: int = _PORT) -> None:
                     method="GET",
                     headers={"Connection": "close"},
                 )
-                with urllib.request.urlopen(request, timeout=remaining) as response:
+                with _OPENER.open(request, timeout=remaining) as response:
+                    if response.geturl() != f"http://127.0.0.1:{port}/":
+                        raise RuntimeError("smoke_redirect_forbidden")
                     body = response.read(_RESPONSE_LIMIT_BYTES + 1)
                 if len(body) > _RESPONSE_LIMIT_BYTES:
                     raise RuntimeError("smoke_response_too_large")

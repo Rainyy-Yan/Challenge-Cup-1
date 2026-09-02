@@ -20,9 +20,14 @@ _IMAGE_PATTERN = re.compile(
     r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"
 )
 _ENV_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_PYTHON_ENV_PATTERN = re.compile(r"^PYTHON[A-Z0-9_]*$")
 _FORBIDDEN_ENV_FRAGMENT = re.compile(
     r"(?:^QYKW|^GITHUB|TOKEN|KEY|SECRET|PASSWORD)", re.IGNORECASE
+)
+_FORBIDDEN_PYTHON_ENV = frozenset(
+    {"PYTHONHOME", "PYTHONINSPECT", "PYTHONPATH", "PYTHONSTARTUP"}
+)
+_ALLOWED_PROFILE_ENV = frozenset(
+    {"PYTHONHASHSEED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONWARNINGS"}
 )
 _SHELLS = frozenset(
     {"sh", "bash", "dash", "zsh", "fish", "cmd", "cmd.exe", "pwsh", "powershell"}
@@ -41,6 +46,27 @@ _MAX_TIMEOUT_SECONDS = 900
 _MAX_OUTPUT_LIMIT_BYTES = 1024 * 1024
 _EXCERPT_LIMIT_BYTES = 2048
 _DIAGNOSTIC_SAMPLE_BYTES = 64 * 1024
+_CONTROL_OUTPUT_LIMIT_BYTES = 4096
+_SAFE_ERROR_TYPES = frozenset(
+    {
+        "AssertionError",
+        "ConnectionError",
+        "FileNotFoundError",
+        "ImportError",
+        "JSONDecodeError",
+        "MemoryError",
+        "ModuleNotFoundError",
+        "OSError",
+        "PermissionError",
+        "RecursionError",
+        "RuntimeError",
+        "SyntaxError",
+        "TimeoutError",
+        "TypeError",
+        "UnicodeError",
+        "ValueError",
+    }
+)
 
 
 class SandboxError(RuntimeError):
@@ -255,7 +281,10 @@ class DockerSandboxExecutor:
                 process.kill()
                 self._abort("sandbox_output_limit_exceeded")
             returncode = process.wait(timeout=1.0)
-        except SandboxError:
+        except SandboxError as exc:
+            if self._started and not self._closed:
+                self._terminal_error = exc.code
+                self.close()
             raise
         except Exception:
             self._abort("sandbox_execution_failed")
@@ -275,17 +304,35 @@ class DockerSandboxExecutor:
         return result
 
     def close(self) -> None:
-        """Best-effort, idempotent removal without exposing Docker output."""
+        """Remove the container and prove absence before claiming closure."""
 
-        if self._closed:
+        if self._closed and not self._started:
             return
         self._closed = True
         if self._started:
-            self._best_effort_control(("docker", "kill", self.container_name))
-            self._best_effort_control(
+            kill_ok, _ = self._checked_control(
+                ("docker", "kill", self.container_name)
+            )
+            remove_ok, _ = self._checked_control(
                 ("docker", "rm", "--force", self.container_name)
             )
-            self._started = False
+            absent_ok, output = self._checked_control(
+                (
+                    "docker",
+                    "ps",
+                    "--all",
+                    "--quiet",
+                    "--no-trunc",
+                    "--filter",
+                    f"name=^/{self.container_name}$",
+                )
+            )
+            confirmed_absent = absent_ok and output.strip() == b""
+            if kill_ok and remove_ok and confirmed_absent:
+                self._started = False
+                return
+            self._terminal_error = "sandbox_cleanup_unconfirmed"
+            raise SandboxError("sandbox_cleanup_unconfirmed")
 
     def _ensure_started(self) -> None:
         if self._started:
@@ -337,17 +384,13 @@ class DockerSandboxExecutor:
             completed = self._backend.control(run_argv, 30)
             if getattr(completed, "returncode", None) != 0:
                 raise SandboxError("sandbox_start_failed")
-        except SandboxError:
-            self._best_effort_control(
-                ("docker", "rm", "--force", self.container_name)
-            )
-            self._closed = True
-            raise
         except Exception:
-            self._best_effort_control(
-                ("docker", "rm", "--force", self.container_name)
-            )
-            self._closed = True
+            self._started = True
+            self._terminal_error = "sandbox_start_failed"
+            try:
+                self.close()
+            except SandboxError:
+                raise
             raise SandboxError("sandbox_start_failed") from None
         self._started = True
 
@@ -356,11 +399,15 @@ class DockerSandboxExecutor:
         self.close()
         raise SandboxError(code)
 
-    def _best_effort_control(self, argv: tuple[str, ...]) -> None:
+    def _checked_control(self, argv: tuple[str, ...]) -> tuple[bool, bytes]:
         try:
-            self._backend.control(argv, 15)
+            completed = self._backend.control(argv, 15)
         except Exception:
-            pass
+            return False, b""
+        output = getattr(completed, "stdout", None)
+        if type(output) is not bytes or len(output) > _CONTROL_OUTPUT_LIMIT_BYTES:
+            return False, b""
+        return getattr(completed, "returncode", None) == 0, output
 
 
 def _validate_argv(argv: object) -> tuple[str, ...]:
@@ -402,9 +449,11 @@ def _validate_env(
             raise SandboxError("invalid_environment_name")
         if _FORBIDDEN_ENV_FRAGMENT.search(name):
             raise SandboxError("forbidden_environment_name")
+        if name in _FORBIDDEN_PYTHON_ENV:
+            raise SandboxError("forbidden_environment_name")
         if name in _FIXED_ENV_NAMES:
             raise SandboxError("reserved_environment_name")
-        if _PYTHON_ENV_PATTERN.fullmatch(name) is None:
+        if name not in _ALLOWED_PROFILE_ENV:
             raise SandboxError("untrusted_environment_name")
         if name in seen or "\x00" in value or "\n" in value or len(value) > 1024:
             raise SandboxError("invalid_environment")
@@ -427,6 +476,8 @@ def _safe_excerpt(sample: bytes) -> str:
     safe: list[str] = []
     for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\s*:", text):
         item = match.group(1)
+        if item not in _SAFE_ERROR_TYPES:
+            item = "Exception" if item.endswith("Exception") else "Error"
         if item not in safe:
             safe.append(item)
     for match in re.finditer(r"(?m)\bRan\s+(\d+)\s+tests?\s+in\s+[0-9.]+s\s*$", text):

@@ -22,9 +22,9 @@ _IMAGE = "qykw-verify@sha256:" + "a" * 64
 
 
 class _Completed:
-    def __init__(self, returncode: int = 0) -> None:
+    def __init__(self, returncode: int = 0, stdout: bytes = b"container-id\n") -> None:
         self.returncode = returncode
-        self.stdout = b"container-id\n"
+        self.stdout = stdout
         self.stderr = b""
 
 
@@ -62,6 +62,8 @@ class _Backend:
     def control(self, argv: tuple[str, ...], timeout_seconds: int) -> _Completed:
         del timeout_seconds
         self.control_calls.append(argv)
+        if argv[:3] == ("docker", "ps", "--all"):
+            return _Completed(stdout=b"")
         return _Completed()
 
     def stream(self, argv: tuple[str, ...]) -> _Process:
@@ -323,6 +325,23 @@ class TestDockerSandboxExecutor(unittest.TestCase):
             for leaked in (secret, source, str(workspace), "should not expose"):
                 self.assertNotIn(leaked, result.output_excerpt)
 
+    def test_unknown_error_identifier_cannot_encode_a_sentinel(self) -> None:
+        sentinel = "X73656e74696e656cError"
+        raw = f"{sentinel}: private\nUnknownPayloadException: private\n".encode()
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self._workspace(root)
+            result = DockerSandboxExecutor(
+                workspace, _IMAGE, backend=_Backend([_Process(raw)])
+            ).run(
+                ("python", "tests.py"),
+                cwd=workspace,
+                env=(),
+                timeout_seconds=10,
+                output_limit_bytes=4096,
+            )
+        self.assertEqual(result.output_excerpt, "Error\nException")
+        self.assertNotIn("73656e74696e656c", result.output_excerpt)
+
     def test_binary_output_cannot_break_excerpt_or_digest(self) -> None:
         raw = b"\xff\xfe\x00\x80Ran 1 test in 0.1s\nOK\n"
         with tempfile.TemporaryDirectory() as root:
@@ -383,11 +402,102 @@ class TestDockerSandboxExecutor(unittest.TestCase):
             self.assertIn(("docker", "kill", "qykw-context"), backend.control_calls)
             self.assertIn(("docker", "rm", "--force", "qykw-context"), backend.control_calls)
 
+    def test_cleanup_requires_kill_remove_and_bounded_absence_confirmation(self) -> None:
+        class CleanupBackend(_Backend):
+            def __init__(self, failing_prefix: tuple[str, ...]) -> None:
+                super().__init__([_Process()])
+                self.failing_prefix = failing_prefix
+
+            def control(self, argv: tuple[str, ...], timeout_seconds: int) -> _Completed:
+                result = super().control(argv, timeout_seconds)
+                if argv[: len(self.failing_prefix)] == self.failing_prefix:
+                    result.returncode = 1
+                return result
+
+        failures = (
+            ("docker", "kill"),
+            ("docker", "rm", "--force"),
+            ("docker", "ps", "--all"),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                workspace = self._workspace(root)
+                backend = CleanupBackend(failure)
+                executor = DockerSandboxExecutor(
+                    workspace,
+                    _IMAGE,
+                    backend=backend,
+                    container_name_factory=lambda: "qykw-cleanup-check",
+                )
+                executor.run(
+                    ("python", "tests.py"),
+                    cwd=workspace,
+                    env=(),
+                    timeout_seconds=10,
+                    output_limit_bytes=4096,
+                )
+                with self.assertRaisesRegex(SandboxError, "sandbox_cleanup_unconfirmed"):
+                    executor.close()
+                with self.assertRaisesRegex(SandboxError, "sandbox_cleanup_unconfirmed"):
+                    executor.run(
+                        ("python", "later.py"),
+                        cwd=workspace,
+                        env=(),
+                        timeout_seconds=10,
+                        output_limit_bytes=4096,
+                    )
+                self.assertIn(
+                    (
+                        "docker",
+                        "ps",
+                        "--all",
+                        "--quiet",
+                        "--no-trunc",
+                        "--filter",
+                        "name=^/qykw-cleanup-check$",
+                    ),
+                    backend.control_calls,
+                )
+
+    def test_timeout_cleanup_failure_overrides_timeout_success_claim(self) -> None:
+        class FailedRemoveBackend(_Backend):
+            def control(self, argv: tuple[str, ...], timeout_seconds: int) -> _Completed:
+                result = super().control(argv, timeout_seconds)
+                if argv[:3] == ("docker", "rm", "--force"):
+                    result.returncode = 1
+                return result
+
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self._workspace(root)
+            backend = FailedRemoveBackend([_Process(never_finishes=True)])
+            clock = _Clock()
+            executor = DockerSandboxExecutor(
+                workspace,
+                _IMAGE,
+                backend=backend,
+                container_name_factory=lambda: "qykw-timeout-cleanup",
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+            )
+            with self.assertRaisesRegex(SandboxError, "sandbox_cleanup_unconfirmed"):
+                executor.run(
+                    ("python", "slow.py"),
+                    cwd=workspace,
+                    env=(),
+                    timeout_seconds=1,
+                    output_limit_bytes=4096,
+                )
+
     def test_default_backend_never_invokes_a_shell(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             workspace = self._workspace(root)
+
+            def completed(argv, **kwargs):
+                del kwargs
+                return _Completed(stdout=b"" if argv[:3] == ("docker", "ps", "--all") else b"container-id\n")
+
             with (
-                patch("tools.qykw.sandbox.subprocess.run", return_value=_Completed()) as run,
+                patch("tools.qykw.sandbox.subprocess.run", side_effect=completed) as run,
                 patch(
                     "tools.qykw.sandbox.subprocess.Popen",
                     return_value=_Process(b"Ran 1 test in 0.1s\nOK\n"),
@@ -424,10 +534,13 @@ class TestDockerSandboxExecutor(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             workspace = self._workspace(root)
-            for backend in (FailingStart(), RaisingStart()):
+            for backend, expected in (
+                (FailingStart(), "sandbox_start_failed"),
+                (RaisingStart(), "sandbox_cleanup_unconfirmed"),
+            ):
                 with self.subTest(backend=type(backend).__name__):
                     executor = DockerSandboxExecutor(workspace, _IMAGE, backend=backend)
-                    with self.assertRaisesRegex(SandboxError, "sandbox_start_failed") as caught:
+                    with self.assertRaisesRegex(SandboxError, expected) as caught:
                         executor.run(
                             ("python", "tests.py"),
                             cwd=workspace,
@@ -508,12 +621,17 @@ class TestDockerSandboxExecutor(unittest.TestCase):
                 (("python",), (("pythonpath", "x"),), 10, 100, "invalid_environment_name"),
                 (
                     ("python",),
-                    (("PYTHONPATH", "a"), ("PYTHONPATH", "b")),
+                    (("PYTHONWARNINGS", "a"), ("PYTHONWARNINGS", "b")),
                     10,
                     100,
                     "invalid_environment",
                 ),
-                (("python",), (("PYTHONPATH", "x\n"),), 10, 100, "invalid_environment"),
+                (("python",), (("PYTHONWARNINGS", "x\n"),), 10, 100, "invalid_environment"),
+                (("python",), (("PYTHONPATH", "x"),), 10, 100, "forbidden_environment_name"),
+                (("python",), (("PYTHONHOME", "x"),), 10, 100, "forbidden_environment_name"),
+                (("python",), (("PYTHONSTARTUP", "x"),), 10, 100, "forbidden_environment_name"),
+                (("python",), (("PYTHONINSPECT", "1"),), 10, 100, "forbidden_environment_name"),
+                (("python",), (("PYTHONARBITRARY", "x"),), 10, 100, "untrusted_environment_name"),
             )
             for argv, env, timeout, limit, code in cases:
                 with self.subTest(code=code), self.assertRaisesRegex(SandboxError, code):
@@ -622,6 +740,23 @@ class TestVerifySmoke(unittest.TestCase):
             check=False,
         )
 
+    def _write_redirect_server(self, root: Path) -> None:
+        source = """
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+            import sys
+
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, *args):
+                    pass
+                def do_GET(self):
+                    self.send_response(302)
+                    self.send_header('Location', 'http://127.0.0.1:8765/target')
+                    self.end_headers()
+
+            ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
+        """
+        (root / "server.py").write_text(textwrap.dedent(source), encoding="utf-8")
+
     @unittest.skipIf(os.name == "nt", "trusted verification image is Linux")
     def test_smoke_accepts_doctype_without_echoing_server_logs(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -674,6 +809,15 @@ class TestVerifySmoke(unittest.TestCase):
                 verify_smoke.verify(workspace)
             with self.assertRaisesRegex(RuntimeError, "smoke_invalid_workspace"):
                 verify_smoke.verify(workspace, 8000)
+
+    def test_direct_smoke_rejects_redirects_without_following_them(self) -> None:
+        platform_env = {"SYSTEMROOT": r"C:\Windows"} if os.name == "nt" else {}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+            workspace = Path(root)
+            self._write_redirect_server(workspace)
+            with patch.dict(verify_smoke._CLEAN_ENV, platform_env):
+                with self.assertRaisesRegex(RuntimeError, "smoke_redirect_forbidden"):
+                    verify_smoke.verify(workspace)
 
     def test_smoke_main_has_stable_argument_and_runtime_errors(self) -> None:
         stderr = io.StringIO()
