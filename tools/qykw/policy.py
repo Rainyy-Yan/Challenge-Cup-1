@@ -104,6 +104,7 @@ _MAX_TRUSTED_SOURCE_FILES = 100
 _MAX_TRUSTED_SOURCE_CONTEXT_BYTES = 650_000
 _MAX_SOURCE_OMISSION_DETAILS = 100
 _MAX_ASSIGNMENT_EXPRESSION_LENGTH = 4096
+_MAX_ATTRIBUTE_PATH_SEGMENTS = 64
 _KNOWN_SECRET = re.compile(
     r"(?:"
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
@@ -146,7 +147,10 @@ _PLACEHOLDER_VALUES = frozenset(
     }
 )
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_REFERENCE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+$")
+_REFERENCE_NAME = re.compile(
+    r"^(?:[a-z][a-z0-9]*_)*(?:credential|secret|token|key|password)_"
+    r"(?:name|ref|reference)$"
+)
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
 )
@@ -719,6 +723,8 @@ def _assignment_contains_secret(match: re.Match[str]) -> bool:
         return False
     if len(value) > _MAX_ASSIGNMENT_EXPRESSION_LENGTH:
         return True
+    if _is_exact_quoted_placeholder(value):
+        return False
     try:
         expression = ast.parse(value, mode="eval").body
     except (MemoryError, OverflowError, RecursionError, SyntaxError, ValueError):
@@ -732,6 +738,18 @@ def _assignment_contains_secret(match: re.Match[str]) -> bool:
             )
         return True
     return not _is_safe_assignment_reference(expression)
+
+
+def _is_exact_quoted_placeholder(value: str) -> bool:
+    candidate = value
+    if candidate.endswith(","):
+        candidate = candidate[:-1].rstrip()
+    if len(candidate) < 2 or candidate[0] not in {'"', "'"}:
+        return False
+    return (
+        candidate[-1] == candidate[0]
+        and _is_placeholder_secret_value(candidate[1:-1])
+    )
 
 
 def _is_safe_assignment_reference(expression: ast.expr) -> bool:
@@ -769,13 +787,17 @@ def _is_safe_assignment_reference(expression: ast.expr) -> bool:
 
 
 def _attribute_path(expression: ast.expr) -> tuple[str, ...] | None:
-    if isinstance(expression, ast.Name):
-        return (expression.id,)
-    if isinstance(expression, ast.Attribute):
-        parent = _attribute_path(expression.value)
-        if parent is not None:
-            return (*parent, expression.attr)
-    return None
+    attributes: list[str] = []
+    current = expression
+    while isinstance(current, ast.Attribute):
+        attributes.append(current.attr)
+        if len(attributes) >= _MAX_ATTRIBUTE_PATH_SEGMENTS:
+            return None
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    attributes.append(current.id)
+    return tuple(reversed(attributes))
 
 
 def _environment_name_literal(expression: ast.expr) -> str | None:

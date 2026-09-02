@@ -652,6 +652,8 @@ class TestPatchGeneration(unittest.TestCase):
     def test_placeholder_secret_assignments_remain_available_as_source_context(self) -> None:
         placeholders = (
             'token = "placeholder_token_value"\n',
+            'token = "placeholder_token_value",\n',
+            'token: "placeholder_token_value",\n',
             'api_key = "your_api_key_here"\n',
             'password = "change-me-before-use"\n',
             'auth_token = "example-token-for-tests"\n',
@@ -698,6 +700,9 @@ class TestPatchGeneration(unittest.TestCase):
             "password = getpass()\n",
             "secret = config.secret\n",
             "token = credential_name\n",
+            "token = token_ref\n",
+            "secret = configured_secret_reference\n",
+            "token = " + ".".join(["config"] * 64) + "\n",
             'secret = os.getenv("SECRET_NAME")\n',
             'token = os.environ.get("TOKEN_NAME")\n',
             'api_key = os.environ.get("API_KEY", None)\n',
@@ -814,6 +819,8 @@ class TestPatchGeneration(unittest.TestCase):
     def test_ast_wrappers_cannot_hide_literal_credentials(self) -> None:
         credentials = (
             'token=str("ActualSecretValue123")\n',
+            "token=ActualSecret_Value123\n",
+            "token: ActualSecret_Value123\n",
             'password=load("ActualSecretValue123")\n',
             'secret=config["ActualSecretValue123"]\n',
             'password=getpass("ActualSecretValue123")\n',
@@ -826,7 +833,12 @@ class TestPatchGeneration(unittest.TestCase):
             'token=os.environ["BAD-NAME"]\n',
             "token=(factory()).secret\n",
             "token=left + right\n",
+            "token=" + ".".join(["config"] * 65) + "\n",
+            "token=" + ".".join(["a"] * 1200) + "\n",
             "token=" + "a" * 4097 + "\n",
+            'token="placeholder_token_value-prefix"\n',
+            'token="prefix-placeholder_token_value"\n',
+            'token="placeholder_token_value", "ActualSecretValue123"\n',
         )
         for index, content in enumerate(credentials):
             path = f"wrapper-{index}.py"
