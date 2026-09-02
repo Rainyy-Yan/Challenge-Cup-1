@@ -425,6 +425,55 @@ class TestQykwRunner(unittest.TestCase):
         self.assertNotIn("QYKW_REVIEW_TOKEN", supplied)
         self.assertNotIn("UNRELATED_SECRET", supplied)
 
+    def test_authorize_change_commands_preserve_precise_policy_without_side_effects(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController
+
+        controller = ProductionPhaseController("authorize", {})
+        gateway, state = FakeGateway(), FakeState()
+        controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+        allowed = controller._authorize_event(replace(event(CommandName.FIX), actor_login="owner"))
+        denied = controller._authorize_event(event(CommandName.IMPLEMENT))
+        self.assertEqual(allowed["payload"], {"status": "skipped", "reason": "capability_disabled"})
+        self.assertEqual(denied["payload"], {"status": "skipped", "reason": "change_actor_not_allowed"})
+        self.assertEqual(gateway.reaction_calls, [])
+        self.assertEqual(state.records, {})
+
+    def test_control_reacts_only_after_successful_new_cancel_marker(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        run = _run_from_artifact(artifact_for("authorize", complete_run(), {"authorization": "accepted"}))
+        self.assertIsNotNone(run)
+        gateway, state = FakeGateway(), FakeState()
+        state.records[run.run_id] = RunRecord(run, RunStage.ANALYZING, RunStatus.ACTIVE, "qykw-v1", None,
+                                               False, None, (), None, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z")
+        controller = ProductionPhaseController("control", {})
+        controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+        stop = replace(event(CommandName.STOP), actor_login="alice")
+        first = controller._control_event(stop)
+        second = controller._control_event(stop)
+        self.assertEqual(first["payload"], {"stop_comment_id": 77})
+        self.assertEqual(second["payload"], {"status": "skipped", "reason": "duplicate"})
+        self.assertEqual(state.cancels, [(run.run_id, 77)])
+        self.assertEqual(gateway.reaction_calls, [77])
+
+    def test_control_cancel_failure_has_zero_reaction(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        class FailingCancelState(FakeState):
+            def request_cancel(self, *args: object, **kwargs: object) -> object:
+                raise RuntimeError("cancel write failed")
+
+        run = _run_from_artifact(artifact_for("authorize", complete_run(), {"authorization": "accepted"}))
+        self.assertIsNotNone(run)
+        gateway, state = FakeGateway(), FailingCancelState()
+        state.records[run.run_id] = RunRecord(run, RunStage.ANALYZING, RunStatus.ACTIVE, "qykw-v1", None,
+                                               False, None, (), None, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z")
+        controller = ProductionPhaseController("control", {})
+        controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+        result = controller._control_event(replace(event(CommandName.STOP), actor_login="alice"))
+        self.assertEqual(result["payload"]["status"], "skipped")
+        self.assertEqual(gateway.reaction_calls, [])
+
     def test_cli_phase_chain_preserves_the_complete_immutable_run_binding(self) -> None:
         from tools.qykw.__main__ import main
 

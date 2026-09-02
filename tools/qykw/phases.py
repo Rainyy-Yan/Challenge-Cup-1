@@ -186,13 +186,13 @@ class ProductionPhaseController:
         from tools.qykw.domain import EventContext
         if not isinstance(event, EventContext):
             return _skipped("authorize", "invalid_event")
-        if event.command.name in {CommandName.STOP, CommandName.FIX, CommandName.IMPLEMENT}:
+        if event.command.name is CommandName.STOP:
             return _skipped("authorize", "review_lane_noop")
         try:
             gateway, state, config = self._review_services()
             decision = authorize_command(event.command, Actor(event.actor_login, gateway.get_actor_permission(event.actor_login)), config)
             if not decision.allowed:
-                return _skipped("authorize", "unauthorized")
+                return _skipped("authorize", decision.reason)
             existing = state.find_by_idempotency_key(event.pr_number, event.idempotency_key)
             trigger = decide_trigger(event, existing_run=existing,
                                      initial_review_completed=state.has_successful_initial_review(event.pr_number), config=config)
@@ -227,19 +227,21 @@ class ProductionPhaseController:
             active = state.find_latest_active(event.pr_number)
             if active is None or event.trigger_comment_id is None:
                 return _skipped("control", "no_active_run")
+            if state.is_cancel_requested(event.pr_number, active.context.run_id):
+                return _skipped("control", "duplicate")
             decision = authorize_command(event.command, Actor(event.actor_login, gateway.get_actor_permission(event.actor_login)), config,
                                          run_trigger_actor=active.context.trigger_actor)
             if not decision.allowed:
-                return _skipped("control", "unauthorized")
+                return _skipped("control", decision.reason)
             gateway.assert_bot_identity("qykw")
+            state.request_cancel(event.pr_number, active.context.run_id, stop_comment_id=event.trigger_comment_id,
+                                 actor_login=event.actor_login)
             if event.trigger_comment_kind is not None:
                 try:
                     kind = "issue_comment" if event.trigger_comment_kind.value == "issue" else "review_comment"
                     gateway.try_add_reaction(TriggerRef(kind, event.trigger_comment_id), "laugh")
                 except Exception:
                     pass
-            state.request_cancel(event.pr_number, active.context.run_id, stop_comment_id=event.trigger_comment_id,
-                                 actor_login=event.actor_login)
             return {"version": 1, "phase": "control", "run": _run_payload(active.context),
                     "payload": {"stop_comment_id": event.trigger_comment_id}}
         except Exception:
