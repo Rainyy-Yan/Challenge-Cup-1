@@ -24,7 +24,27 @@
   "coverage_universe": [],
   "artifact_manifest": {
     "version": 1,
-    "artifacts": [],
-    "citations": []
+    "artifacts": [
+      {
+        "id": "<replace-with-artifact-id>",
+        "kind": "claim_output",
+        "subject_id": "<replace-with-claim-row-id>",
+        "case_id": "<replace-with-case-id>",
+        "content": "<replace-with-exact-frozen-utf8-content>",
+        "sha256": "<sha256-of-exact-content>",
+        "citation_ids": ["<replace-with-citation-id>"],
+        "review_status": "frozen"
+      }
+    ],
+    "citations": [
+      {
+        "id": "<replace-with-citation-id>",
+        "source_id": "<replace-with-source-register-id>",
+        "locator": "<replace-with-stable-source-locator>",
+        "excerpt": "<replace-with-exact-reviewed-excerpt>",
+        "sha256": "<sha256-of-exact-excerpt>",
+        "review_status": "approved"
+      }
+    ]
   }
 }

@@ -14,13 +14,28 @@ in the evidence register. Do not replace a frozen artifact in place: make a new
 dataset identifier and preserve its predecessor.
 
 The version-1 `artifact_manifest` binds the truth rows to actual frozen UTF-8
-content. Every artifact has exactly `id`, `kind`, `content`, `sha256`,
-`citation_ids`, and `review_status`. Allowed kinds are `profile_snapshot`,
-`case_input`, `claim_output`, `resource_output`, and `coverage_evidence`.
-Profiles and cases point to frozen profile/case artifacts; claim and adaptation
-rows point to frozen output artifacts. A covered knowledge point points to an
-approved `coverage_evidence` artifact. Claim, resource, and coverage artifacts
-must cite at least one approved citation.
+content. Every artifact has exactly `id`, `kind`, `subject_id`, `content`,
+`sha256`, `citation_ids`, and `review_status`; `claim_output` and
+`resource_output` additionally require `case_id`, while all other kinds forbid
+`case_id`. Allowed kinds are `profile_snapshot`, `case_input`, `claim_output`,
+`resource_output`, and `coverage_evidence`.
+
+Ownership is bidirectional rather than an ID-only declaration:
+
+- each profile maps to its own `profile_snapshot` whose `subject_id` is that
+  profile ID; at least three distinct artifacts and distinct profile content
+  hashes are required;
+- each case owns a non-reused `case_input` whose `subject_id` is the case ID;
+  the 50 required cases must also produce 50 distinct
+  `(profile_snapshot.sha256, case_input.sha256)` pairs;
+- each claim/resource row owns a non-reused output artifact whose `subject_id`
+  is the row ID and whose `case_id` matches the row's canonical case ID;
+- each coverage artifact's `subject_id` is the knowledge-point ID it supports,
+  so evidence for one point cannot be relabelled as evidence for another.
+
+Profile, claim-output, resource-output, and coverage-evidence content hashes
+must be unique within their kinds. Claim, resource, and coverage artifacts must
+cite at least one approved citation.
 
 Every citation has exactly `id`, `source_id`, `locator`, `excerpt`, `sha256`,
 and `review_status`. Its digest binds the UTF-8 excerpt; an artifact digest binds
@@ -72,15 +87,16 @@ py -3 -X utf8 -m evalkit.formal_scorecard --truth <formal_truth.json> --out <rep
 ```
 
 The command always writes `scorecard.json` and `scorecard.md`, including when
-the source is malformed JSON or invalid UTF-8. It exits `0` for assessable
-evidence (`pass` or `fail`) and `2` for invalid or incomplete evidence
-(`not_assessable`). Register the frozen truth
+the source is malformed JSON, invalid UTF-8, or contains a JSON-escaped lone
+surrogate. All object keys and string values must encode as strict UTF-8 before
+hashing begins. It exits `0` for assessable evidence (`pass` or `fail`) and `2`
+for invalid or incomplete evidence (`not_assessable`). Register the frozen truth
 file, its hash, the two generated reports, command version, reviewer assignment
 records, and any adjudication log in the project evidence index. The scorecard
 is an official metric evidence gate, not the jury's 100-point score.
 
-The schema checks declarations, hashes, references, reviewer labels, and signed
-workflow boundaries. It does not prove that a source, reviewer identity,
-signature, or quoted excerpt is externally authentic. Keep signatures,
-assignment records, conflict-of-interest checks, and source originals in the
-controlled evidence register; the scorecard must not claim those facts itself.
+Manifest and hash validation proves only internal content/reference binding; it
+does not prove the real-world authenticity of sources, excerpts, signatures,
+or reviewer identities. Keep signatures, assignment records,
+conflict-of-interest checks, and source originals in the controlled evidence
+register; the scorecard must not claim those facts itself.

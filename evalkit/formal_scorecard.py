@@ -50,6 +50,11 @@ ARTIFACT_KINDS = {
     "resource_output",
     "coverage_evidence",
 }
+TRUST_LIMITATIONS = [
+    "Manifest and hash validation proves only internal content/reference binding; "
+    "it does not prove the real-world authenticity of sources, excerpts, signatures, "
+    "or reviewer identities."
+]
 
 
 def _unknown_fields(value: dict, allowed: set[str], label: str, errors: list[str]) -> None:
@@ -64,18 +69,60 @@ def _missing_fields(value: dict, required: set[str], label: str, errors: list[st
         errors.append(f"{label} is missing fields: {', '.join(missing)}")
 
 
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+def _canonical_json(value: object) -> str | None:
+    try:
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        canonical.encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return canonical
 
 
-def _text_sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def _text_sha256(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _strict_utf8_error(value: object, path: str) -> str | None:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeError:
+            return f"{path} contains text that is not strict UTF-8"
+        return None
+    if isinstance(value, dict):
+        for index, (key, child) in enumerate(value.items()):
+            if not isinstance(key, str):
+                return f"{path} contains a non-string object key at index {index}"
+            try:
+                key.encode("utf-8", errors="strict")
+            except UnicodeError:
+                return f"{path} contains an object key that is not strict UTF-8"
+            child_path = (
+                f"{path}.{key}"
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key)
+                else f"{path}[value:{index}]"
+            )
+            error = _strict_utf8_error(child, child_path)
+            if error is not None:
+                return error
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            error = _strict_utf8_error(child, f"{path}[{index}]")
+            if error is not None:
+                return error
+    return None
 
 
 def _finite_fsum(values: list[float]) -> float | None:
@@ -225,7 +272,7 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
     manifest_fields = {"version", "artifacts", "citations"}
     _unknown_fields(manifest, manifest_fields, "artifact_manifest", errors)
     _missing_fields(manifest, manifest_fields, "artifact_manifest", errors)
-    if manifest.get("version") != 1:
+    if type(manifest.get("version")) is not int or manifest.get("version") != 1:
         errors.append("artifact_manifest.version must be 1")
 
     raw_citations = manifest.get("citations")
@@ -282,6 +329,8 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
         artifact_fields = {
             "id",
             "kind",
+            "subject_id",
+            "case_id",
             "content",
             "sha256",
             "citation_ids",
@@ -298,7 +347,10 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
             label = f"artifact {display_id}"
             before = len(errors)
             _unknown_fields(artifact, artifact_fields, label, errors)
-            _missing_fields(artifact, artifact_fields, label, errors)
+            required_artifact_fields = artifact_fields - {"case_id"}
+            if artifact.get("kind") in {"claim_output", "resource_output"}:
+                required_artifact_fields.add("case_id")
+            _missing_fields(artifact, required_artifact_fields, label, errors)
             if artifact_id is None or raw_id != raw_id.strip():
                 errors.append(f"artifact {index} needs a non-empty trimmed id")
             elif artifact_id in seen_artifacts:
@@ -308,6 +360,23 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
             kind = artifact.get("kind")
             if kind not in ARTIFACT_KINDS:
                 errors.append(f"{label} has an invalid kind")
+            subject_id = artifact.get("subject_id")
+            if (
+                not isinstance(subject_id, str)
+                or not subject_id.strip()
+                or subject_id != subject_id.strip()
+            ):
+                errors.append(f"{label} subject_id must be a non-empty trimmed string")
+            artifact_case_id = artifact.get("case_id")
+            if kind in {"claim_output", "resource_output"}:
+                if (
+                    not isinstance(artifact_case_id, str)
+                    or not artifact_case_id.strip()
+                    or artifact_case_id != artifact_case_id.strip()
+                ):
+                    errors.append(f"{label} case_id must be a non-empty trimmed string")
+            elif "case_id" in artifact:
+                errors.append(f"{label} case_id is only allowed for output artifacts")
             content = artifact.get("content")
             digest = artifact.get("sha256")
             if not isinstance(content, str) or not content.strip():
@@ -345,10 +414,7 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
         if isinstance(provenance, dict)
         else None
     )
-    try:
-        expected_hash = _text_sha256(_canonical_json(manifest))
-    except (TypeError, ValueError):
-        expected_hash = None
+    expected_hash = _text_sha256(_canonical_json(manifest))
     if (
         not isinstance(supplied_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", supplied_hash) is None
@@ -357,6 +423,19 @@ def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict
         errors.append(
             "provenance.artifact_manifest_sha256 must match the canonical artifact_manifest"
         )
+    for kind in (
+        "profile_snapshot",
+        "claim_output",
+        "resource_output",
+        "coverage_evidence",
+    ):
+        digests = [
+            artifact["sha256"]
+            for artifact in artifacts.values()
+            if artifact.get("kind") == kind
+        ]
+        if len(digests) != len(set(digests)):
+            errors.append(f"{kind} content hashes must be unique")
     return artifacts
 
 
@@ -366,16 +445,19 @@ def _resolve_artifact(
     artifacts: dict[str, dict],
     label: str,
     errors: list[str],
-) -> None:
+) -> dict | None:
     canonical = _normalise_identity(artifact_id)
     if canonical is None or not isinstance(artifact_id, str) or artifact_id != artifact_id.strip():
         errors.append(f"{label} needs a non-empty trimmed artifact_id")
-        return
+        return None
     artifact = artifacts.get(canonical)
     if artifact is None:
         errors.append(f"{label} references an unknown or invalid artifact_id")
+        return None
     elif artifact.get("kind") != expected_kind:
         errors.append(f"{label} artifact_id must resolve to {expected_kind}")
+        return None
+    return artifact
 
 
 def _human_reviewer_roster(data: dict, errors: list[str]) -> set[str] | None:
@@ -584,6 +666,7 @@ def _validate_records(
     expected_artifact_kind = "claim_output" if key == "claims" else "resource_output"
     allowed_fields = {"id", "case_id", "artifact_id", "labels", "final_label", "adjudicated_by"}
     required_fields = allowed_fields - {"adjudicated_by"}
+    referenced_artifact_ids: set[str] = set()
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             errors.append(f"{singular} {index} must be an object")
@@ -619,13 +702,23 @@ def _validate_records(
             errors.append(f"{singular} {display_id} case_id must equal its stripped form")
         elif canonical_case_id not in case_profiles:
             errors.append(f"{singular} {display_id} references an unknown case_id")
-        _resolve_artifact(
+        output_artifact = _resolve_artifact(
             record.get("artifact_id"),
             expected_artifact_kind,
             artifacts,
             f"{singular} {display_id}",
             errors,
         )
+        canonical_artifact_id = _normalise_identity(record.get("artifact_id"))
+        if output_artifact is not None and canonical_artifact_id is not None:
+            if canonical_artifact_id in referenced_artifact_ids:
+                errors.append(f"{key} artifact_id must not be reused across records")
+            else:
+                referenced_artifact_ids.add(canonical_artifact_id)
+            if _normalise_identity(output_artifact.get("subject_id")) != canonical_record_id:
+                errors.append(f"{singular} {display_id} artifact subject_id mismatch")
+            if _canonical_case_id(output_artifact.get("case_id")) != canonical_case_id:
+                errors.append(f"{singular} {display_id} artifact case_id mismatch")
         accepted.append(record)
 
         if reviewers is None:
@@ -669,10 +762,13 @@ def validate_truth(data: dict) -> list[str]:
     """Return every non-cascading violation of the version-1 truth contract."""
     if not isinstance(data, dict):
         return ["truth must be an object"]
+    unicode_error = _strict_utf8_error(data, "truth")
+    if unicode_error is not None:
+        return [unicode_error]
 
     errors: list[str] = []
     _unknown_fields(data, TOP_LEVEL_FIELDS, "truth", errors)
-    if data.get("version") != 1:
+    if type(data.get("version")) is not int or data.get("version") != 1:
         errors.append("truth version must be 1")
     if data.get("status") != "frozen":
         errors.append("truth status must be frozen")
@@ -764,8 +860,10 @@ def validate_truth(data: dict) -> list[str]:
     profile_artifact_ids = dataset.get("profile_artifact_ids")
     if not isinstance(profile_artifact_ids, dict):
         errors.append("dataset.profile_artifact_ids must be an object")
+        resolved_profile_artifacts: dict[str, dict] = {}
     else:
         normalised_mapping: dict[str, object] = {}
+        resolved_profile_artifacts = {}
         mapping_valid = True
         for raw_profile_id, artifact_id in profile_artifact_ids.items():
             canonical_profile_id = _normalise_identity(raw_profile_id)
@@ -785,16 +883,31 @@ def validate_truth(data: dict) -> list[str]:
             )
             mapping_valid = False
         if mapping_valid:
+            referenced_profile_artifact_ids: set[str] = set()
             for profile_id, artifact_id in normalised_mapping.items():
-                _resolve_artifact(
+                artifact = _resolve_artifact(
                     artifact_id,
                     "profile_snapshot",
                     artifacts,
                     f"profile {profile_id}",
                     errors,
                 )
+                canonical_artifact_id = _normalise_identity(artifact_id)
+                if artifact is not None and canonical_artifact_id is not None:
+                    referenced_profile_artifact_ids.add(canonical_artifact_id)
+                    resolved_profile_artifacts[profile_id] = artifact
+                    if _normalise_identity(artifact.get("subject_id")) != profile_id:
+                        errors.append(
+                            f"profile {profile_id} artifact subject_id mismatch"
+                        )
+            if len(referenced_profile_artifact_ids) < 3:
+                errors.append(
+                    "dataset.profile_artifact_ids must reference at least 3 distinct artifacts"
+                )
 
     case_profiles: dict[str, str] = {}
+    referenced_case_artifact_ids: set[str] = set()
+    case_content_pairs: set[tuple[str, str]] = set()
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             errors.append(f"case {index} must be an object")
@@ -820,14 +933,40 @@ def validate_truth(data: dict) -> list[str]:
             continue
         if profile_universe_valid and canonical_profile_id not in valid_profile_ids:
             errors.append(f"case {display_id} references an undeclared profile_id")
-        _resolve_artifact(
+        case_artifact = _resolve_artifact(
             case.get("artifact_id"),
             "case_input",
             artifacts,
             f"case {display_id}",
             errors,
         )
+        canonical_artifact_id = _normalise_identity(case.get("artifact_id"))
+        if case_artifact is not None and canonical_artifact_id is not None:
+            if canonical_artifact_id in referenced_case_artifact_ids:
+                errors.append("dataset case artifact_id must not be reused")
+            else:
+                referenced_case_artifact_ids.add(canonical_artifact_id)
+            if _normalise_identity(case_artifact.get("subject_id")) != canonical_case_id:
+                errors.append(f"case {display_id} artifact subject_id mismatch")
+            profile_artifact = resolved_profile_artifacts.get(canonical_profile_id)
+            if profile_artifact is not None:
+                case_content_pairs.add(
+                    (profile_artifact["sha256"], case_artifact["sha256"])
+                )
         case_profiles[canonical_case_id] = canonical_profile_id
+
+    if (
+        len(cases) >= 50
+        and len(referenced_case_artifact_ids) == len(cases)
+        and all(
+            profile_id in resolved_profile_artifacts
+            for profile_id in case_profiles.values()
+        )
+        and len(case_content_pairs) < 50
+    ):
+        errors.append(
+            "dataset cases must contain at least 50 unique profile/case content pairs"
+        )
 
     claims_errors_before = len(errors)
     claims = _validate_records(
@@ -968,6 +1107,10 @@ def validate_truth(data: dict) -> list[str]:
                             errors.append(
                                 f"covered coverage point {display_id} evidence_id must resolve to coverage_evidence"
                             )
+                        elif _normalise_identity(artifact.get("subject_id")) != _normalise_identity(point_id):
+                            errors.append(
+                                f"coverage point {display_id} evidence subject_id mismatch"
+                            )
         if all_weights_valid:
             total_weight = _finite_fsum(valid_weights)
             covered_weight = _finite_fsum(covered_weights)
@@ -1025,12 +1168,16 @@ def _provenance(data: object) -> dict:
     result = {}
     if isinstance(provenance, dict):
         for key in ("repository_sha", "artifact_manifest_sha256"):
-            if isinstance(provenance.get(key), str):
+            if isinstance(provenance.get(key), str) and _text_sha256(provenance[key]) is not None:
                 result[key] = provenance[key]
     dataset = data.get("dataset")
-    if isinstance(dataset, dict) and isinstance(dataset.get("dataset_id"), str):
+    if (
+        isinstance(dataset, dict)
+        and isinstance(dataset.get("dataset_id"), str)
+        and _text_sha256(dataset["dataset_id"]) is not None
+    ):
         result["dataset_id"] = dataset["dataset_id"]
-    if isinstance(data.get("frozen_at"), str):
+    if isinstance(data.get("frozen_at"), str) and _text_sha256(data["frozen_at"]) is not None:
         result["frozen_at"] = data["frozen_at"]
     seed = data.get("seed")
     if isinstance(seed, int) and not isinstance(seed, bool):
@@ -1086,9 +1233,7 @@ def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
             "claims": {"records": None, "cases": None, "share": None},
             "adaptations": {"records": None, "cases": None, "share": None},
         },
-        "limitations": errors + [
-            "Human reviewer roster attestations are declarations; external signatures or records establish their real-world authenticity."
-        ],
+        "limitations": errors + TRUST_LIMITATIONS,
         "overall_status": "not_assessable",
     }
 
@@ -1242,9 +1387,7 @@ def build_scorecard(data: dict) -> dict:
             "claims": claims_common_pair,
             "adaptations": adaptations_common_pair,
         },
-        "limitations": [
-            "Human reviewer roster attestations are declarations; external signatures or records establish their real-world authenticity."
-        ],
+        "limitations": TRUST_LIMITATIONS,
         "overall_status": "pass" if passed else "fail",
     }
 
@@ -1377,10 +1520,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         data = json.loads(args.truth.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        scorecard = _not_assessable_scorecard({}, [f"truth file could not be read as JSON: {error}"])
-    else:
         scorecard = build_scorecard(data)
+    except Exception as error:
+        scorecard = _not_assessable_scorecard(
+            {},
+            [f"truth data could not be scored safely: {type(error).__name__}"],
+        )
     _write_scorecard(args.out, scorecard)
     return 0 if scorecard["overall_status"] in {"pass", "fail"} else 2
 

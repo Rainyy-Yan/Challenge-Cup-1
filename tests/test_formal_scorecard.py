@@ -28,17 +28,23 @@ def _artifact(
     artifact_id: str,
     kind: str,
     *,
+    subject_id: str,
+    case_id: str | None = None,
     citation_ids: list[str] | None = None,
 ) -> dict:
     content = f"frozen content for {artifact_id}"
-    return {
+    artifact = {
         "id": artifact_id,
         "kind": kind,
+        "subject_id": subject_id,
         "content": content,
         "sha256": _sha256_text(content),
         "citation_ids": citation_ids or [],
         "review_status": "approved" if kind == "coverage_evidence" else "frozen",
     }
+    if case_id is not None:
+        artifact["case_id"] = case_id
+    return artifact
 
 
 def _refresh_manifest_hash(truth: dict) -> None:
@@ -69,7 +75,11 @@ def valid_truth() -> dict:
         "review_status": "approved",
     }
     artifacts = [
-        _artifact(f"profile-artifact-{index}", "profile_snapshot")
+        _artifact(
+            f"profile-artifact-{index}",
+            "profile_snapshot",
+            subject_id=f"profile-{index}",
+        )
         for index in range(1, 4)
     ]
     cases = []
@@ -89,15 +99,19 @@ def valid_truth() -> dict:
         )
         artifacts.extend(
             [
-                _artifact(case_artifact_id, "case_input"),
+                _artifact(case_artifact_id, "case_input", subject_id=case_id),
                 _artifact(
                     claim_artifact_id,
                     "claim_output",
+                    subject_id=f"claim-{index:03d}",
+                    case_id=case_id,
                     citation_ids=["citation-approved"],
                 ),
                 _artifact(
                     resource_artifact_id,
                     "resource_output",
+                    subject_id=f"adaptation-{index:03d}",
+                    case_id=case_id,
                     citation_ids=["citation-approved"],
                 ),
             ]
@@ -132,8 +146,18 @@ def valid_truth() -> dict:
         )
     artifacts.extend(
         [
-            _artifact("e-001", "coverage_evidence", citation_ids=["citation-approved"]),
-            _artifact("e-002", "coverage_evidence", citation_ids=["citation-approved"]),
+            _artifact(
+                "e-001",
+                "coverage_evidence",
+                subject_id="kp-001",
+                citation_ids=["citation-approved"],
+            ),
+            _artifact(
+                "e-002",
+                "coverage_evidence",
+                subject_id="kp-002",
+                citation_ids=["citation-approved"],
+            ),
         ]
     )
     truth = {
@@ -186,6 +210,11 @@ def passing_truth() -> dict:
     truth = valid_truth()
     truth["claims"] = []
     truth["adaptations"] = []
+    truth["artifact_manifest"]["artifacts"] = [
+        artifact
+        for artifact in truth["artifact_manifest"]["artifacts"]
+        if artifact["kind"] not in {"claim_output", "resource_output"}
+    ]
     for index in range(200):
         case_id = f"case-{index % 50:03d}"
         label = "yes" if index == 0 else "no"
@@ -202,6 +231,8 @@ def passing_truth() -> dict:
             _artifact(
                 f"pass-claim-artifact-{index:03d}",
                 "claim_output",
+                subject_id=f"pass-claim-{index:03d}",
+                case_id=case_id,
                 citation_ids=["citation-approved"],
             )
         )
@@ -221,6 +252,8 @@ def passing_truth() -> dict:
             _artifact(
                 f"pass-resource-artifact-{index:03d}",
                 "resource_output",
+                subject_id=f"pass-adaptation-{index:03d}",
+                case_id=case_id,
                 citation_ids=["citation-approved"],
             )
         )
@@ -277,6 +310,105 @@ class TestIntervals(unittest.TestCase):
 
 
 class TestTruthValidation(unittest.TestCase):
+    def test_accepts_subject_bound_artifact_manifest(self):
+        self.assertEqual(validate_truth(valid_truth()), [])
+
+    def test_rejects_reused_artifact_across_records(self):
+        truth = valid_truth()
+        for record in truth["claims"]:
+            record["artifact_id"] = "claim-artifact-000"
+
+        self.assertIn(
+            "claims artifact_id must not be reused across records",
+            validate_truth(truth),
+        )
+
+    def test_rejects_profile_artifact_reuse_and_duplicate_profile_content(self):
+        for mutation, expected in (
+            (
+                "reuse",
+                "dataset.profile_artifact_ids must reference at least 3 distinct artifacts",
+            ),
+            (
+                "content",
+                "profile_snapshot content hashes must be unique",
+            ),
+        ):
+            with self.subTest(mutation=mutation):
+                truth = valid_truth()
+                if mutation == "reuse":
+                    truth["dataset"]["profile_artifact_ids"]["profile-2"] = (
+                        "profile-artifact-1"
+                    )
+                else:
+                    first, second = truth["artifact_manifest"]["artifacts"][:2]
+                    second["content"] = first["content"]
+                    second["sha256"] = first["sha256"]
+                    _refresh_manifest_hash(truth)
+                self.assertIn(expected, validate_truth(truth))
+
+    def test_rejects_duplicate_case_content_under_the_same_profile(self):
+        truth = valid_truth()
+        artifacts = {
+            artifact["id"]: artifact
+            for artifact in truth["artifact_manifest"]["artifacts"]
+        }
+        source = artifacts["case-artifact-000"]
+        clone = artifacts["case-artifact-003"]
+        clone["content"] = source["content"]
+        clone["sha256"] = source["sha256"]
+        _refresh_manifest_hash(truth)
+
+        self.assertIn(
+            "dataset cases must contain at least 50 unique profile/case content pairs",
+            validate_truth(truth),
+        )
+
+    def test_rejects_wrong_artifact_subject_and_case_ownership(self):
+        mutations = (
+            ("profile-artifact-1", "subject_id", "profile-2", "profile profile-1 artifact subject_id mismatch"),
+            ("case-artifact-000", "subject_id", "case-001", "case case-000 artifact subject_id mismatch"),
+            ("claim-artifact-000", "subject_id", "claim-001", "claim claim-000 artifact subject_id mismatch"),
+            ("claim-artifact-000", "case_id", "case-001", "claim claim-000 artifact case_id mismatch"),
+            ("e-002", "subject_id", "kp-001", "coverage point kp-002 evidence subject_id mismatch"),
+        )
+        for artifact_id, field, value, expected in mutations:
+            with self.subTest(artifact_id=artifact_id, field=field):
+                truth = valid_truth()
+                artifact = next(
+                    item
+                    for item in truth["artifact_manifest"]["artifacts"]
+                    if item["id"] == artifact_id
+                )
+                artifact[field] = value
+                _refresh_manifest_hash(truth)
+                self.assertIn(expected, validate_truth(truth))
+
+    def test_rejects_boolean_truth_and_manifest_versions(self):
+        for location in ("truth", "manifest"):
+            with self.subTest(location=location):
+                truth = valid_truth()
+                if location == "truth":
+                    truth["version"] = True
+                else:
+                    truth["artifact_manifest"]["version"] = True
+                    _refresh_manifest_hash(truth)
+                self.assertTrue(
+                    any("version must be 1" in error for error in validate_truth(truth))
+                )
+
+    def test_rejects_nested_lone_surrogate_before_hashing(self):
+        truth = valid_truth()
+        truth["artifact_manifest"]["artifacts"][0]["content"] = "bad\ud800text"
+
+        self.assertEqual(
+            validate_truth(truth),
+            [
+                "truth.artifact_manifest.artifacts[0].content contains text "
+                "that is not strict UTF-8"
+            ],
+        )
+
     def test_rejects_truth_that_only_names_artifacts_without_a_manifest(self):
         truth = valid_truth()
         del truth["artifact_manifest"]
@@ -448,7 +580,10 @@ class TestTruthValidation(unittest.TestCase):
         del truth["dataset"]["profile_artifact_ids"]["profile-3"]
         self.assertEqual(
             validate_truth(truth),
-            ["dataset.profile_ids must contain at least 3 distinct non-empty values"],
+            [
+                "dataset.profile_ids must contain at least 3 distinct non-empty values",
+                "dataset.profile_artifact_ids must reference at least 3 distinct artifacts",
+            ],
         )
 
     def test_rejects_malformed_repository_sha(self):
@@ -464,6 +599,14 @@ class TestTruthValidation(unittest.TestCase):
         truth["dataset"]["cases"][1]["id"] = truth["dataset"]["cases"][0]["id"]
         for records in (truth["claims"], truth["adaptations"]):
             records[1]["case_id"] = "case-000"
+        for artifact_id in ("claim-artifact-001", "resource-artifact-001"):
+            artifact = next(
+                item
+                for item in truth["artifact_manifest"]["artifacts"]
+                if item["id"] == artifact_id
+            )
+            artifact["case_id"] = "case-000"
+        _refresh_manifest_hash(truth)
         self.assertEqual(validate_truth(truth), ["duplicate case id: case-000"])
 
     def test_rejects_reviewer_identity_collisions(self):
@@ -605,6 +748,13 @@ class TestTruthValidation(unittest.TestCase):
         truth = valid_truth()
         truth["coverage_universe"][0]["kp_id"] = " KP-001 "
         truth["coverage_universe"][1]["kp_id"] = "kp-001"
+        evidence = next(
+            item
+            for item in truth["artifact_manifest"]["artifacts"]
+            if item["id"] == "e-002"
+        )
+        evidence["subject_id"] = "kp-001"
+        _refresh_manifest_hash(truth)
         self.assertEqual(
             validate_truth(truth),
             ["duplicate coverage kp_id: kp-001"],
@@ -673,6 +823,8 @@ class TestTruthValidation(unittest.TestCase):
             _artifact(
                 "claim-artifact-extra",
                 "claim_output",
+                subject_id="claim-extra",
+                case_id="case-000",
                 citation_ids=["citation-approved"],
             )
         )
@@ -743,6 +895,13 @@ class TestTruthValidation(unittest.TestCase):
                 truth = valid_truth()
                 for record in truth[key]:
                     record["case_id"] = "case-000"
+                    artifact = next(
+                        item
+                        for item in truth["artifact_manifest"]["artifacts"]
+                        if item["id"] == record["artifact_id"]
+                    )
+                    artifact["case_id"] = "case-000"
+                _refresh_manifest_hash(truth)
                 self.assertEqual(
                     validate_truth(truth),
                     [f"{key} must cover at least 50 distinct case_ids"],
@@ -825,6 +984,13 @@ class TestTruthValidation(unittest.TestCase):
     def test_rejects_casefolded_record_reference_that_inflates_case_coverage(self):
         truth = valid_truth()
         truth["claims"][1]["case_id"] = "CASE-000"
+        artifact = next(
+            item
+            for item in truth["artifact_manifest"]["artifacts"]
+            if item["id"] == "claim-artifact-001"
+        )
+        artifact["case_id"] = "case-000"
+        _refresh_manifest_hash(truth)
         self.assertEqual(
             validate_truth(truth),
             ["claims must cover at least 50 distinct case_ids"],
@@ -856,6 +1022,16 @@ class TestTruthValidation(unittest.TestCase):
 
 
 class TestScorecard(unittest.TestCase):
+    def test_every_status_reports_the_complete_trust_boundary(self):
+        expected = (
+            "Manifest and hash validation proves only internal content/reference binding; "
+            "it does not prove the real-world authenticity of sources, excerpts, "
+            "signatures, or reviewer identities."
+        )
+        for truth in (passing_truth(), valid_truth(), {"version": 1}):
+            with self.subTest(status=build_scorecard(truth)["overall_status"]):
+                self.assertIn(expected, build_scorecard(truth)["limitations"])
+
     def test_scorecard_thresholds_come_from_config(self):
         script = """
 import json
@@ -1102,6 +1278,40 @@ class TestCli(unittest.TestCase):
             self.assertNotIn("Traceback", result.stderr)
             report = json.loads((output / "scorecard.json").read_text("utf-8"))
             self.assertEqual(report["overall_status"], "not_assessable")
+            self.assertTrue((output / "scorecard.md").is_file())
+
+    def test_cli_handles_json_escaped_lone_surrogate_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            truth_path = root / "truth.json"
+            output = root / "report"
+            truth_path.write_text('{"version": 1, "value": "\\ud800"}', encoding="ascii")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-m",
+                    "evalkit.formal_scorecard",
+                    "--truth",
+                    str(truth_path),
+                    "--out",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            report = json.loads((output / "scorecard.json").read_text("utf-8"))
+            self.assertEqual(report["overall_status"], "not_assessable")
+            self.assertEqual(
+                report["data_quality"]["errors"],
+                ["truth.value contains text that is not strict UTF-8"],
+            )
             self.assertTrue((output / "scorecard.md").is_file())
 
     def test_cli_writes_not_assessable_reports_for_empty_object_and_missing_fields(self):
