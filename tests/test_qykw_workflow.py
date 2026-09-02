@@ -110,10 +110,16 @@ class TestQykwWorkflow(unittest.TestCase):
                 )
                 self.assertIn(install, commands)
 
+        backend_test_step = next(
+            step
+            for step in jobs["backend"]["steps"]
+            if step.get("name") == "Run complete backend test suite"
+        )
         self.assertEqual(
-            jobs["backend"]["env"],
+            backend_test_step["env"],
             {"TEMP": "${{ runner.temp }}", "TMP": "${{ runner.temp }}"},
         )
+        self.assertNotIn("env", jobs["backend"])
 
         requirements = (ROOT / "requirements-dev.txt").read_text(
             encoding="utf-8"
