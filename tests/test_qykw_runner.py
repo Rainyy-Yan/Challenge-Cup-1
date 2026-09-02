@@ -38,6 +38,7 @@ def complete_run() -> dict[str, object]:
         "event_name": "issue_comment", "event_action": "created",
         "source_repository": "source/repo", "source_head_sha": HEAD,
         "target_base_sha": BASE, "target_base_ref": "main", "actor_login": "alice",
+        "trigger_comment_id": 77, "trigger_comment_kind": "issue",
         "command": {"name": "审查", "argument": "", "mode": "read_only"},
     }
 
@@ -326,6 +327,65 @@ class TestQykwRunner(unittest.TestCase):
         self.assertEqual(result["payload"], {"authorization": "accepted"})
         self.assertEqual(len(state.records), 1)
         self.assertEqual(gateway.reaction_calls, [77])
+
+    def test_comment_authorize_artifact_roundtrips_state_context_for_analyze(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
+                                              "issue": {"number": 53, "pull_request": {}},
+                                              "comment": {"id": 77, "body": "@qykw 帮助"}, "sender": {"login": "alice"}}), encoding="utf-8")
+            environment = {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8", "GITHUB_REPOSITORY": "owner/repo",
+                           "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_RUN_ID": "44"}
+            gateway, state = FakeGateway(), FakeState()
+            authorize = ProductionPhaseController("authorize", environment)
+            authorize._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+            artifact = authorize.root()
+            run = _run_from_artifact(artifact)
+            analyze = ProductionPhaseController("analyze", {})
+            analyze._read_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+            analyzed = analyze.analyze(artifact)
+        self.assertEqual(run, next(iter(state.records.values())).context)
+        self.assertNotEqual(analyzed["payload"], {"status": "skipped", "reason": "state_unavailable"})
+
+    def test_no_comment_run_binding_roundtrips_as_paired_nulls(self) -> None:
+        from tools.qykw.__main__ import main
+
+        class Controller:
+            def authorize(self, artifact: dict[str, object]) -> dict[str, object]:
+                return artifact_for("authorize", artifact["run"], {"authorization": "accepted"})
+
+        run = complete_run()
+        run["trigger_comment_id"] = None
+        run["trigger_comment_kind"] = None
+        with tempfile.TemporaryDirectory() as directory:
+            request, output = Path(directory) / "request.json", Path(directory) / "output.json"
+            request.write_text(json.dumps(artifact_for("request", run, {"command": "审查"})), encoding="utf-8")
+            self.assertEqual(main(["--phase", "authorize", "--artifact", str(request), "--output", str(output)], controller=Controller()), 0)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertIsNone(payload["run"]["trigger_comment_id"])
+        self.assertIsNone(payload["run"]["trigger_comment_kind"])
+
+    def test_cli_rejects_tampered_comment_trigger_binding_before_controller(self) -> None:
+        from tools.qykw.__main__ import main
+
+        class Controller:
+            called = False
+
+            def authorize(self, artifact: dict[str, object]) -> dict[str, object]:
+                self.called = True
+                return artifact_for("authorize", artifact["run"], {"authorization": "accepted"})
+
+        for comment_id, kind in ((77, None), (None, "issue"), (True, "issue"), (77, "invalid")):
+            with self.subTest(comment_id=comment_id, kind=kind), tempfile.TemporaryDirectory() as directory:
+                run = complete_run()
+                run["trigger_comment_id"], run["trigger_comment_kind"] = comment_id, kind
+                request, output = Path(directory) / "request.json", Path(directory) / "output.json"
+                request.write_text(json.dumps(artifact_for("request", run, {"command": "审查"})), encoding="utf-8")
+                controller = Controller()
+                self.assertEqual(main(["--phase", "authorize", "--artifact", str(request), "--output", str(output)], controller=controller), 2)
+                self.assertFalse(controller.called)
 
     def test_root_authorize_normalizes_pull_request_target_as_pull_request(self) -> None:
         from tools.qykw.phases import ProductionPhaseController

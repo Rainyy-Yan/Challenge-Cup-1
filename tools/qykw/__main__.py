@@ -25,7 +25,8 @@ _ARTIFACT_KEYS = frozenset({"version", "phase", "run", "payload"})
 _RUN_KEYS = frozenset({
     "run_id", "idempotency_key", "repository_id", "repository", "pr_number",
     "event_name", "event_action", "source_repository", "source_head_sha",
-    "target_base_sha", "target_base_ref", "actor_login", "command",
+    "target_base_sha", "target_base_ref", "actor_login", "trigger_comment_id",
+    "trigger_comment_kind", "command",
 })
 _COMMAND_KEYS = frozenset({"name", "argument", "mode"})
 
@@ -150,6 +151,14 @@ def _validate_run(run: object) -> None:
     if any(not _text(run.get(key), 512) for key in strings):
         raise ValueError("invalid_run_binding")
     if any(type(run.get(key)) is not int or run[key] <= 0 for key in ("repository_id", "pr_number")):
+        raise ValueError("invalid_run_binding")
+    comment_id = run.get("trigger_comment_id")
+    comment_kind = run.get("trigger_comment_kind")
+    if (comment_id is None) != (comment_kind is None):
+        raise ValueError("invalid_run_binding")
+    if comment_id is not None and (
+        type(comment_id) is not int or comment_id <= 0 or comment_kind not in {"issue", "review"}
+    ):
         raise ValueError("invalid_run_binding")
     command = run.get("command")
     if not isinstance(command, dict) or set(command) != _COMMAND_KEYS:

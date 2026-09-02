@@ -13,7 +13,7 @@ from tools.qykw.advisory import AdvisoryService
 from tools.qykw.config import QykwConfig, load_qykw_config
 from tools.qykw.context import build_context_plan
 from tools.qykw.domain import (
-    Actor, CommandMode, CommandName, CommandRequest, CoverageReport, DiffSide,
+    Actor, CommentKind, CommandMode, CommandName, CommandRequest, CoverageReport, DiffSide,
     Finding, PullRef, ReviewResult, RunContext, RunRecord, RunStage, RunStatus,
     Severity, TriggerRef,
 )
@@ -332,6 +332,8 @@ def _run_payload(run: RunContext) -> dict[str, object]:
             "event_action": run.event_action, "source_repository": run.source_repository,
             "source_head_sha": run.source_head_sha, "target_base_sha": run.target_base_sha,
             "target_base_ref": run.target_base_ref, "actor_login": run.trigger_actor,
+            "trigger_comment_id": run.trigger_comment_id,
+            "trigger_comment_kind": None if run.trigger_comment_kind is None else run.trigger_comment_kind.value,
             "command": {"name": run.command.name.value, "argument": run.command.argument, "mode": run.command.mode.value}}
 
 
@@ -345,12 +347,19 @@ def _run_from_artifact(artifact: Mapping[str, object]) -> RunContext | None:
     try:
         if not isinstance(command, Mapping):
             return None
+        comment_id = value.get("trigger_comment_id")
+        comment_kind = value.get("trigger_comment_kind")
+        if (comment_id is None) != (comment_kind is None):
+            return None
+        if comment_id is not None and (type(comment_id) is not int or comment_id <= 0):
+            return None
+        kind = None if comment_kind is None else CommentKind(str(comment_kind))
         return RunContext(str(value["run_id"]), str(value["idempotency_key"]), int(value["repository_id"]),
                           str(value["repository"]), int(value["pr_number"]), str(value["event_name"]),
                           str(value["event_action"]), str(value["source_repository"]), str(value["source_head_sha"]),
                           str(value["target_base_sha"]), str(value["target_base_ref"]),
                           CommandRequest(CommandName(str(command["name"])), str(command["argument"]), CommandMode(str(command["mode"]))),
-                          str(value["actor_login"]))
+                          str(value["actor_login"]), comment_id, kind)
     except (KeyError, TypeError, ValueError):
         return None
 
