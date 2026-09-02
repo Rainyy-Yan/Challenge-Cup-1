@@ -729,7 +729,7 @@ class TestVerificationDockerfile(unittest.TestCase):
         self.assertTrue(all(re.search(r"@sha256:[0-9a-f]{64}$", ref) for ref in references))
         lowered = dockerfile.lower()
         self.assertIn("snapshot.debian.org/archive/debian/20251020t000000z", lowered)
-        self.assertIn("git=1:2.39.5-0+deb12u3", dockerfile)
+        self.assertIn("git=1:2.39.5-0+deb12u2", dockerfile)
         self.assertIn("--no-install-recommends", dockerfile)
         self.assertNotIn("latest", lowered)
         self.assertNotRegex(lowered, r"curl\s.*\|\s*(?:ba)?sh")
