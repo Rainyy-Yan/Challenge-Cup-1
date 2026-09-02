@@ -6,8 +6,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 import json
+import os
+from pathlib import Path
 import re
-from typing import Protocol
+import stat
+import sys
+from typing import Protocol, TextIO
 from urllib.parse import urlsplit
 from urllib.parse import quote, urlunsplit
 from urllib.error import HTTPError, URLError
@@ -55,6 +59,12 @@ _REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]
 _MAX_INTERN_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_INTERN_WRITE_BYTES = 64 * 1024
 _MAX_INTERN_PAGES = 1000
+_MAX_EVENT_BYTES = 1024 * 1024
+_MAX_OUTPUT_BYTES = 64 * 1024
+_MAX_ISSUE_NUMBER = 999_999_999_999_999_999
+_CLI_PHASES = frozenset({"issue-command", "resolve-pr", "reconcile-pr"})
+_GITHUB_ACTION = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class InternError(RuntimeError):
@@ -469,6 +479,37 @@ def parse_closing_issue(body: str) -> int | None:
     if (match.start() and text[match.start() - 1] == "[") or text[match.end():].startswith("]("):
         return None
     return int(match.group(1))
+
+
+def resolve_pull_issue_number(event: PullLifecycleEvent, gateway: InternGateway) -> int:
+    """Resolve the Issue queue key without performing a GitHub mutation."""
+
+    if not isinstance(event, PullLifecycleEvent):
+        raise InternError("invalid_pull_event")
+    if getattr(gateway, "repository", None) != event.repository:
+        raise InternError("event_repository_mismatch")
+    pull = gateway.get_pull(event.pull_number)
+    if pull.number != event.pull_number:
+        raise InternError("pull_number_mismatch")
+
+    bindings: list[InternRecord] = []
+    for comment in gateway.list_pull_comments(event.pull_number):
+        if comment.author_login != "qykw":
+            continue
+        record = decode_marker(comment.body, repository=event.repository)
+        if (record is not None and record.operation == "pull"
+                and record.repository_id == event.repository_id
+                and record.pull_number == event.pull_number
+                and record.trigger_comment_id == event.pull_number):
+            bindings.append(record)
+    if bindings:
+        identity = _intern_record_identity(bindings[0])
+        if any(_intern_record_identity(record) != identity for record in bindings[1:]):
+            raise InternError("record_conflict")
+        return _bounded_issue_number(bindings[0].issue_number)
+
+    issue_number = parse_closing_issue(pull.body)
+    return _bounded_issue_number(issue_number)
 
 
 def _mapping(value: object) -> Mapping[str, object] | None:
@@ -1533,6 +1574,10 @@ def _intern_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _intern_reject_constant(_: str) -> object:
+    raise ValueError("invalid_constant")
+
+
 def _intern_next_link(value: str | None) -> str | None:
     if value is None:
         return None
@@ -1565,3 +1610,175 @@ def _intern_stdlib_transport(method: str, url: str, headers: Mapping[str, str], 
         return error.code, dict(error.headers.items()) if error.headers else {}, error.read(_MAX_INTERN_RESPONSE_BYTES + 1)
     except URLError:
         raise InternError("transport_failed") from None
+
+
+def _bounded_issue_number(value: object) -> int:
+    if type(value) is not int or value <= 0 or value > _MAX_ISSUE_NUMBER:
+        raise InternError("invalid_issue_number")
+    return value
+
+
+def _cli_environment(environment: Mapping[str, str], phase: str) -> tuple[str, str, str]:
+    repository = _intern_repository(environment.get("GITHUB_REPOSITORY"))
+    api_url = _intern_origin(environment.get("GITHUB_API_URL", ""))
+    action = environment.get("GITHUB_ACTION")
+    if not isinstance(action, str) or _GITHUB_ACTION.fullmatch(action) is None:
+        raise InternError("invalid_github_action")
+    expected_event = "issue_comment" if phase == "issue-command" else "pull_request_target"
+    if environment.get("GITHUB_EVENT_NAME") != expected_event:
+        raise InternError("event_phase_mismatch")
+    event_path = environment.get("GITHUB_EVENT_PATH")
+    if not isinstance(event_path, str) or not event_path or len(event_path) > 4096 or "\x00" in event_path:
+        raise InternError("invalid_event_file")
+    return repository, api_url, event_path
+
+
+def _load_cli_event(event_path: str, repository: str) -> Mapping[str, object]:
+    path = Path(event_path)
+    try:
+        if not path.is_absolute() or path.is_symlink():
+            raise InternError("invalid_event_file")
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InternError("invalid_event_file")
+        if metadata.st_size > _MAX_EVENT_BYTES:
+            raise InternError("event_too_large")
+        raw = path.read_bytes()
+    except InternError:
+        raise
+    except OSError:
+        raise InternError("invalid_event_file") from None
+    if len(raw) > _MAX_EVENT_BYTES:
+        raise InternError("event_too_large")
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_intern_no_duplicates,
+            parse_constant=_intern_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise InternError("invalid_event_json") from None
+    if not isinstance(payload, Mapping):
+        raise InternError("invalid_event_json")
+    event_repository = payload.get("repository")
+    if not isinstance(event_repository, Mapping):
+        raise InternError("invalid_event")
+    event_name = event_repository.get("full_name")
+    if not isinstance(event_name, str):
+        raise InternError("invalid_event")
+    if event_name != repository:
+        raise InternError("event_repository_mismatch")
+    return payload
+
+
+def _normalize_cli_issue_event(payload: Mapping[str, object]) -> IssueCommentEvent | None:
+    comment = payload.get("comment")
+    if not isinstance(comment, Mapping) or not isinstance(comment.get("body"), str):
+        raise InternError("invalid_issue_event")
+    validation_payload = dict(payload)
+    validation_payload["comment"] = {**comment, "body": InternCommand.STATUS.value}
+    validated = normalize_issue_comment_event(validation_payload)
+    if validated is None:
+        raise InternError("invalid_issue_event")
+    command = parse_intern_command(comment["body"])
+    if command is None:
+        return None
+    return IssueCommentEvent(
+        validated.repository,
+        validated.repository_id,
+        validated.issue_number,
+        validated.comment_id,
+        validated.actor_login,
+        command,
+    )
+
+
+def _cli_token(environment: Mapping[str, str], name: str) -> str:
+    token = environment.get(name)
+    if not isinstance(token, str) or not token or len(token) > 4096 or "\n" in token or "\r" in token:
+        raise InternError("invalid_token")
+    return token
+
+
+def _write_issue_output(environment: Mapping[str, str], issue_number: object) -> None:
+    number = _bounded_issue_number(issue_number)
+    output_value = environment.get("GITHUB_OUTPUT")
+    if not isinstance(output_value, str) or not output_value or len(output_value) > 4096 or "\x00" in output_value:
+        raise InternError("invalid_output_file")
+    path = Path(output_value)
+    try:
+        if not path.is_absolute() or path.is_symlink() or not path.parent.is_dir():
+            raise InternError("invalid_output_file")
+        if path.exists():
+            metadata = path.stat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_OUTPUT_BYTES:
+                raise InternError("invalid_output_file")
+        with path.open("a", encoding="utf-8", newline="") as output:
+            output.write(f"issue_number={number}\n")
+    except InternError:
+        raise
+    except OSError:
+        raise InternError("invalid_output_file") from None
+
+
+def _cli_outcome_status(outcome: object) -> int:
+    if not isinstance(outcome, InternOutcome) or outcome.status not in {
+        "noop", "reconciled", "conflict", "failed",
+    }:
+        raise InternError("invalid_outcome")
+    if outcome.status == "failed":
+        raise InternError("reconcile_failed")
+    return 0
+
+
+def _run_cli(phase: str, environment: Mapping[str, str]) -> int:
+    repository, api_url, event_path = _cli_environment(environment, phase)
+    payload = _load_cli_event(event_path, repository)
+
+    if phase == "issue-command":
+        event = _normalize_cli_issue_event(payload)
+        if event is None:
+            return 0
+        token = _cli_token(environment, "QYKW_INTERN_TOKEN")
+        gateway = HttpInternGateway(api_url, repository, token)
+        return _cli_outcome_status(InternClaimService(gateway).handle_issue_event(event))
+
+    event = normalize_pull_event(payload)
+    if event is None:
+        raise InternError("invalid_pull_event")
+    if phase == "resolve-pr":
+        token = _cli_token(environment, "GITHUB_TOKEN")
+        gateway = HttpInternGateway(api_url, repository, token)
+        issue_number = resolve_pull_issue_number(event, gateway)
+        _write_issue_output(environment, issue_number)
+        return 0
+
+    token = _cli_token(environment, "QYKW_INTERN_TOKEN")
+    gateway = HttpInternGateway(api_url, repository, token)
+    return _cli_outcome_status(InternClaimService(gateway).handle_pull_event(event))
+
+
+def _emit_cli_error(error: InternError, stream: TextIO) -> None:
+    code = error.code if isinstance(error.code, str) and _ERROR_CODE.fullmatch(error.code) else "internal_error"
+    print(f"::error title=qykw intern::{code}", file=stream)
+
+
+def main(argv: list[str] | None = None, *, environment: Mapping[str, str] | None = None) -> int:
+    """Run one credential-separated intern controller phase."""
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    environment = os.environ if environment is None else environment
+    try:
+        if len(arguments) != 2 or arguments[0] != "--phase" or arguments[1] not in _CLI_PHASES:
+            raise InternError("invalid_phase")
+        return _run_cli(arguments[1], environment)
+    except InternError as error:
+        _emit_cli_error(error, sys.stderr)
+        return 1
+    except Exception:
+        _emit_cli_error(InternError("internal_error"), sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,9 +1,19 @@
 """Tests for the strict qykw intern claim parser boundary."""
 
-import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 import json
+from pathlib import Path
+import re
+import tempfile
 import traceback
 from collections.abc import Mapping
+import unittest
+from unittest import mock
+
+import yaml
+
+import tools.qykw.intern_claim as intern_claim
 
 from tools.qykw.intern_claim import (
     InternClaimService,
@@ -1296,3 +1306,338 @@ class TestInternPullLifecycle(unittest.TestCase):
         for body in failed_bodies:
             self.assertTrue("暂时失败" in body or "等待安全重放" in body)
             self.assertNotIn("状态已同步", body)
+
+
+class TestInternCli(unittest.TestCase):
+    REPOSITORY = "qiyuankaiwu/agentedu"
+
+    def environment(self, event_path: Path, **overrides: str) -> dict[str, str]:
+        environment = {
+            "GITHUB_EVENT_PATH": str(event_path),
+            "GITHUB_EVENT_NAME": "issue_comment",
+            "GITHUB_ACTION": "__run",
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_REPOSITORY": self.REPOSITORY,
+            "QYKW_INTERN_TOKEN": "token-sentinel-do-not-print",
+        }
+        environment.update(overrides)
+        return environment
+
+    def invoke(self, phase: str, event_bytes: bytes, *, outcome: InternOutcome | None = None,
+               environment_updates: Mapping[str, str] | None = None,
+               resolved_issue: object = 17) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path = root / "event.json"
+            event_path.write_bytes(event_bytes)
+            output_path = root / "github-output.txt"
+            environment = self.environment(event_path)
+            if phase != "issue-command":
+                environment["GITHUB_EVENT_NAME"] = "pull_request_target"
+                environment["GITHUB_OUTPUT"] = str(output_path)
+            if phase == "resolve-pr":
+                environment.pop("QYKW_INTERN_TOKEN")
+                environment["GITHUB_TOKEN"] = "resolver-token-sentinel-do-not-print"
+            if environment_updates:
+                environment.update(environment_updates)
+
+            service = mock.Mock()
+            service.handle_issue_event.return_value = outcome or InternOutcome(17, (), "noop")
+            service.handle_pull_event.return_value = outcome or InternOutcome(17, (9,), "reconciled")
+            stderr = StringIO()
+            with (
+                mock.patch.object(intern_claim, "HttpInternGateway", return_value=mock.Mock(repository=self.REPOSITORY)),
+                mock.patch.object(intern_claim, "InternClaimService", return_value=service),
+                mock.patch.object(intern_claim, "resolve_pull_issue_number", return_value=resolved_issue, create=True),
+                redirect_stderr(stderr),
+            ):
+                status = intern_claim.main(["--phase", phase], environment=environment)
+            output = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+            return status, stderr.getvalue(), output
+
+    def test_missing_non_regular_and_oversized_event_files_fail_with_fixed_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = root / "missing.json"
+            for path, expected in ((missing, "invalid_event_file"), (root, "invalid_event_file")):
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    status = intern_claim.main(
+                        ["--phase", "issue-command"], environment=self.environment(path),
+                    )
+                with self.subTest(path=path.name):
+                    self.assertEqual(status, 1)
+                    self.assertEqual(stderr.getvalue(), f"::error title=qykw intern::{expected}\n")
+
+        status, stderr, _ = self.invoke(
+            "issue-command", b"{" + b" " * (1024 * 1024) + b"}",
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr, "::error title=qykw intern::event_too_large\n")
+
+    def test_event_loader_rejects_malformed_duplicate_non_object_and_repository_mismatch(self) -> None:
+        invalid_events = (
+            b"{",
+            b'{"repository":{},"repository":{}}',
+            b'{"repository":{"full_name":"qiyuankaiwu/agentedu"},"value":NaN}',
+            b"[]",
+            b"\xff",
+        )
+        for event_bytes in invalid_events:
+            status, stderr, _ = self.invoke("issue-command", event_bytes)
+            with self.subTest(event_bytes=event_bytes[:20]):
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr, "::error title=qykw intern::invalid_event_json\n")
+
+        payload = issue_comment()
+        payload["repository"] = {"full_name": "other/repo", "id": 42}
+        status, stderr, _ = self.invoke(
+            "issue-command", json.dumps(payload).encode("utf-8"),
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr, "::error title=qykw intern::event_repository_mismatch\n")
+
+    def test_phase_environment_is_fail_closed_and_never_prints_values(self) -> None:
+        payload = json.dumps(issue_comment()).encode("utf-8")
+        cases = (
+            ({"GITHUB_API_URL": "http://api.github.com"}, "invalid_api_origin"),
+            ({"GITHUB_REPOSITORY": "bad"}, "invalid_repository"),
+            ({"GITHUB_ACTION": "bad\naction"}, "invalid_github_action"),
+            ({"GITHUB_EVENT_NAME": "pull_request_target"}, "event_phase_mismatch"),
+            ({"QYKW_INTERN_TOKEN": ""}, "invalid_token"),
+        )
+        for updates, expected in cases:
+            status, stderr, _ = self.invoke(
+                "issue-command", payload, environment_updates=updates,
+            )
+            with self.subTest(updates=updates):
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr, f"::error title=qykw intern::{expected}\n")
+                self.assertNotIn("sentinel", stderr)
+                self.assertNotIn(str(updates), stderr)
+
+    def test_issue_command_noop_and_idempotent_success_exit_zero(self) -> None:
+        no_command = issue_comment("not a command")
+        status, stderr, output = self.invoke(
+            "issue-command", json.dumps(no_command).encode("utf-8"),
+        )
+        self.assertEqual((status, stderr, output), (0, "", ""))
+
+        for outcome in (
+            InternOutcome(17, (), "noop"),
+            InternOutcome(17, (101,), "reconciled"),
+            InternOutcome(17, (101,), "conflict"),
+        ):
+            status, stderr, output = self.invoke(
+                "issue-command", json.dumps(issue_comment()).encode("utf-8"), outcome=outcome,
+            )
+            with self.subTest(status=outcome.status):
+                self.assertEqual((status, stderr, output), (0, "", ""))
+
+    def test_typed_operational_failure_exits_one_with_bounded_annotation(self) -> None:
+        status, stderr, output = self.invoke(
+            "issue-command", json.dumps(issue_comment()).encode("utf-8"),
+            outcome=InternOutcome(17, (101,), "failed"),
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr, "::error title=qykw intern::reconcile_failed\n")
+        self.assertEqual(output, "")
+        self.assertLessEqual(len(stderr.encode("utf-8")), 128)
+
+    def test_resolver_exports_only_a_strictly_positive_issue_number(self) -> None:
+        payload = json.dumps(pull_event()).encode("utf-8")
+        status, stderr, output = self.invoke("resolve-pr", payload, resolved_issue=17)
+        self.assertEqual((status, stderr, output), (0, "", "issue_number=17\n"))
+
+        for value in (None, 0, -1, True, "17", 1 << 80):
+            status, stderr, output = self.invoke("resolve-pr", payload, resolved_issue=value)
+            with self.subTest(value=value):
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr, "::error title=qykw intern::invalid_issue_number\n")
+                self.assertEqual(output, "")
+
+    def test_resolver_prefers_the_frozen_trusted_marker_over_an_edited_body(self) -> None:
+        event = PullLifecycleEvent(self.REPOSITORY, 42, 9, "edited")
+        gateway = mock.Mock(repository=self.REPOSITORY)
+        gateway.get_pull.return_value = PullSnapshot(9, "open", False, "alice", "Closes #18")
+        frozen = InternRecord(
+            42, self.REPOSITORY, 17, 9, "alice", "pull", "alice", 9, "reconciled",
+        )
+        gateway.list_pull_comments.return_value = (
+            IssueComment(500, "qykw", frozen.marker(), "now"),
+        )
+
+        self.assertEqual(intern_claim.resolve_pull_issue_number(event, gateway), 17)
+
+    def test_resolver_uses_a_single_visible_body_target_before_binding_and_rejects_conflicts(self) -> None:
+        event = PullLifecycleEvent(self.REPOSITORY, 42, 9, "opened")
+        gateway = mock.Mock(repository=self.REPOSITORY)
+        gateway.get_pull.return_value = PullSnapshot(9, "open", False, "alice", "Closes #17")
+        gateway.list_pull_comments.return_value = ()
+        self.assertEqual(intern_claim.resolve_pull_issue_number(event, gateway), 17)
+
+        other = InternRecord(
+            42, self.REPOSITORY, 18, 9, "alice", "pull", "alice", 9, "reconciled",
+        )
+        gateway.list_pull_comments.return_value = (
+            IssueComment(500, "qykw", InternRecord(
+                42, self.REPOSITORY, 17, 9, "alice", "pull", "alice", 9, "reconciled",
+            ).marker(), "now"),
+            IssueComment(501, "qykw", other.marker(), "now"),
+        )
+        with self.assertRaisesRegex(InternError, "record_conflict"):
+            intern_claim.resolve_pull_issue_number(event, gateway)
+
+    def test_mutation_phases_ignore_github_output_and_resolver_never_requires_mutation_token(self) -> None:
+        pull_payload = json.dumps(pull_event()).encode("utf-8")
+        status, stderr, output = self.invoke(
+            "reconcile-pr", pull_payload,
+            environment_updates={"GITHUB_OUTPUT": ""},
+        )
+        self.assertEqual((status, stderr, output), (0, "", ""))
+
+        status, stderr, output = self.invoke("resolve-pr", pull_payload)
+        self.assertEqual((status, stderr, output), (0, "", "issue_number=17\n"))
+
+
+class TestInternWorkflow(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+    WORKFLOW = ROOT / ".github" / "workflows" / "qykw-intern.yml"
+    ACTION_SHA = re.compile(r"^[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+
+    def workflow(self) -> dict[str, object]:
+        value = yaml.load(self.WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        self.assertIsInstance(value, dict)
+        return value
+
+    def jobs(self) -> dict[str, dict[str, object]]:
+        jobs = self.workflow().get("jobs")
+        self.assertIsInstance(jobs, dict)
+        self.assertTrue(all(isinstance(job, dict) for job in jobs.values()))
+        return jobs  # type: ignore[return-value]
+
+    @staticmethod
+    def named_step(job: Mapping[str, object], name: str) -> dict[str, object]:
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            raise AssertionError("job steps must be a list")
+        matches = [step for step in steps if isinstance(step, dict) and step.get("name") == name]
+        if len(matches) != 1:
+            raise AssertionError(f"expected one {name!r} step")
+        return matches[0]
+
+    def test_exact_events_and_job_graph_delegate_initial_review_to_existing_workflow(self) -> None:
+        workflow = self.workflow()
+        self.assertEqual(workflow["on"], {
+            "issue_comment": {"types": ["created"]},
+            "pull_request_target": {
+                "types": ["opened", "edited", "ready_for_review", "reopened", "closed"],
+            },
+        })
+        self.assertEqual(list(self.jobs()), ["issue_command", "resolve_pr", "reconcile_pr"])
+        self.assertEqual(self.jobs()["reconcile_pr"]["needs"], "resolve_pr")
+        source = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("qykw-review.yml", source)
+        self.assertNotIn("synchronize", source)
+
+    def test_issue_and_reconcile_jobs_share_issue_keyed_fifo_concurrency_shape(self) -> None:
+        jobs = self.jobs()
+        self.assertEqual(jobs["issue_command"]["concurrency"], {
+            "group": "qykw-intern-${{ github.repository_id }}-${{ github.event.issue.number }}",
+            "cancel-in-progress": "false",
+            "queue": "max",
+        })
+        self.assertEqual(jobs["reconcile_pr"]["concurrency"], {
+            "group": "qykw-intern-${{ github.repository_id }}-${{ needs.resolve_pr.outputs.issue_number }}",
+            "cancel-in-progress": "false",
+            "queue": "max",
+        })
+        issue_if = " ".join(str(jobs["issue_command"]["if"]).split())
+        self.assertIn("github.event_name == 'issue_comment'", issue_if)
+        self.assertIn("!github.event.issue.pull_request", issue_if)
+        self.assertNotIn("comment.body", issue_if)
+
+    def test_permissions_are_minimal_and_resolver_has_no_write_capability(self) -> None:
+        workflow = self.workflow()
+        self.assertEqual(workflow["permissions"], {"contents": "none"})
+        jobs = self.jobs()
+        self.assertEqual(jobs["issue_command"]["permissions"], {
+            "contents": "read", "issues": "write",
+        })
+        self.assertEqual(jobs["resolve_pr"]["permissions"], {
+            "contents": "read", "issues": "read", "pull-requests": "read",
+        })
+        self.assertEqual(jobs["reconcile_pr"]["permissions"], {
+            "contents": "read", "issues": "write", "pull-requests": "write",
+        })
+        self.assertNotIn("write", str(jobs["resolve_pr"]["permissions"]))
+
+    def test_every_job_uses_only_the_trusted_default_branch_controller(self) -> None:
+        for name, job in self.jobs().items():
+            steps = job.get("steps")
+            self.assertIsInstance(steps, list)
+            checkout = [
+                step for step in steps
+                if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+            ]
+            with self.subTest(job=name):
+                self.assertEqual(len(checkout), 1)
+                self.assertEqual(checkout[0]["with"], {
+                    "ref": "${{ github.event.repository.default_branch }}",
+                    "path": "controller",
+                    "persist-credentials": "false",
+                })
+                self.assertNotIn("candidate", str(job).casefold())
+
+    def test_actions_are_full_sha_pinned_and_python_is_311(self) -> None:
+        for name, job in self.jobs().items():
+            steps = job.get("steps")
+            self.assertIsInstance(steps, list)
+            uses = [str(step["uses"]) for step in steps if isinstance(step, dict) and "uses" in step]
+            with self.subTest(job=name):
+                self.assertTrue(uses)
+                self.assertTrue(all(self.ACTION_SHA.fullmatch(value) for value in uses))
+                setup = [step for step in steps if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/setup-python@")]
+                self.assertEqual(len(setup), 1)
+                self.assertEqual(setup[0].get("with"), {"python-version": "3.11"})
+
+    def test_phase_commands_and_credentials_are_fixed_to_their_job(self) -> None:
+        jobs = self.jobs()
+        expected_phases = {
+            "issue_command": "issue-command",
+            "resolve_pr": "resolve-pr",
+            "reconcile_pr": "reconcile-pr",
+        }
+        for name, phase in expected_phases.items():
+            step = self.named_step(jobs[name], "Run qykw intern controller")
+            with self.subTest(job=name):
+                self.assertEqual(step["working-directory"], "controller")
+                self.assertEqual(step["run"], f"python -m tools.qykw.intern_claim --phase {phase}")
+        self.assertEqual(
+            self.named_step(jobs["issue_command"], "Run qykw intern controller")["env"],
+            {"QYKW_INTERN_TOKEN": "${{ secrets.QYKW_INTERN_TOKEN }}"},
+        )
+        self.assertEqual(
+            self.named_step(jobs["reconcile_pr"], "Run qykw intern controller")["env"],
+            {"QYKW_INTERN_TOKEN": "${{ secrets.QYKW_INTERN_TOKEN }}"},
+        )
+        self.assertEqual(
+            self.named_step(jobs["resolve_pr"], "Run qykw intern controller")["env"],
+            {"GITHUB_TOKEN": "${{ github.token }}"},
+        )
+        self.assertEqual(jobs["resolve_pr"]["outputs"], {
+            "issue_number": "${{ steps.resolve.outputs.issue_number }}",
+        })
+        self.assertEqual(
+            self.named_step(jobs["resolve_pr"], "Run qykw intern controller")["id"], "resolve",
+        )
+
+    def test_workflow_has_no_comment_body_parser_or_inference_change_secret_surface(self) -> None:
+        source = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("github.event.comment.body", source)
+        for forbidden in (
+            "QYKW_INFERENCE", "QYKW_REVIEW_TOKEN", "QYKW_PUBLISH_TOKEN",
+            "QYKW_VERIFICATION", "candidate-source", "pull_request.head", "github.event.pull_request.head",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
