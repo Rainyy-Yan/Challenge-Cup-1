@@ -856,3 +856,10 @@ python3 build_showcase.py       # 内联进 web/showcase.html
 调 `config.EVIDENCE_MIN`。调低会放进更多东西，调高会误伤。改之前先跑
 `python3 -m unittest tests.test_audit -v`，那里的四类夹具就是防止调过头的护栏。
 真误伤了，正确做法通常是补切片而不是放松阈值。
+
+---
+
+## 十三、qykw 代码审查
+
+仓库的独立、只读优先代码审查机器人使用说明、命令矩阵、安全边界和本地验收门禁见
+[docs/qykw代码审查机器人.md](docs/qykw代码审查机器人.md)。

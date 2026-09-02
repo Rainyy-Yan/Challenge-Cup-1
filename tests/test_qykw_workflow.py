@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 REVIEW = WORKFLOWS / "qykw-review.yml"
 CONTROL = WORKFLOWS / "qykw-control.yml"
+CI = WORKFLOWS / "ci.yml"
 CONFIG = ROOT / ".github" / "qykw.toml"
 LEGACY_WORKFLOW = WORKFLOWS / ("mini" + "max-review.yml")
 LEGACY_TEST = ROOT / "tests" / ("test_mini" + "max_workflow.py")
@@ -29,7 +30,7 @@ def job_blocks(source: str) -> dict[str, str]:
     jobs = re.search(r"^jobs:\n(?P<body>[\s\S]*)", source, re.MULTILINE)
     if jobs is None:
         return {}
-    starts = list(re.finditer(r"^  (?P<name>[a-z_]+):\n", jobs.group("body"), re.MULTILINE))
+    starts = list(re.finditer(r"^  (?P<name>[a-z_-]+):\n", jobs.group("body"), re.MULTILINE))
     return {
         match.group("name"): jobs.group("body")[match.start(): starts[index + 1].start() if index + 1 < len(starts) else None]
         for index, match in enumerate(starts)
@@ -94,6 +95,21 @@ class QueuedRuns:
 
 
 class TestQykwWorkflow(unittest.TestCase):
+    def test_ci_has_an_isolated_no_secret_qykw_coverage_gate(self) -> None:
+        jobs = workflow_jobs(CI)
+        self.assertIn("qykw-coverage", jobs)
+        job = jobs["qykw-coverage"]
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets.", str(job))
+
+        source = job_blocks(CI.read_text(encoding="utf-8"))["qykw-coverage"]
+        self.assertIn('python-version: "3.11"', source)
+        self.assertIn("python -m pip install --disable-pip-version-check -r requirements-dev.txt", source)
+        self.assertIn('python -m coverage run --branch --source=tools.qykw -m unittest discover -s tests -p "test_qykw*.py" -v', source)
+        self.assertIn("python -m coverage json -o qykw-coverage.json", source)
+        self.assertIn("python tools/check_qykw_coverage.py qykw-coverage.json --line 95 --branch 90", source)
+
     def test_migration_replaces_the_legacy_workflow_and_test(self) -> None:
         self.assertTrue(REVIEW.is_file())
         self.assertTrue(CONTROL.is_file())
