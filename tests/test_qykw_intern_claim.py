@@ -851,6 +851,32 @@ class TestInternClaimService(unittest.TestCase):
         self.assertEqual(gateway.issue, before)
         self.assertIn("无权释放", gateway.bot_body_for(101))
 
+    def test_first_release_without_assignee_or_claimable_state_fails_closed(self) -> None:
+        gateway = InternMemoryGateway(labels=("area:docs",))
+        gateway.command(101, "mallory", "/intern-unassign")
+        before = gateway.issue
+
+        outcome = self.service(gateway).handle_issue_event(self.event(101, "mallory", InternCommand.UNASSIGN))
+
+        self.assertEqual(outcome.status, "conflict")
+        self.assertEqual(gateway.issue, before)
+        self.assertFalse(any(write[0] in {"add_assignee", "remove_assignee", "add_label", "remove_label"}
+                             for write in gateway.writes))
+        self.assertIn("冲突", gateway.bot_body_for(101))
+
+    def test_first_release_without_assignee_cannot_repair_in_progress_label(self) -> None:
+        gateway = InternMemoryGateway(labels=("status:in-progress", "area:docs"))
+        gateway.command(101, "mallory", "/intern-unassign")
+        before = gateway.issue
+
+        outcome = self.service(gateway).handle_issue_event(self.event(101, "mallory", InternCommand.UNASSIGN))
+
+        self.assertEqual(outcome.status, "conflict")
+        self.assertEqual(gateway.issue, before)
+        self.assertFalse(any(write[0] in {"add_assignee", "remove_assignee", "add_label", "remove_label"}
+                             for write in gateway.writes))
+        self.assertIn("冲突", gateway.bot_body_for(101))
+
     def test_owner_and_exact_admin_can_release(self) -> None:
         for actor in ("alice", "xyh202131"):
             gateway = InternMemoryGateway(labels=("status:in-progress", "area:docs"), assignees=("alice",))

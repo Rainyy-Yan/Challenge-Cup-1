@@ -704,7 +704,7 @@ class InternClaimService:
                 except InternError:
                     return "failed"
                 frozen_claimant = (issue_before_marker.assignees[0]
-                                   if len(issue_before_marker.assignees) == 1 else comment.author_login)
+                                   if len(issue_before_marker.assignees) == 1 else "qykw")
                 record = InternRecord(
                     record.repository_id, record.repository, record.issue_number,
                     record.trigger_comment_id, record.actor_login, record.operation,
