@@ -705,7 +705,7 @@ class InternClaimService:
             return InternOutcome(record.issue_number, (), "conflict")
         if event.action == "closed":
             return self._reconcile_closed_pull(event, pull, record, pull_comment_id)
-        return self._reconcile_active_pull(event, pull, record, pull_comment_id, initial=False)
+        return self._reconcile_active_pull(event, pull, record, pull_comment_id)
 
     def _start_pull_binding(self, event: PullLifecycleEvent) -> InternOutcome:
         try:
@@ -740,11 +740,10 @@ class InternClaimService:
         pull_comment_id = self._ensure_pull_marker(event, record)
         if pull_comment_id is None:
             return InternOutcome(issue_number, (), "failed")
-        return self._reconcile_active_pull(event, pull, record, pull_comment_id, initial=True)
+        return self._reconcile_active_pull(event, pull, record, pull_comment_id)
 
     def _reconcile_active_pull(self, event: PullLifecycleEvent, pull: PullSnapshot,
-                               record: InternRecord, pull_comment_id: int,
-                               *, initial: bool) -> InternOutcome:
+                               record: InternRecord, pull_comment_id: int) -> InternOutcome:
         if pull.state != "open":
             return InternOutcome(record.issue_number, (), "conflict")
         try:
@@ -763,7 +762,7 @@ class InternClaimService:
 
         issue_comment_id = issue_binding
         if issue_comment_id is None:
-            if not (initial or event.action == "reopened") or "status:in-progress" not in labels:
+            if not labels & {"status:in-progress", "status:in-review"}:
                 return InternOutcome(record.issue_number, (), "conflict")
             issue_comment_id = self._ensure_issue_marker(event, record)
             if issue_comment_id is None:
@@ -817,17 +816,40 @@ class InternClaimService:
         except InternError:
             self._mark_pull_failed(event, record, pull_comment_id, None)
             return InternOutcome(record.issue_number, (), "failed")
-        if issue.is_pull or (issue.assignees and (
-                len(issue.assignees) != 1
-                or issue.assignees[0].casefold() != record.claimant_login.casefold())):
+        if (issue.is_pull or len(issue.assignees) != 1
+                or issue.assignees[0].casefold() != record.claimant_login.casefold()):
             return InternOutcome(record.issue_number, (), "conflict")
         labels = set(issue.labels)
+
+        if issue_comment_id is None and (pull.merged or record.stage != "reconciled"):
+            if (issue.state != "open"
+                    or not labels & {"status:in-progress", "status:in-review"}
+                    or labels & {"intern:claimable", "status:blocked"}
+                    or {"status:in-progress", "status:in-review"} <= labels):
+                return InternOutcome(record.issue_number, (), "conflict")
+            issue_comment_id = self._ensure_issue_marker(event, record)
+            if issue_comment_id is None:
+                self._mark_pull_failed(event, record, pull_comment_id, None)
+                return InternOutcome(record.issue_number, (), "failed")
 
         if pull.merged:
             if issue.state == "closed" and "status:in-review" not in labels:
                 return InternOutcome(record.issue_number, (), "noop")
             if issue.state != "open" or labels & {"intern:claimable", "status:blocked"}:
                 return InternOutcome(record.issue_number, (), "conflict")
+            if "status:in-progress" in labels:
+                if not self._mutate_pull_issue(
+                        event, record, pull_comment_id, issue_comment_id,
+                        lambda: self.gateway.remove_label(record.issue_number, "status:in-progress"),
+                        lambda snapshot: "status:in-progress" not in snapshot.labels):
+                    return InternOutcome(record.issue_number, (), "failed")
+                if not self._mutate_pull_issue(
+                        event, record, pull_comment_id, issue_comment_id,
+                        lambda: self.gateway.add_label(record.issue_number, "status:in-review"),
+                        lambda snapshot: "status:in-review" in snapshot.labels):
+                    return InternOutcome(record.issue_number, (), "failed")
+                labels.discard("status:in-progress")
+                labels.add("status:in-review")
             if "status:in-review" in labels:
                 if not self._mutate_pull_issue(
                         event, record, pull_comment_id, issue_comment_id,
@@ -838,6 +860,14 @@ class InternClaimService:
                     event, record, pull_comment_id, issue_comment_id,
                     lambda: self.gateway.close_issue(record.issue_number),
                     lambda snapshot: snapshot.state == "closed"):
+                return InternOutcome(record.issue_number, (), "failed")
+            terminal = self._with_stage(record, "reconciled")
+            if issue_comment_id is None or not self._set_marker_stage(
+                    event, issue_comment_id, terminal, pull=False):
+                self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+                return InternOutcome(record.issue_number, (), "failed")
+            if not self._set_marker_stage(event, pull_comment_id, terminal, pull=True):
+                self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
                 return InternOutcome(record.issue_number, (), "failed")
             return InternOutcome(record.issue_number, (event.pull_number,), "reconciled")
 
@@ -962,8 +992,10 @@ class InternClaimService:
         current = self._comment_stage(event, comment_id, record, pull=pull)
         if current == record.stage:
             return True
+        message = ("处理暂时失败，等待安全重放。" if record.stage == "failed"
+                   else "Issue 与 PR 状态已同步。")
         try:
-            self.gateway.update_comment(comment_id, self._body("Issue 与 PR 状态已同步。", record))
+            self.gateway.update_comment(comment_id, self._body(message, record))
         except InternError:
             pass
         return self._comment_stage(event, comment_id, record, pull=pull) == record.stage

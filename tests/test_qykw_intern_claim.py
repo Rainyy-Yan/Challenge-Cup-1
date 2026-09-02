@@ -1172,6 +1172,49 @@ class TestInternPullLifecycle(unittest.TestCase):
         self.assertEqual((first.status, second.status), ("reconciled", "noop"))
         self.assertEqual(tuple(gateway.writes), writes)
 
+    def test_opened_replay_recovers_a_trusted_pull_marker_only_binding(self) -> None:
+        for labels in (("status:in-progress",), ("status:in-review",)):
+            gateway = InternPullMemoryGateway(labels=labels)
+            gateway.seed_binding(stage="pending", issue_marker=False)
+
+            with self.subTest(labels=labels):
+                outcome = self.service(gateway).handle_pull_event(self.event())
+                self.assertEqual(outcome, InternOutcome(17, (9,), "reconciled"))
+                self.assertEqual(gateway.issue.labels, ("status:in-review",))
+                self.assertEqual(len([record for record in gateway.records() if record.operation == "pull"]), 1)
+                self.assertEqual(gateway.pull_record().stage, "reconciled")  # type: ignore[union-attr]
+
+    def test_merged_close_repairs_half_binding_before_terminal_transition(self) -> None:
+        gateway = InternPullMemoryGateway()
+        gateway.seed_binding(stage="pending", issue_marker=False)
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "Closes #999")
+
+        outcome = self.service(gateway).handle_pull_event(self.event("closed"))
+
+        self.assertEqual(outcome, InternOutcome(17, (9,), "reconciled"))
+        self.assertEqual(gateway.issue.state, "closed")
+        self.assertNotIn("status:in-progress", gateway.issue.labels)
+        self.assertNotIn("status:in-review", gateway.issue.labels)
+        issue_marker_index = next(index for index, item in enumerate(gateway.writes)
+                                  if item[0:2] == ("create_comment", 17))
+        first_label_or_close = next(index for index, item in enumerate(gateway.writes)
+                                    if item[0] in {"add_label", "remove_label", "close_issue"})
+        self.assertLess(issue_marker_index, first_label_or_close)
+
+    def test_closed_requires_exact_frozen_claimant_for_merged_and_unmerged(self) -> None:
+        for merged in (False, True):
+            for assignees in ((), ("bob",), ("alice", "bob")):
+                gateway = InternPullMemoryGateway(labels=("status:in-review",), assignees=assignees)
+                gateway.seed_binding()
+                gateway.pull = PullSnapshot(9, "closed", merged, "alice", "")
+                before = gateway.issue
+
+                with self.subTest(merged=merged, assignees=assignees):
+                    outcome = self.service(gateway).handle_pull_event(self.event("closed"))
+                    self.assertEqual(outcome.status, "conflict")
+                    self.assertEqual(gateway.issue, before)
+                    self.assertEqual(gateway.writes, [])
+
     def test_closed_event_requires_one_consistent_trusted_pull_marker(self) -> None:
         missing = InternPullMemoryGateway(labels=("status:in-review",))
         conflicting = InternPullMemoryGateway(labels=("status:in-review",))
@@ -1204,3 +1247,20 @@ class TestInternPullLifecycle(unittest.TestCase):
         self.assertEqual(second.issue_number, 17)
         self.assertNotIn(("get_issue", 18), gateway.trace)
         self.assertEqual(gateway.issue.labels, ("status:in-review",))
+
+    def test_failed_markers_publish_failure_not_success_text(self) -> None:
+        gateway = InternPullMemoryGateway()
+        gateway.fail_next("add_label")
+
+        outcome = self.service(gateway).handle_pull_event(self.event())
+
+        self.assertEqual(outcome.status, "failed")
+        failed_bodies = []
+        for comment in (*gateway.comments, *gateway.pull_comments):
+            record = decode_marker(comment.body, repository=self.REPOSITORY)
+            if record is not None and record.operation == "pull" and record.stage == "failed":
+                failed_bodies.append(comment.body)
+        self.assertEqual(len(failed_bodies), 2)
+        for body in failed_bodies:
+            self.assertTrue("暂时失败" in body or "等待安全重放" in body)
+            self.assertNotIn("状态已同步", body)
