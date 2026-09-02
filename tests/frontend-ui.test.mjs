@@ -46,6 +46,20 @@ test('feedbackNextAction advances to the next unit after success', () => {
   );
 });
 
+test('feedbackNextAction finishes when there is no following unit', () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(view.feedbackNextAction(['KP-01'], 'KP-01', {action: 'advance'}))),
+    {kind: 'summary', label: '查看更新后的学习建议', targetKp: null},
+  );
+});
+
+test('feedbackNextAction keeps consolidation on the current unit', () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(view.feedbackNextAction(['KP-01', 'KP-02'], 'KP-01', {action: 'consolidate'}))),
+    {kind: 'repeat', label: '重新学习本知识点', targetKp: 'KP-01'},
+  );
+});
+
 const appSandbox = {window: {AgentEduView: view}};
 vm.createContext(appSandbox);
 const appSource = fs.existsSync('web/app.js')
@@ -142,11 +156,11 @@ test('gap chart exposes each learner mastery score as visible text', () => {
 test('submitFb refreshes the rendered resource count after feedback returns new resources', async () => {
   const submitFb = requiredApp('submitFb');
   const setSession = requiredApp('setSession');
-  const element = () => ({hidden: true, textContent: '', innerHTML: '', disabled: false, value: 'KP-01', focus() {}, append() {}, appendChild() {}, insertAdjacentHTML() {}});
+  const element = () => ({hidden: true, textContent: '', innerHTML: '', disabled: false, value: 'KP-01', focus() {}, scrollIntoView() {}, append() {}, appendChild() {}, insertAdjacentHTML() {}});
   const elements = {
-    '#submitFb': element(), '#verdict': element(), '#decisionPanel': element(), '#workflowProgress': element(),
+    '#submitFb': element(), '#verdict': element(), '#decisionPanel': element(), '#continueLearning': element(), '#workflowProgress': element(),
     '#timeline': element(), '#rcount': element(), '#resources': element(), '#learningPath': element(),
-    '#fbKp': element(), '#quiz': element(), '#chartFit': element(), '#chartPath': element(), '#uiAlert': element(),
+    '#learningContent': element(), '#fbKp': element(), '#quiz': element(), '#chartFit': element(), '#chartPath': element(), '#uiAlert': element(),
   };
   appSandbox.document = {
     querySelector: selector => elements[selector],
