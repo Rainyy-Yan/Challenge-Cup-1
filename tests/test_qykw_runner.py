@@ -13,9 +13,10 @@ from unittest.mock import patch
 from tools.qykw.config import parse_qykw_config
 from tools.qykw.domain import (
     Actor, CommandMode, CommandName, CommandRequest, CoverageReport, EventContext,
-    CommentKind, PullRef, PullSnapshot, ReviewResult, RunRecord, RunStage, RunStatus,
+    CommentKind, IssueComment, PullRef, PullSnapshot, ReviewResult, RunRecord, RunStage, RunStatus,
 )
 from tools.qykw.runner import QykwRunner
+from tools.qykw.state import GitHubCommentStateStore
 
 
 HEAD = "a" * 40
@@ -57,6 +58,8 @@ class FakeGateway:
         self.reaction_calls: list[int] = []
         self.write_calls: list[str] = []
         self.comments: list[str] = []
+        self.issue_comments: list[IssueComment] = []
+        self.next_comment_id = 1
 
     def get_actor_permission(self, _: str):
         from tools.qykw.domain import RepositoryPermission
@@ -86,7 +89,20 @@ class FakeGateway:
     def create_issue_comment(self, _: int, body: str) -> int:
         self.write_calls.append("create_comment")
         self.comments.append(body)
-        return len(self.comments)
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        self.issue_comments.append(IssueComment(comment_id, "qykw", body, "2026-09-02T00:00:00Z"))
+        return comment_id
+
+    def list_issue_comments(self, _: int) -> tuple[IssueComment, ...]:
+        return tuple(self.issue_comments)
+
+    def update_issue_comment(self, comment_id: int, body: str) -> None:
+        for index, comment in enumerate(self.issue_comments):
+            if comment.comment_id == comment_id:
+                self.issue_comments[index] = IssueComment(comment_id, "qykw", body, "2026-09-02T00:00:00Z")
+                return
+        raise AssertionError("unknown comment")
 
 
 class FakeState:
@@ -318,36 +334,71 @@ class TestQykwRunner(unittest.TestCase):
             event_path = Path(directory) / "event.json"
             event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
                                               "issue": {"number": 53, "pull_request": {}},
-                                              "comment": {"id": 77, "body": "@qykw 审查"}, "sender": {"login": "alice"}}), encoding="utf-8")
+                                              "comment": {"id": 321, "body": "@qykw 审查"}, "sender": {"login": "alice"}}), encoding="utf-8")
             controller = ProductionPhaseController("authorize", {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8",
                                                                     "GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_RUN_ID": "44"})
-            gateway, state = FakeGateway(), FakeState()
+            gateway = FakeGateway()
+            state = GitHubCommentStateStore(gateway, repository="owner/repo")
             controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
             result = controller.root()
         self.assertEqual(result["payload"], {"authorization": "accepted"})
-        self.assertEqual(len(state.records), 1)
-        self.assertEqual(gateway.reaction_calls, [77])
+        self.assertEqual(state.get(53, result["run"]["run_id"]).context.trigger_comment_id, 321)  # type: ignore[union-attr,index]
+        self.assertEqual(gateway.reaction_calls, [321])
 
-    def test_comment_authorize_artifact_roundtrips_state_context_for_analyze(self) -> None:
+    def test_comment_authorize_artifacts_roundtrip_real_state_for_issue_and_review_comments(self) -> None:
         from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
 
-        with tempfile.TemporaryDirectory() as directory:
-            event_path = Path(directory) / "event.json"
-            event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
-                                              "issue": {"number": 53, "pull_request": {}},
-                                              "comment": {"id": 77, "body": "@qykw 帮助"}, "sender": {"login": "alice"}}), encoding="utf-8")
-            environment = {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8", "GITHUB_REPOSITORY": "owner/repo",
-                           "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_RUN_ID": "44"}
-            gateway, state = FakeGateway(), FakeState()
-            authorize = ProductionPhaseController("authorize", environment)
-            authorize._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
-            artifact = authorize.root()
-            run = _run_from_artifact(artifact)
-            analyze = ProductionPhaseController("analyze", {})
-            analyze._read_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
-            analyzed = analyze.analyze(artifact)
-        self.assertEqual(run, next(iter(state.records.values())).context)
-        self.assertNotEqual(analyzed["payload"], {"status": "skipped", "reason": "state_unavailable"})
+        cases = (
+            ("issue_comment", 321, "issue", {"issue": {"number": 53, "pull_request": {}}}),
+            ("pull_request_review_comment", 909, "review", {"pull_request": {"number": 53}}),
+        )
+        for event_name, comment_id, comment_kind, pull_data in cases:
+            with self.subTest(event_name=event_name, comment_id=comment_id), tempfile.TemporaryDirectory() as directory:
+                event_path = Path(directory) / "event.json"
+                event_path.write_text(json.dumps({"action": "created", "repository": {"id": 8, "full_name": "owner/repo"},
+                                                  **pull_data, "comment": {"id": comment_id, "body": "@qykw 帮助"},
+                                                  "sender": {"login": "alice"}}), encoding="utf-8")
+                environment = {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8", "GITHUB_REPOSITORY": "owner/repo",
+                               "GITHUB_EVENT_NAME": event_name, "GITHUB_RUN_ID": "44"}
+                gateway = FakeGateway()
+                state = GitHubCommentStateStore(gateway, repository="owner/repo")
+                authorize = ProductionPhaseController("authorize", environment)
+                authorize._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+                artifact = authorize.root()
+                run = _run_from_artifact(artifact)
+                analyze = ProductionPhaseController("analyze", {})
+                analyze._read_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+                analyzed = analyze.analyze(artifact)
+            stored = state.get(53, run.run_id)  # type: ignore[union-attr]
+            self.assertEqual(run, stored.context)  # type: ignore[union-attr]
+            self.assertEqual(run.trigger_comment_id, comment_id)  # type: ignore[union-attr]
+            self.assertEqual(run.trigger_comment_kind.value, comment_kind)  # type: ignore[union-attr]
+            self.assertNotEqual(analyzed["payload"], {"status": "skipped", "reason": "state_unavailable"})
+
+    def test_automatic_and_manual_authorize_roundtrip_with_null_comment_binding(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        cases = (
+            ("pull_request_target", {"action": "opened", "number": 53, "repository": {"id": 8, "full_name": "owner/repo"},
+                                       "pull_request": {"number": 53, "draft": False, "head": {"sha": HEAD}}, "sender": {"login": "alice"}}),
+            ("workflow_dispatch", {"action": "requested", "repository": {"id": 8, "full_name": "owner/repo"},
+                                    "inputs": {"pr_number": "53", "command": "审查"}, "sender": {"login": "alice"}}),
+        )
+        for event_name, payload in cases:
+            with self.subTest(event_name=event_name), tempfile.TemporaryDirectory() as directory:
+                event_path = Path(directory) / "event.json"
+                event_path.write_text(json.dumps(payload), encoding="utf-8")
+                gateway = FakeGateway()
+                state = GitHubCommentStateStore(gateway, repository="owner/repo")
+                controller = ProductionPhaseController("authorize", {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8",
+                                                                        "GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": event_name, "GITHUB_RUN_ID": "44"})
+                controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+                artifact = controller.root()
+                run = _run_from_artifact(artifact)
+            self.assertIsNotNone(run, artifact)
+            self.assertEqual(run, state.get(53, run.run_id).context)  # type: ignore[union-attr]
+            self.assertIsNone(run.trigger_comment_id)  # type: ignore[union-attr]
+            self.assertIsNone(run.trigger_comment_kind)  # type: ignore[union-attr]
 
     def test_no_comment_run_binding_roundtrips_as_paired_nulls(self) -> None:
         from tools.qykw.__main__ import main
