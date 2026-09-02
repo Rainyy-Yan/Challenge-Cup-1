@@ -2,7 +2,6 @@
 
 import base64
 import json
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,26 +98,12 @@ class TestFormalExaminerBoundary(unittest.TestCase):
         self.assertFalse(excluded & {chunk.id for chunk in examiner.retriever.chunks})
 
 
-class TestShowcaseTemplate(unittest.TestCase):
-    def test_ability_renderers_are_executable_javascript_not_css(self):
-        template = Path("web/showcase.template.html").read_text(encoding="utf-8")
-        style = re.search(r"<style>(.*?)</style>", template, re.S)
-        scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", template, re.S)
-
-        self.assertIsNotNone(style)
-        self.assertNotIn("function paintRadar", style.group(1))
-        self.assertNotIn("function paintEvidence", style.group(1))
-        self.assertTrue(any("function paintRadar" in script for script in scripts))
-        self.assertTrue(any("function paintEvidence" in script for script in scripts))
-
+class TestOnlineFrontend(unittest.TestCase):
     def test_source_links_are_rendered_from_verified_provenance_text(self):
         index = Path("web/index.html").read_text(encoding="utf-8")
-        template = Path("web/showcase.template.html").read_text(encoding="utf-8")
 
         self.assertIn("function sourceWithLink", index)
         self.assertIn("sourceWithLink(kb.source)", index)
-        self.assertIn("function sourceWithLink", template)
-        self.assertIn("sourceWithLink(kb.source)", template)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,6 @@
 
 import json
 import unittest
-from pathlib import Path
 
 import config
 from core.retrieval import Retriever
@@ -81,22 +80,13 @@ class TestChunkProvenance(unittest.TestCase):
         self.assertFalse(c["verified"])
         self.assertIn("出处错配", c.get("source_note", ""))
 
-    def test_every_displayed_demo_claim_has_a_locatable_real_source(self):
-        """静态 Demo 实际展示的断言不能继续指向教材占位出处。"""
-        snapshot = json.loads(Path("web/snapshot.json").read_text(encoding="utf-8"))
-        by_id = {chunk["id"]: chunk for chunk in self.raw}
-
-        for session in snapshot["sessions"].values():
-            for resource in session["resources"]:
-                for claim in resource["claims"]:
-                    source_id = claim["source_id"]
-                    chunk = by_id[source_id]
-                    shown = snapshot["kb"][source_id]
-                    self.assertNotIn("占位出处", chunk["source"], source_id)
-                    self.assertIn("定位：", chunk["source"], source_id)
-                    self.assertIn("https://", chunk["source"], source_id)
-                    self.assertEqual(shown["source"], chunk["source"], source_id)
-                    self.assertEqual(shown["source_note"], chunk.get("source_note", ""), source_id)
+    def test_every_online_demo_source_is_locatable(self):
+        """在线 Demo 可暴露的知识切片不能继续指向教材占位出处。"""
+        formal = Retriever.from_jsonl(config.KB_PATH, demo_only=True)
+        for chunk in formal.chunks:
+            self.assertNotIn("占位出处", chunk.source, chunk.id)
+            self.assertIn("定位：", chunk.source, chunk.id)
+            self.assertIn("https://", chunk.source, chunk.id)
 
 
 class TestGroundingIsReported(unittest.TestCase):

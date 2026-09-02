@@ -132,13 +132,10 @@ AGENTEDU_INJECT=0.3 python3 -m evalkit.run_eval --n 50 --no-debate
 python3 server.py
 \end{code}
 
-\begin{keynote}{最重要的一个文件：web/showcase.html}
-双击即可打开，不需要后端、不需要网络、不需要安装任何东西。
-评委可以现场输入自己的背景、亲手答题，系统当场算出学情并生成资源。
-
-这是专为答辩现场准备的。演示服务在别人机器上起不来是很常见的事，
-端口占用、防火墙策略、Python 版本差异都可能导致失败，单文件版把这个风险彻底消掉。
-后端在线时它会自动切换为实时模式，页面顶部的指示灯显示当前数据源。
+\begin{keynote}{唯一演示入口：server.py}
+项目只保留在线服务入口，评委通过浏览器现场输入背景、完成测评并查看生成结果。
+所有诊断、模型调用、审核和反馈决策统一由 Python 后端执行，项目只维护这一套
+执行链。
 \end{keynote}
 
 \bibliographystyle{gbt7714-2005}

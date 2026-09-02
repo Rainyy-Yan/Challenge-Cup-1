@@ -2,7 +2,7 @@
 
 ## Project structure and module organization
 
-Run commands from `agentedu/`. `orchestrator.py` owns the workflow state machine, while `agents/` contains the intake, generation, debate, audit, and decision roles. Shared schemas, retrieval, learner modeling, and LLM adapters live in `core/`. Keep datasets in `data/`, evaluation entry points in `evalkit/`, utilities in `tools/`, and documentation in `docs/`. Browser code and the generated showcase are under `web/`; backend rule changes may require matching updates to `web/engine.js`.
+Run commands from `agentedu/`. `orchestrator.py` owns the workflow state machine, while `agents/` contains the intake, generation, debate, audit, and decision roles. Shared schemas, retrieval, learner modeling, and LLM adapters live in `core/`. Keep datasets in `data/`, evaluation entry points in `evalkit/`, utilities in `tools/`, and documentation in `docs/`. The single online frontend lives at `web/index.html` and is served by `server.py`.
 
 ## Build, test, and development commands
 
@@ -14,11 +14,9 @@ python3 -m unittest discover -s tests -v  # run the complete test suite
 python3 -m evalkit.run_eval --n 50        # calculate batch evaluation metrics
 python3 -m evalkit.redteam                 # exercise hallucination defenses
 python3 server.py                          # serve the live demo on port 8000
-python3 -m evalkit.snapshot                # refresh web/snapshot.json
-python3 build_showcase.py                  # rebuild web/showcase.html
 ```
 
-Use `py -3` instead of `python3` on Windows if needed. Run `python3 -m unittest tests.test_parity -v` when changing logic shared with `web/engine.js`; it also requires Node.js.
+Use `py -3` instead of `python3` on Windows if needed.
 
 ## Coding style and naming conventions
 

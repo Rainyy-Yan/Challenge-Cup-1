@@ -1,7 +1,7 @@
-"""最终 Demo 的知识来源台账必须随快照一起更新。
+"""在线 Demo 的知识来源台账必须与正式知识库同步。
 
 台账不是把机器核验伪装成人工核验：它只固定正式演示实际用到的切片、
-来源定位和待填写的人工复核字段。这样快照改变时，来源范围会立即在测试中暴露。
+来源定位和待填写的人工复核字段。这样在线暴露范围改变时会立即在测试中暴露。
 """
 
 import json
@@ -20,7 +20,6 @@ from core.retrieval import Retriever
 
 ROOT = Path(__file__).resolve().parents[1]
 KB_PATH = ROOT / "data" / "kb" / "robotics.jsonl"
-SNAPSHOT_PATH = ROOT / "web" / "snapshot.json"
 MANIFEST_PATH = ROOT / "data" / "demo_source_manifest.json"
 
 
@@ -36,36 +35,20 @@ class TestDemoSourceManifest(unittest.TestCase):
                 if line.strip()
             )
         }
-        cls.snapshot = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         cls.records = {row["id"]: row for row in cls.manifest["records"]}
+        cls.formal = Retriever.from_jsonl(KB_PATH, demo_only=True)
 
-    def _demo_sources_by_profile(self):
-        result = {}
-        for profile_id, session in self.snapshot["sessions"].items():
-            result[profile_id] = {
-                claim["source_id"]
-                for resource in session["resources"]
-                for claim in resource["claims"]
-                if claim.get("source_id")
-            }
-        return result
+    def test_manifest_covers_exactly_the_sources_exposed_online(self):
+        self.assertEqual(
+            set(self.records),
+            {chunk.id for chunk in self.formal.chunks},
+        )
 
-    def test_manifest_covers_exactly_the_sources_embedded_in_snapshot(self):
-        used_by_profile = self._demo_sources_by_profile()
-        used = set().union(*used_by_profile.values())
-        self.assertEqual(set(self.records), set(self.snapshot["kb"]))
-        self.assertLessEqual(used, set(self.snapshot["kb"]))
-
-        for chunk_id, record in self.records.items():
-            expected_profiles = sorted(
-                profile_id for profile_id, ids in used_by_profile.items()
-                if chunk_id in ids
-            )
-            self.assertEqual(sorted(record["profiles"]), expected_profiles, chunk_id)
-
-    def test_snapshot_source_set_passes_runtime_manifest_validation(self):
-        validate_demo_source_manifest(self.snapshot["kb"], artifact="测试快照")
+    def test_online_source_set_passes_runtime_manifest_validation(self):
+        validate_demo_source_manifest(
+            {chunk.id for chunk in self.formal.chunks}, artifact="测试在线会话"
+        )
 
     def test_each_formal_demo_source_has_a_locatable_source_record(self):
         required = {
@@ -106,16 +89,17 @@ class TestDemoSourceManifest(unittest.TestCase):
             else:
                 self.assertEqual("pending_manual_review", status, chunk_id)
 
-    def test_snapshot_only_publishes_completed_human_reviews(self):
-        """快照中的核实状态必须由完整人工复核台账决定。"""
+    def test_online_demo_only_publishes_completed_human_reviews(self):
+        """在线会话的核实状态必须由完整人工复核台账决定。"""
         review_fields = ("reviewer", "reviewed_on", "conclusion", "authorization")
+        published = publicly_verified_source_ids()
         for chunk_id, record in self.records.items():
             expected = (
                 record["review_status"] == "human_verified"
                 and all(record[field] for field in review_fields)
                 and self.kb[chunk_id]["verified"]
             )
-            self.assertEqual(expected, self.snapshot["kb"][chunk_id]["verified"], chunk_id)
+            self.assertEqual(expected, chunk_id in published, chunk_id)
 
     def test_public_verification_requires_a_complete_human_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,7 +158,3 @@ class TestDemoSourceManifest(unittest.TestCase):
 
         formal_demo = Retriever.from_jsonl(KB_PATH, demo_only=True)
         self.assertFalse(excluded & {chunk.id for chunk in formal_demo.chunks})
-
-        self.assertFalse(excluded & set(self.snapshot["kb"]))
-        used = set().union(*self._demo_sources_by_profile().values())
-        self.assertFalse(excluded & used)
