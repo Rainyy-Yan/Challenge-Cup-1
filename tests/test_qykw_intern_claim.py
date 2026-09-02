@@ -9,11 +9,13 @@ from tools.qykw.intern_claim import (
     InternClaimService,
     InternCommand,
     InternError,
+    InternOutcome,
     InternRecord,
     IssueComment,
     IssueCommentEvent,
     IssueSnapshot,
     PullLifecycleEvent,
+    PullSnapshot,
     decode_marker,
     normalize_issue_comment_event,
     normalize_pull_event,
@@ -601,6 +603,88 @@ class InternMemoryGateway:
         return bodies[0]
 
 
+class InternPullMemoryGateway(InternMemoryGateway):
+    """Lifecycle fake that keeps Issue and PR conversations separate."""
+
+    def __init__(self, *, labels: tuple[str, ...] = ("status:in-progress",),
+                 assignees: tuple[str, ...] = ("alice",), body: str = "Closes #17") -> None:
+        super().__init__(labels=labels, assignees=assignees)
+        self.repository = "qiyuankaiwu/agentedu"
+        self.pull = PullSnapshot(9, "open", False, "alice", body)
+        self.pull_base = "qiyuankaiwu/agentedu"
+        self.target_is_pull = False
+        self.pull_comments: list[IssueComment] = []
+
+    def get_issue(self, issue_number: int) -> IssueSnapshot:
+        self.trace.append(("get_issue", issue_number))
+        if issue_number != 17:
+            raise AssertionError(f"unexpected issue {issue_number}")
+        if self.target_is_pull:
+            return IssueSnapshot(17, self.issue.state, self.issue.labels, self.issue.assignees, is_pull=True)
+        return self.issue
+
+    def list_pull_comments(self, pull_number: int) -> tuple[IssueComment, ...]:
+        self.trace.append(("list_pull_comments", pull_number))
+        if pull_number != 9:
+            raise AssertionError(f"unexpected pull {pull_number}")
+        return tuple(self.pull_comments)
+
+    def get_pull(self, pull_number: int) -> PullSnapshot:
+        self.trace.append(("get_pull", pull_number))
+        if pull_number != 9:
+            raise AssertionError(f"unexpected pull {pull_number}")
+        if self.pull_base != "qiyuankaiwu/agentedu":
+            raise InternError("pull_repository_mismatch")
+        return self.pull
+
+    def create_comment(self, issue_number: int, body: str) -> int:
+        if issue_number not in (17, 9):
+            raise AssertionError(f"unexpected conversation {issue_number}")
+        failure_key = f"create_comment_{issue_number}"
+        mode = self._begin_write(failure_key, issue_number, body)
+        self.writes[-1] = ("create_comment", issue_number, body)
+        self.trace[-1] = ("create_comment", issue_number, body)
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        target = self.comments if issue_number == 17 else self.pull_comments
+        target.append(IssueComment(comment_id, "qykw", body, "now"))
+        self._finish_write(mode)
+        return comment_id
+
+    def update_comment(self, comment_id: int, body: str) -> None:
+        mode = self._begin_write("update_comment", comment_id, body)
+        for target in (self.comments, self.pull_comments):
+            for index, comment in enumerate(target):
+                if comment.comment_id == comment_id:
+                    target[index] = IssueComment(comment_id, "qykw", body, "later")
+                    self._finish_write(mode)
+                    return
+        raise AssertionError(f"unknown comment {comment_id}")
+
+    def pull_record(self) -> InternRecord | None:
+        records = [
+            decode_marker(comment.body, repository="qiyuankaiwu/agentedu")
+            for comment in self.pull_comments if comment.author_login == "qykw"
+        ]
+        trusted = [record for record in records if record is not None]
+        if len(trusted) != 1:
+            return None
+        return trusted[0]
+
+    def seed_binding(self, *, pull_number: int = 9, issue_number: int = 17,
+                     author: str = "alice", stage: str = "reconciled",
+                     issue_marker: bool = True) -> InternRecord:
+        record = InternRecord(
+            42, "qiyuankaiwu/agentedu", issue_number, pull_number,
+            author, "pull", author, pull_number, stage,
+        )
+        if issue_marker:
+            self.record(record)
+        self.pull_comments.append(IssueComment(self.next_comment_id, "qykw", record.marker(), "now"))
+        self.next_comment_id += 1
+        return record
+
+
 class TestInternClaimService(unittest.TestCase):
     REPOSITORY = "qiyuankaiwu/agentedu"
 
@@ -935,3 +1019,188 @@ class TestInternClaimService(unittest.TestCase):
                 self.assertEqual(gateway.issue, before)
                 self.assertIn(expected, gateway.bot_body_for(101))
                 self.assertFalse(any(write[0] in mutation_names for write in gateway.writes))
+
+
+class TestInternPullLifecycle(unittest.TestCase):
+    REPOSITORY = "qiyuankaiwu/agentedu"
+
+    @staticmethod
+    def event(action: str = "opened", *, repository: str = "qiyuankaiwu/agentedu") -> PullLifecycleEvent:
+        return PullLifecycleEvent(repository, 42, 9, action)
+
+    @staticmethod
+    def service(gateway: InternPullMemoryGateway) -> InternClaimService:
+        return InternClaimService(gateway)
+
+    def test_first_binding_persists_issue_and_pull_markers_before_review_labels(self) -> None:
+        gateway = InternPullMemoryGateway(labels=("status:in-progress", "area:docs"))
+
+        outcome = self.service(gateway).handle_pull_event(self.event())
+
+        self.assertEqual(outcome, InternOutcome(17, (9,), "reconciled"))
+        self.assertEqual(gateway.issue.labels, ("area:docs", "status:in-review"))
+        issue_records = [record for record in gateway.records() if record.operation == "pull"]
+        self.assertEqual(len(issue_records), 1)
+        self.assertEqual(issue_records[0], gateway.pull_record())
+        self.assertEqual(issue_records[0].claimant_login, "alice")
+        writes = [item[0:2] for item in gateway.writes]
+        issue_marker = writes.index(("create_comment", 17))
+        pull_marker = writes.index(("create_comment", 9))
+        first_label = next(index for index, item in enumerate(gateway.writes)
+                           if item[0] in {"add_label", "remove_label"})
+        self.assertNotEqual(issue_marker, pull_marker)
+        self.assertLess(issue_marker, first_label)
+        self.assertLess(pull_marker, first_label)
+        for index, item in enumerate(gateway.trace):
+            if item[0] in {"create_comment", "update_comment", "add_label", "remove_label"}:
+                self.assertIn(
+                    gateway.trace[index + 1][0],
+                    {"get_issue", "list_issue_comments", "list_pull_comments"},
+                )
+
+    def test_rejects_zero_multiple_and_noncanonical_closing_targets_without_writes(self) -> None:
+        for body in ("No issue", "Closes #17\nCloses #18", "Fixes #17", "Closes #017", "Closes other/repo#17"):
+            gateway = InternPullMemoryGateway(body=body)
+            with self.subTest(body=body):
+                outcome = self.service(gateway).handle_pull_event(self.event())
+                self.assertEqual(outcome.status, "conflict")
+                self.assertEqual(gateway.writes, [])
+
+    def test_rejects_pull_target_wrong_repository_or_wrong_base_without_writes(self) -> None:
+        target = InternPullMemoryGateway()
+        target.target_is_pull = True
+        wrong_repository = InternPullMemoryGateway()
+        wrong_base = InternPullMemoryGateway()
+        wrong_base.pull_base = "other/repo"
+        cases = (
+            (target, self.event()),
+            (wrong_repository, self.event(repository="other/repo")),
+            (wrong_base, self.event()),
+        )
+        for gateway, event in cases:
+            with self.subTest(event=event, base=gateway.pull_base, target_is_pull=gateway.target_is_pull):
+                outcome = self.service(gateway).handle_pull_event(event)
+                self.assertEqual(outcome.status, "conflict")
+                self.assertEqual(gateway.writes, [])
+
+    def test_rejects_author_mismatch_or_nonsole_claimant_without_writes(self) -> None:
+        cases = (
+            InternPullMemoryGateway(assignees=("bob",)),
+            InternPullMemoryGateway(assignees=("alice", "bob")),
+            InternPullMemoryGateway(assignees=()),
+        )
+        for gateway in cases:
+            with self.subTest(assignees=gateway.issue.assignees):
+                outcome = self.service(gateway).handle_pull_event(self.event())
+                self.assertEqual(outcome.status, "conflict")
+                self.assertEqual(gateway.writes, [])
+
+    def test_rejects_second_active_pull_for_the_same_issue(self) -> None:
+        gateway = InternPullMemoryGateway()
+        gateway.record(InternRecord(
+            42, self.REPOSITORY, 17, 8, "alice", "pull", "alice", 8, "reconciled",
+        ))
+
+        outcome = self.service(gateway).handle_pull_event(self.event())
+
+        self.assertEqual(outcome.status, "conflict")
+        self.assertEqual(gateway.writes, [])
+
+    def test_edited_body_cannot_change_a_frozen_binding(self) -> None:
+        gateway = InternPullMemoryGateway()
+        service = self.service(gateway)
+        service.handle_pull_event(self.event())
+        gateway.pull = PullSnapshot(9, "open", False, "alice", "Closes #18")
+        before = tuple(gateway.writes)
+
+        outcome = service.handle_pull_event(self.event("edited"))
+
+        self.assertEqual(outcome.issue_number, 17)
+        self.assertEqual(outcome.status, "noop")
+        self.assertEqual(tuple(gateway.writes), before)
+        self.assertNotIn(("get_issue", 18), gateway.trace)
+
+    def test_unmerged_close_clears_active_issue_marker_and_restores_progress(self) -> None:
+        gateway = InternPullMemoryGateway()
+        service = self.service(gateway)
+        service.handle_pull_event(self.event())
+        gateway.pull = PullSnapshot(9, "closed", False, "alice", "Closes #999")
+
+        outcome = service.handle_pull_event(self.event("closed"))
+
+        self.assertEqual(outcome, InternOutcome(17, (9,), "reconciled"))
+        self.assertEqual(gateway.issue, IssueSnapshot(17, "open", ("status:in-progress",), ("alice",)))
+        self.assertFalse(any(record.operation == "pull" for record in gateway.records()))
+        self.assertEqual(gateway.pull_record().issue_number, 17)  # type: ignore[union-attr]
+
+    def test_reopened_bound_pull_uses_marker_and_reenters_review(self) -> None:
+        gateway = InternPullMemoryGateway()
+        service = self.service(gateway)
+        service.handle_pull_event(self.event())
+        gateway.pull = PullSnapshot(9, "closed", False, "alice", "Closes #17")
+        service.handle_pull_event(self.event("closed"))
+        gateway.pull = PullSnapshot(9, "open", False, "alice", "Closes #999")
+
+        outcome = service.handle_pull_event(self.event("reopened"))
+
+        self.assertEqual(outcome.issue_number, 17)
+        self.assertEqual(outcome.status, "reconciled")
+        self.assertEqual(gateway.issue.labels, ("status:in-review",))
+        self.assertEqual(len([record for record in gateway.records() if record.operation == "pull"]), 1)
+
+    def test_merged_close_uses_live_pull_state_removes_review_and_closes_issue(self) -> None:
+        gateway = InternPullMemoryGateway()
+        service = self.service(gateway)
+        service.handle_pull_event(self.event())
+        gateway.pull = PullSnapshot(9, "closed", True, "alice", "")
+
+        outcome = service.handle_pull_event(self.event("closed"))
+
+        self.assertEqual(outcome, InternOutcome(17, (9,), "reconciled"))
+        self.assertEqual(gateway.issue.state, "closed")
+        self.assertNotIn("status:in-review", gateway.issue.labels)
+        self.assertEqual(sum(item[0] == "close_issue" for item in gateway.writes), 1)
+
+    def test_duplicate_active_event_replay_performs_no_writes(self) -> None:
+        gateway = InternPullMemoryGateway()
+        service = self.service(gateway)
+        first = service.handle_pull_event(self.event())
+        writes = tuple(gateway.writes)
+
+        second = service.handle_pull_event(self.event())
+
+        self.assertEqual((first.status, second.status), ("reconciled", "noop"))
+        self.assertEqual(tuple(gateway.writes), writes)
+
+    def test_closed_event_requires_one_consistent_trusted_pull_marker(self) -> None:
+        missing = InternPullMemoryGateway(labels=("status:in-review",))
+        conflicting = InternPullMemoryGateway(labels=("status:in-review",))
+        conflicting.seed_binding()
+        conflicting.pull_comments.append(IssueComment(
+            2000, "qykw",
+            InternRecord(42, self.REPOSITORY, 18, 9, "alice", "pull", "alice", 9, "reconciled").marker(),
+            "now",
+        ))
+        for gateway in (missing, conflicting):
+            gateway.pull = PullSnapshot(9, "closed", False, "alice", "Closes #17")
+            before = gateway.issue
+            with self.subTest(comments=len(gateway.pull_comments)):
+                outcome = self.service(gateway).handle_pull_event(self.event("closed"))
+                self.assertEqual(outcome.status, "conflict")
+                self.assertEqual(gateway.issue, before)
+                self.assertEqual(gateway.writes, [])
+
+    def test_failed_mutation_replay_uses_frozen_binding_not_edited_body(self) -> None:
+        gateway = InternPullMemoryGateway()
+        gateway.fail_next("add_label")
+        service = self.service(gateway)
+
+        first = service.handle_pull_event(self.event())
+        gateway.pull = PullSnapshot(9, "open", False, "alice", "Closes #18")
+        second = service.handle_pull_event(self.event("edited"))
+
+        self.assertEqual(first.status, "failed")
+        self.assertIn(second.status, {"reconciled", "noop"})
+        self.assertEqual(second.issue_number, 17)
+        self.assertNotIn(("get_issue", 18), gateway.trace)
+        self.assertEqual(gateway.issue.labels, ("status:in-review",))

@@ -71,6 +71,7 @@ class IssueSnapshot:
     state: str
     labels: tuple[str, ...]
     assignees: tuple[str, ...]
+    is_pull: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,8 @@ class InternOutcome:
 
 
 class InternGateway(Protocol):
+    repository: str
+
     def assert_bot_identity(self, expected_login: str = "qykw") -> None: ...
     def get_issue(self, issue_number: int) -> IssueSnapshot: ...
     def list_issue_comments(self, issue_number: int) -> tuple[IssueComment, ...]: ...
@@ -189,7 +192,7 @@ class HttpInternGateway:
         state = _intern_string(payload.get("state"), "invalid_issue")
         labels = _intern_names(payload.get("labels"), "invalid_issue")
         assignees = _intern_logins(payload.get("assignees"), "invalid_issue")
-        return IssueSnapshot(number, state, labels, assignees)
+        return IssueSnapshot(number, state, labels, assignees, "pull_request" in payload)
 
     def list_issue_comments(self, issue_number: int) -> tuple[IssueComment, ...]:
         number = _intern_positive(issue_number, "invalid_issue_number")
@@ -670,6 +673,336 @@ class InternClaimService:
         else:
             status = "noop"
         return InternOutcome(event.issue_number, tuple(processed), status)
+
+    def handle_pull_event(self, event: PullLifecycleEvent) -> InternOutcome:
+        """Reconcile one PR lifecycle event against its frozen Issue binding."""
+
+        if not isinstance(event, PullLifecycleEvent) or event.action not in _PULL_ACTIONS:
+            raise InternError("invalid_pull_event")
+        gateway_repository = getattr(self.gateway, "repository", None)
+        if gateway_repository != event.repository:
+            return InternOutcome(0, (), "conflict")
+        try:
+            self.gateway.assert_bot_identity()
+            binding = self._pull_binding(event)
+        except InternError as error:
+            status = "conflict" if error.code == "record_conflict" else "failed"
+            return InternOutcome(0, (), status)
+
+        if binding is None:
+            if event.action in {"closed", "reopened"}:
+                return InternOutcome(0, (), "conflict")
+            return self._start_pull_binding(event)
+
+        record, pull_comment_id = binding
+        try:
+            pull = self.gateway.get_pull(event.pull_number)
+        except InternError as error:
+            status = "conflict" if error.code == "pull_repository_mismatch" else "failed"
+            return InternOutcome(record.issue_number, (), status)
+        if (pull.number != event.pull_number
+                or pull.author_login.casefold() != record.claimant_login.casefold()):
+            return InternOutcome(record.issue_number, (), "conflict")
+        if event.action == "closed":
+            return self._reconcile_closed_pull(event, pull, record, pull_comment_id)
+        return self._reconcile_active_pull(event, pull, record, pull_comment_id, initial=False)
+
+    def _start_pull_binding(self, event: PullLifecycleEvent) -> InternOutcome:
+        try:
+            pull = self.gateway.get_pull(event.pull_number)
+        except InternError as error:
+            status = "conflict" if error.code == "pull_repository_mismatch" else "failed"
+            return InternOutcome(0, (), status)
+        issue_number = parse_closing_issue(pull.body)
+        if issue_number is None or pull.state != "open":
+            return InternOutcome(0, (), "conflict")
+        try:
+            issue = self.gateway.get_issue(issue_number)
+            comments = self.gateway.list_issue_comments(issue_number)
+            records = reduce_records(
+                comments, repository_id=event.repository_id,
+                repository=event.repository, issue_number=issue_number,
+            )
+        except InternError:
+            return InternOutcome(issue_number, (), "failed")
+        labels = set(issue.labels)
+        if (issue.is_pull or issue.state != "open" or len(issue.assignees) != 1
+                or issue.assignees[0].casefold() != pull.author_login.casefold()
+                or "status:in-progress" not in labels
+                or labels & {"intern:claimable", "status:in-review", "status:blocked"}
+                or any(item.operation == "pull" and item.pull_number is not None for item in records)):
+            return InternOutcome(issue_number, (), "conflict")
+
+        record = InternRecord(
+            event.repository_id, event.repository, issue_number, event.pull_number,
+            pull.author_login, "pull", pull.author_login, event.pull_number, "pending",
+        )
+        pull_comment_id = self._ensure_pull_marker(event, record)
+        if pull_comment_id is None:
+            return InternOutcome(issue_number, (), "failed")
+        return self._reconcile_active_pull(event, pull, record, pull_comment_id, initial=True)
+
+    def _reconcile_active_pull(self, event: PullLifecycleEvent, pull: PullSnapshot,
+                               record: InternRecord, pull_comment_id: int,
+                               *, initial: bool) -> InternOutcome:
+        if pull.state != "open":
+            return InternOutcome(record.issue_number, (), "conflict")
+        try:
+            issue = self.gateway.get_issue(record.issue_number)
+            comments = self.gateway.list_issue_comments(record.issue_number)
+            issue_binding = self._issue_binding(event, record, comments)
+        except InternError:
+            self._mark_pull_failed(event, record, pull_comment_id, None)
+            return InternOutcome(record.issue_number, (), "failed")
+        labels = set(issue.labels)
+        if (issue.is_pull or issue.state != "open" or len(issue.assignees) != 1
+                or issue.assignees[0].casefold() != record.claimant_login.casefold()
+                or labels & {"intern:claimable", "status:blocked"}
+                or {"status:in-progress", "status:in-review"} <= labels):
+            return InternOutcome(record.issue_number, (), "conflict")
+
+        issue_comment_id = issue_binding
+        if issue_comment_id is None:
+            if not (initial or event.action == "reopened") or "status:in-progress" not in labels:
+                return InternOutcome(record.issue_number, (), "conflict")
+            issue_comment_id = self._ensure_issue_marker(event, record)
+            if issue_comment_id is None:
+                self._mark_pull_failed(event, record, pull_comment_id, None)
+                return InternOutcome(record.issue_number, (), "failed")
+            try:
+                issue = self.gateway.get_issue(record.issue_number)
+            except InternError:
+                self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+                return InternOutcome(record.issue_number, (), "failed")
+            labels = set(issue.labels)
+
+        if ("status:in-review" in labels and "status:in-progress" not in labels
+                and record.stage == "reconciled"
+                and self._comment_stage(event, issue_comment_id, record, pull=False) == "reconciled"):
+            return InternOutcome(record.issue_number, (), "noop")
+
+        if "status:in-progress" in labels:
+            if not self._mutate_pull_issue(
+                    event, record, pull_comment_id, issue_comment_id,
+                    lambda: self.gateway.remove_label(record.issue_number, "status:in-progress"),
+                    lambda snapshot: "status:in-progress" not in snapshot.labels):
+                return InternOutcome(record.issue_number, (), "failed")
+            try:
+                issue = self.gateway.get_issue(record.issue_number)
+            except InternError:
+                self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+                return InternOutcome(record.issue_number, (), "failed")
+            labels = set(issue.labels)
+        if "status:in-review" not in labels:
+            if not self._mutate_pull_issue(
+                    event, record, pull_comment_id, issue_comment_id,
+                    lambda: self.gateway.add_label(record.issue_number, "status:in-review"),
+                    lambda snapshot: "status:in-review" in snapshot.labels):
+                return InternOutcome(record.issue_number, (), "failed")
+        terminal = self._with_stage(record, "reconciled")
+        if not self._set_marker_stage(event, issue_comment_id, terminal, pull=False):
+            self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+            return InternOutcome(record.issue_number, (), "failed")
+        if not self._set_marker_stage(event, pull_comment_id, terminal, pull=True):
+            self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+            return InternOutcome(record.issue_number, (), "failed")
+        return InternOutcome(record.issue_number, (event.pull_number,), "reconciled")
+
+    def _reconcile_closed_pull(self, event: PullLifecycleEvent, pull: PullSnapshot,
+                               record: InternRecord, pull_comment_id: int) -> InternOutcome:
+        try:
+            issue = self.gateway.get_issue(record.issue_number)
+            comments = self.gateway.list_issue_comments(record.issue_number)
+            issue_comment_id = self._issue_binding(event, record, comments)
+        except InternError:
+            self._mark_pull_failed(event, record, pull_comment_id, None)
+            return InternOutcome(record.issue_number, (), "failed")
+        if issue.is_pull or (issue.assignees and (
+                len(issue.assignees) != 1
+                or issue.assignees[0].casefold() != record.claimant_login.casefold())):
+            return InternOutcome(record.issue_number, (), "conflict")
+        labels = set(issue.labels)
+
+        if pull.merged:
+            if issue.state == "closed" and "status:in-review" not in labels:
+                return InternOutcome(record.issue_number, (), "noop")
+            if issue.state != "open" or labels & {"intern:claimable", "status:blocked"}:
+                return InternOutcome(record.issue_number, (), "conflict")
+            if "status:in-review" in labels:
+                if not self._mutate_pull_issue(
+                        event, record, pull_comment_id, issue_comment_id,
+                        lambda: self.gateway.remove_label(record.issue_number, "status:in-review"),
+                        lambda snapshot: "status:in-review" not in snapshot.labels):
+                    return InternOutcome(record.issue_number, (), "failed")
+            if not self._mutate_pull_issue(
+                    event, record, pull_comment_id, issue_comment_id,
+                    lambda: self.gateway.close_issue(record.issue_number),
+                    lambda snapshot: snapshot.state == "closed"):
+                return InternOutcome(record.issue_number, (), "failed")
+            return InternOutcome(record.issue_number, (event.pull_number,), "reconciled")
+
+        if issue.state != "open" or labels & {"intern:claimable", "status:blocked"}:
+            return InternOutcome(record.issue_number, (), "conflict")
+        if (issue_comment_id is None and "status:in-progress" in labels
+                and "status:in-review" not in labels):
+            return InternOutcome(record.issue_number, (), "noop")
+        if "status:in-review" in labels:
+            if not self._mutate_pull_issue(
+                    event, record, pull_comment_id, issue_comment_id,
+                    lambda: self.gateway.remove_label(record.issue_number, "status:in-review"),
+                    lambda snapshot: "status:in-review" not in snapshot.labels):
+                return InternOutcome(record.issue_number, (), "failed")
+            try:
+                issue = self.gateway.get_issue(record.issue_number)
+            except InternError:
+                self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+                return InternOutcome(record.issue_number, (), "failed")
+            labels = set(issue.labels)
+        if "status:in-progress" not in labels:
+            if not self._mutate_pull_issue(
+                    event, record, pull_comment_id, issue_comment_id,
+                    lambda: self.gateway.add_label(record.issue_number, "status:in-progress"),
+                    lambda snapshot: "status:in-progress" in snapshot.labels):
+                return InternOutcome(record.issue_number, (), "failed")
+        if issue_comment_id is not None and not self._clear_issue_marker(event, record, issue_comment_id):
+            self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+            return InternOutcome(record.issue_number, (), "failed")
+        terminal = self._with_stage(record, "reconciled")
+        if not self._set_marker_stage(event, pull_comment_id, terminal, pull=True):
+            return InternOutcome(record.issue_number, (), "failed")
+        return InternOutcome(record.issue_number, (event.pull_number,), "reconciled")
+
+    def _pull_binding(self, event: PullLifecycleEvent) -> tuple[InternRecord, int] | None:
+        matches: list[tuple[InternRecord, int]] = []
+        for comment in self.gateway.list_pull_comments(event.pull_number):
+            if comment.author_login != "qykw":
+                continue
+            record = decode_marker(comment.body, repository=event.repository)
+            if record is None or record.operation != "pull":
+                continue
+            if (record.repository_id != event.repository_id
+                    or record.pull_number != event.pull_number
+                    or record.trigger_comment_id != event.pull_number
+                    or record.claimant_login is None
+                    or record.actor_login.casefold() != record.claimant_login.casefold()):
+                raise InternError("record_conflict")
+            matches.append((record, comment.comment_id))
+        if not matches:
+            return None
+        first = matches[0][0]
+        if len(matches) != 1 or any(_intern_record_identity(item[0]) != _intern_record_identity(first)
+                                   for item in matches[1:]):
+            raise InternError("record_conflict")
+        return matches[0]
+
+    def _issue_binding(self, event: PullLifecycleEvent, record: InternRecord,
+                       comments: tuple[IssueComment, ...]) -> int | None:
+        matches: list[int] = []
+        for comment in comments:
+            if comment.author_login != "qykw":
+                continue
+            candidate = decode_marker(comment.body, repository=event.repository)
+            if candidate is None or candidate.operation != "pull":
+                continue
+            if _intern_record_identity(candidate) != _intern_record_identity(record):
+                raise InternError("record_conflict")
+            matches.append(comment.comment_id)
+        if len(matches) > 1:
+            raise InternError("record_conflict")
+        return matches[0] if matches else None
+
+    def _ensure_pull_marker(self, event: PullLifecycleEvent, record: InternRecord) -> int | None:
+        body = self._body("正在固定该 PR 的 Issue 关联。", record)
+        try:
+            self.gateway.create_comment(event.pull_number, body)
+        except InternError:
+            pass
+        try:
+            binding = self._pull_binding(event)
+        except InternError:
+            return None
+        return binding[1] if binding is not None and _intern_record_identity(binding[0]) == _intern_record_identity(record) else None
+
+    def _ensure_issue_marker(self, event: PullLifecycleEvent, record: InternRecord) -> int | None:
+        try:
+            self.gateway.create_comment(record.issue_number, self._body("正在关联该 Issue 与 PR。", record))
+        except InternError:
+            pass
+        try:
+            comments = self.gateway.list_issue_comments(record.issue_number)
+            return self._issue_binding(event, record, comments)
+        except InternError:
+            return None
+
+    def _mutate_pull_issue(self, event: PullLifecycleEvent, record: InternRecord,
+                           pull_comment_id: int, issue_comment_id: int | None,
+                           mutation: Callable[[], None],
+                           verify: Callable[[IssueSnapshot], bool]) -> bool:
+        try:
+            mutation()
+        except InternError:
+            pass
+        try:
+            issue = self.gateway.get_issue(record.issue_number)
+            comments = self.gateway.list_issue_comments(record.issue_number)
+            current_comment_id = self._issue_binding(event, record, comments)
+        except InternError:
+            self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+            return False
+        if issue_comment_id is not None and current_comment_id != issue_comment_id:
+            self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+            return False
+        if verify(issue):
+            return True
+        self._mark_pull_failed(event, record, pull_comment_id, issue_comment_id)
+        return False
+
+    def _set_marker_stage(self, event: PullLifecycleEvent, comment_id: int,
+                          record: InternRecord, *, pull: bool) -> bool:
+        current = self._comment_stage(event, comment_id, record, pull=pull)
+        if current == record.stage:
+            return True
+        try:
+            self.gateway.update_comment(comment_id, self._body("Issue 与 PR 状态已同步。", record))
+        except InternError:
+            pass
+        return self._comment_stage(event, comment_id, record, pull=pull) == record.stage
+
+    def _comment_stage(self, event: PullLifecycleEvent, comment_id: int,
+                       record: InternRecord, *, pull: bool) -> str | None:
+        try:
+            comments = (self.gateway.list_pull_comments(event.pull_number) if pull
+                        else self.gateway.list_issue_comments(record.issue_number))
+        except InternError:
+            return None
+        for comment in comments:
+            candidate = decode_marker(comment.body, repository=event.repository)
+            if (comment.comment_id == comment_id and candidate is not None
+                    and _intern_record_identity(candidate) == _intern_record_identity(record)):
+                return candidate.stage
+        return None
+
+    def _clear_issue_marker(self, event: PullLifecycleEvent, record: InternRecord,
+                            issue_comment_id: int) -> bool:
+        try:
+            self.gateway.update_comment(
+                issue_comment_id,
+                f"PR #{event.pull_number} 未合并关闭；Issue 已恢复处理中。",
+            )
+        except InternError:
+            pass
+        try:
+            comments = self.gateway.list_issue_comments(record.issue_number)
+            return self._issue_binding(event, record, comments) is None
+        except InternError:
+            return False
+
+    def _mark_pull_failed(self, event: PullLifecycleEvent, record: InternRecord,
+                          pull_comment_id: int, issue_comment_id: int | None) -> None:
+        failed = self._with_stage(record, "failed")
+        if issue_comment_id is not None:
+            self._set_marker_stage(event, issue_comment_id, failed, pull=False)
+        self._set_marker_stage(event, pull_comment_id, failed, pull=True)
 
     def _handle_command(self, event: IssueCommentEvent, comment: IssueComment,
                         command: InternCommand, existing: InternRecord | None) -> str:
