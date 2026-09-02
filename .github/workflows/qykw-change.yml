@@ -53,15 +53,15 @@ jobs:
         run: |
           set -euo pipefail
           controller_sha="$(git rev-parse HEAD)"
-          test "$controller_sha" = "$GITHUB_SHA"
           echo "sha=$controller_sha" >> "$GITHUB_OUTPUT"
       - name: Authorize exact change request
         working-directory: controller
         env:
+          TRUSTED_CONTROLLER_SHA: ${{ steps.freeze_controller.outputs.sha }}
           QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
         run: |
           mkdir -p "$RUNNER_TEMP/qykw"
-          python -m tools.qykw --phase authorize-change --output "$RUNNER_TEMP/qykw/authorize-change.json"
+          GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase authorize-change --output "$RUNNER_TEMP/qykw/authorize-change.json"
       - name: Export fixed source identity
         id: authorized_context
         working-directory: controller
@@ -122,6 +122,7 @@ jobs:
       - name: Prepare bounded manifest
         working-directory: controller
         env:
+          TRUSTED_CONTROLLER_SHA: ${{ needs.authorize.outputs.controller_sha }}
           GITHUB_TOKEN: ${{ github.token }}
           QYKW_INFERENCE_API_KEY: ${{ secrets.QYKW_INFERENCE_API_KEY }}
           QYKW_INFERENCE_BASE_URL: ${{ vars.QYKW_INFERENCE_BASE_URL }}
@@ -131,7 +132,7 @@ jobs:
           QYKW_INFERENCE_MAX_OUTPUT_TOKENS: ${{ vars.QYKW_INFERENCE_MAX_OUTPUT_TOKENS }}
           QYKW_INFERENCE_TIMEOUT_SECONDS: ${{ vars.QYKW_INFERENCE_TIMEOUT_SECONDS }}
         run: >-
-          python -m tools.qykw --phase prepare-change
+          GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase prepare-change
           --artifact "$RUNNER_TEMP/qykw/authorize-change.json"
           --output "$RUNNER_TEMP/qykw/prepare-change.json"
       - name: Upload prepared manifest artifact
@@ -181,11 +182,11 @@ jobs:
       - name: Verify in the fixed isolated sandbox
         working-directory: controller
         env:
+          TRUSTED_CONTROLLER_SHA: ${{ needs.prepare.outputs.controller_sha }}
           GITHUB_TOKEN: ${{ github.token }}
           QYKW_VERIFICATION_IMAGE_DIGEST: ${{ vars.QYKW_VERIFICATION_IMAGE_DIGEST }}
         run: |
-          # The trusted phase materializes candidate-workspace and enforces --network none.
-          python -m tools.qykw --phase verify-change --artifact "$RUNNER_TEMP/qykw/prepare-change.json" --output "$RUNNER_TEMP/qykw/verify-change.json"
+          GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase verify-change --artifact "$RUNNER_TEMP/qykw/prepare-change.json" --output "$RUNNER_TEMP/qykw/verify-change.json"
       - name: Upload verification artifact
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
@@ -223,10 +224,11 @@ jobs:
       - name: Publish verified change
         working-directory: controller
         env:
+          TRUSTED_CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
           QYKW_PUBLISH_TOKEN: ${{ secrets.QYKW_PUBLISH_TOKEN }}
           QYKW_VERIFICATION_IMAGE_DIGEST: ${{ vars.QYKW_VERIFICATION_IMAGE_DIGEST }}
         run: >-
-          python -m tools.qykw --phase publish-change
+          GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase publish-change
           --artifact "$RUNNER_TEMP/qykw/verify-change.json"
           --output "$RUNNER_TEMP/qykw/publish-change.json"
       - name: Upload publication artifact
@@ -297,10 +299,15 @@ jobs:
       - name: Record bounded result
         working-directory: controller
         env:
+          TRUSTED_CONTROLLER_SHA: ${{ needs.authorize.outputs.controller_sha }}
           QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_AUTHORIZE_JOB_RESULT: ${{ needs.authorize.result }}
+          QYKW_PREPARE_JOB_RESULT: ${{ needs.prepare.result }}
+          QYKW_VERIFY_JOB_RESULT: ${{ needs.verify.result }}
+          QYKW_PUBLISH_JOB_RESULT: ${{ needs.publish.result }}
           PREDECESSOR_ARTIFACT: ${{ steps.predecessor.outputs.artifact }}
         run: >-
-          python -m tools.qykw --phase record-change-result
+          GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase record-change-result
           --artifact "$PREDECESSOR_ARTIFACT"
           --output "$RUNNER_TEMP/qykw/record-change-result.json"
       - name: Upload recorded result artifact

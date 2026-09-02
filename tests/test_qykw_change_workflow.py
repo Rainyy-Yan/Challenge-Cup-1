@@ -53,6 +53,14 @@ def steps_using(job: dict[str, object], action: str) -> list[dict[str, object]]:
     return [step for step in steps if isinstance(step, dict) and str(step.get("uses", "")).startswith(action + "@")]
 
 
+def named_step(job: dict[str, object], name: str) -> dict[str, object]:
+    steps = job.get("steps")
+    assert isinstance(steps, list)
+    matches = [step for step in steps if isinstance(step, dict) and step.get("name") == name]
+    assert len(matches) == 1
+    return matches[0]
+
+
 class TestQykwChangeWorkflow(unittest.TestCase):
     def test_change_listens_only_to_created_and_edited_pr_comments(self) -> None:
         triggers = load_workflow(CHANGE)["on"]
@@ -123,6 +131,8 @@ class TestQykwChangeWorkflow(unittest.TestCase):
                 "QYKW_INFERENCE_BASE_URL", "QYKW_INFERENCE_MODEL",
                 "QYKW_INFERENCE_ALLOWED_HOSTS", "QYKW_INFERENCE_CONTEXT_WINDOW",
                 "QYKW_INFERENCE_MAX_OUTPUT_TOKENS", "QYKW_INFERENCE_TIMEOUT_SECONDS",
+                "QYKW_AUTHORIZE_JOB_RESULT", "QYKW_PREPARE_JOB_RESULT",
+                "QYKW_VERIFY_JOB_RESULT", "QYKW_PUBLISH_JOB_RESULT",
             }
             with self.subTest(job=name):
                 self.assertEqual(found, allowed)
@@ -151,10 +161,58 @@ class TestQykwChangeWorkflow(unittest.TestCase):
         for name in ("authorize", "prepare", "publish", "record_result"):
             self.assertNotIn("candidate-source", job_source(name))
 
+    def test_both_comment_events_freeze_the_actual_controller_checkout(self) -> None:
+        workflow = load_workflow(CHANGE)
+        self.assertEqual(set(workflow["on"]), {
+            "issue_comment", "pull_request_review_comment",
+        })
+        workflow_jobs = jobs(CHANGE)
+        freeze = str(named_step(workflow_jobs["authorize"], "Freeze trusted controller revision")["run"])
+        self.assertIn('controller_sha="$(git rev-parse HEAD)"', freeze)
+        self.assertNotIn("$GITHUB_SHA", freeze)
+
+        phase_steps = {
+            "authorize": ("Authorize exact change request", "steps.freeze_controller.outputs.sha"),
+            "prepare": ("Prepare bounded manifest", "needs.authorize.outputs.controller_sha"),
+            "verify": ("Verify in the fixed isolated sandbox", "needs.prepare.outputs.controller_sha"),
+            "publish": ("Publish verified change", "needs.verify.outputs.controller_sha"),
+            "record_result": ("Record bounded result", "needs.authorize.outputs.controller_sha"),
+        }
+        for job_name, (step_name, sha_source) in phase_steps.items():
+            step = named_step(workflow_jobs[job_name], step_name)
+            environment = step.get("env")
+            self.assertIsInstance(environment, dict)
+            with self.subTest(job=job_name):
+                self.assertEqual(environment["TRUSTED_CONTROLLER_SHA"], "${{ " + sha_source + " }}")
+                self.assertIn('GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw', str(step["run"]))
+
+    def test_record_result_receives_all_trusted_job_outcome_enums(self) -> None:
+        record = named_step(jobs(CHANGE)["record_result"], "Record bounded result")
+        environment = record.get("env")
+        self.assertIsInstance(environment, dict)
+        self.assertEqual(
+            {
+                key: value
+                for key, value in environment.items()
+                if key.startswith("QYKW_") and key.endswith("_JOB_RESULT")
+            },
+            {
+                "QYKW_AUTHORIZE_JOB_RESULT": "${{ needs.authorize.result }}",
+                "QYKW_PREPARE_JOB_RESULT": "${{ needs.prepare.result }}",
+                "QYKW_VERIFY_JOB_RESULT": "${{ needs.verify.result }}",
+                "QYKW_PUBLISH_JOB_RESULT": "${{ needs.publish.result }}",
+            },
+        )
+        self.assertNotIn("toJSON(needs)", str(record))
+
     def test_verify_is_networkless_and_mounts_no_sensitive_host_path(self) -> None:
         block = job_source("verify")
-        self.assertIn("--network none", block)
-        self.assertIn("candidate-workspace", block)
+        self.assertIn("path: candidate-source", block)
+        executable = "\n".join(
+            line for line in block.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertIn("python -m tools.qykw --phase verify-change", executable)
+        self.assertNotIn("--network none", executable)
         sandbox_start = inspect.getsource(DockerSandboxExecutor._ensure_started)
         self.assertRegex(sandbox_start, r'"--network",\s+"none"')
         self.assertEqual(sandbox_start.count('"--mount"'), 1)
