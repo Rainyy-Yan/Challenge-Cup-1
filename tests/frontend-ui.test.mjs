@@ -3,6 +3,15 @@ import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
+const stylesheet = fs.readFileSync('web/styles.css', 'utf8');
+
+test('learner workspace uses the approved blue and white palette', () => {
+  assert.match(stylesheet, /--paper:#F5F7FF/);
+  assert.match(stylesheet, /--surface:#FFFFFF/);
+  assert.match(stylesheet, /--accent:#5367E8/);
+  assert.match(stylesheet, /--accent-soft:#EEF1FF/);
+});
+
 const sandbox = {};
 vm.createContext(sandbox);
 const source = fs.existsSync('web/view-model.js')
