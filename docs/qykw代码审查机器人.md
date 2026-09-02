@@ -58,7 +58,7 @@ qykw 是启元开物独立工程机器人。默认审查通道只提供分析、
 
 仓库所有者需要配置：
 
-- Secret：仓库限定的 `QYKW_TOKEN` 与 `MINIMAX_API_KEY`。工作流仅在对应 job 中把它们映射为阶段所需的 `QYKW_REVIEW_TOKEN`、`QYKW_PUBLISH_TOKEN` 或 `QYKW_INFERENCE_API_KEY`；`verify` 不注入任何 Secret。
+- Secret：仓库限定的 `QYKW_TOKEN` 与 `MINIMAX_API_KEY`。工作流仅在对应 job 中把它们映射为阶段所需的 `QYKW_REVIEW_TOKEN`、`QYKW_PUBLISH_TOKEN` 或 `QYKW_INFERENCE_API_KEY`；`verify` 不注入任何仓库 Secret，只用授予 `packages: read` 的内置 `github.token` 登录私有 GHCR，并继续按 digest 拉取和运行验证镜像。
 - Variables：必填的 `QYKW_INFERENCE_MODEL`，以及 `QYKW_INFERENCE_BASE_URL`、`QYKW_INFERENCE_ALLOWED_HOSTS`、`QYKW_INFERENCE_CONTEXT_WINDOW`、`QYKW_INFERENCE_MAX_OUTPUT_TOKENS`、`QYKW_INFERENCE_TIMEOUT_SECONDS`；启用授权变更时还需配置 `QYKW_VERIFICATION_IMAGE_REF`。
 
 这些值不得写入源码、配置文件、Issue、PR、Actions 产物或日志。`.github/qykw.toml` 只保存非敏感策略，并且只从默认分支读取。

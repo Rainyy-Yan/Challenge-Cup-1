@@ -112,7 +112,7 @@ class TestQykwChangeWorkflow(unittest.TestCase):
             "contents": "read", "pull-requests": "read", "issues": "read",
         })
         self.assertEqual(workflow_jobs["verify"]["permissions"], {
-            "contents": "read", "issues": "read",
+            "contents": "read", "issues": "read", "packages": "read",
         })
         self.assertEqual(workflow_jobs["publish"]["permissions"], {"contents": "read"})
         self.assertEqual(workflow_jobs["record_result"]["permissions"], {"contents": "read"})
@@ -270,6 +270,23 @@ class TestQykwChangeWorkflow(unittest.TestCase):
                 self.assertNotIn(forbidden, sandbox_start)
         self.assertNotIn("secrets.", block)
         self.assertNotIn("docker run", block.casefold())
+
+    def test_verify_authenticates_private_ghcr_with_only_the_builtin_job_token(self) -> None:
+        workflow_jobs = jobs(CHANGE)
+        login = named_step(workflow_jobs["verify"], "Authenticate to private GHCR")
+        self.assertEqual(login.get("env"), {"GITHUB_TOKEN": "${{ github.token }}"})
+        command = str(login.get("run", ""))
+        self.assertEqual(
+            command,
+            'printf \'%s\' "$GITHUB_TOKEN" | docker login ghcr.io '
+            '--username "${{ github.actor }}" --password-stdin',
+        )
+        self.assertNotIn("secrets.", job_source("verify"))
+        verify = named_step(workflow_jobs["verify"], "Verify in the fixed isolated sandbox")
+        self.assertEqual(
+            verify["env"]["QYKW_VERIFICATION_IMAGE_REF"],
+            "${{ vars.QYKW_VERIFICATION_IMAGE_REF }}",
+        )
 
     def test_publish_never_runs_or_fetches_candidate_code(self) -> None:
         block = job_source("publish").casefold()

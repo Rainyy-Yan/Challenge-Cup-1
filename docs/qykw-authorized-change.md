@@ -15,7 +15,7 @@ write、maintain 或 admin 权限。`停止` 追加独立取消标记，不删�
 
 1. `authorize-change`：从默认分支的可信控制器解析事件，验证命令、writer、权限、PR 与固定 Head，并在确认后标记正在工作。
 2. `prepare-change`：只读获取完整源码树，向推理服务发送经过筛选的上下文，生成受路径、大小和文件数限制的补丁清单。
-3. `verify-change`：在固定源码 SHA 上重放补丁，并用 `full` 配置执行后端、前端和冒烟检查。容器镜像仅由 `QYKW_VERIFICATION_IMAGE_REF` 提供，必须是 `registry/image@sha256:<digest>` 形式；容器无网络、只读挂载源码且不继承宿主环境。
+3. `verify-change`：使用权限仅为 `contents: read`、`issues: read`、`packages: read` 的内置 `github.token` 登录私有 GHCR，在固定源码 SHA 上重放补丁，并用 `full` 配置执行后端、前端和冒烟检查。容器镜像仅由 `QYKW_VERIFICATION_IMAGE_REF` 提供，必须是 `registry/image@sha256:<digest>` 形式；容器无网络、只读挂载源码且不继承宿主环境。
 4. `publish-change`：重新验证请求、补丁和证明后，以 qykw 身份创建内容对象、专用分支和 Draft PR。不会更新已有引用，也不会合并、批准或删除。
 5. `record-change-result`：根据可信 job 结果记录 completed、partial、failed 或 canceled，并公开不含敏感数据的状态。
 
@@ -25,7 +25,8 @@ GitHub 写入令牌与推理密钥不会共存；checkout 均设置 `persist-cre
 
 仓库只需配置 `QYKW_TOKEN` 与 `MINIMAX_API_KEY`。工作流按 job 分别映射为运行时
 `QYKW_REVIEW_TOKEN`、`QYKW_PUBLISH_TOKEN` 或 `QYKW_INFERENCE_API_KEY`；`verify-change`
-只使用内置只读 `GITHUB_TOKEN` 和非敏感镜像变量，不接收上述两个 Secret。审查与发布复用同一个
+只使用内置 job token 读取源码、Issue 和私有 GHCR 包，以及非敏感镜像变量，不接收上述两个仓库
+Secret。GHCR 登录通过 `--password-stdin` 完成，后续容器仍只接受 digest-pinned 镜像引用。审查与发布复用同一个
 `QYKW_TOKEN`，因此这里隔离的是 job 暴露面，而不是底层 GitHub 权限；该 token 必须持有所有 qykw
 写入阶段所需权限的并集，并继续限制在本仓库。
 
