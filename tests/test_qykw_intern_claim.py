@@ -2582,6 +2582,7 @@ class TestInternWorkflow(unittest.TestCase):
         issue_if = " ".join(str(jobs["issue_command"]["if"]).split())
         self.assertIn("github.event_name == 'issue_comment'", issue_if)
         self.assertIn("!github.event.issue.pull_request", issue_if)
+        self.assertIn("github.event.comment.user.login != 'qykw'", issue_if)
         self.assertNotIn("comment.body", issue_if)
 
     def test_permissions_are_minimal_and_resolver_has_no_write_capability(self) -> None:

@@ -685,6 +685,13 @@ class TestPhaseArtifactIntegration(unittest.TestCase):
                     entry._run_phase(phase, artifact, controller, code)
         self.assertEqual(entry._safe_code(ValueError("safe_code")), "phase_failed")
         self.assertEqual(entry._safe_code(ValueError("unsafe code!")), "phase_failed")
+        from tools.qykw.provider import ProviderError, ProviderErrorCode
+        for code in ProviderErrorCode:
+            with self.subTest(provider_error=code.value):
+                self.assertEqual(
+                    entry._safe_code(ProviderError(code)),
+                    f"inference_{code.value}",
+                )
 
     def test_provider_capability_failure_records_a_failed_terminal_run(self) -> None:
         system = ReviewSystem(fail_capabilities=True)
