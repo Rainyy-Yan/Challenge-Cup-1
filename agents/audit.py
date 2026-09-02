@@ -44,7 +44,12 @@ _REQUIREMENT_CUES = (
     "仍需核对", "仍需确认", "另行验证", "前提满足",
 )
 _RISK_REQUIREMENT = re.compile(
-    r"(?:错误|不正确)(?:的)?[^，。；]{0,16}(?:时)?可能(?:导致|触发)"
+    r"(?:错误|不正确)(?:的)?[^，,。.;；]{0,16}(?:时)?"
+    r"可能(?:导致|触发|造成|引发|带来|引起)"
+)
+_OMISSION_RISK = re.compile(
+    r"(?:未|不|没有|省略)[^，,。.;；]{0,16}(?:验证|核对|确认|满足)"
+    r"[^，,。.;；]{0,16}(?:会|将|可能)(?:导致|触发|造成|引发|带来|引起)"
 )
 
 _SYSTEM = (
@@ -61,9 +66,25 @@ def semantic_boundary_issue(claim_text: str, evidence_text: str) -> str | None:
     语义蕴含仍交给真模型复核。两类规则都要求证据中存在相反的限制信号，
     避免仅因断言出现“必须”或“自动”等词就误伤。
     """
-    expands_scope = any(cue in claim_text for cue in _SCOPE_EXPANSION_CUES)
+    claim_text = re.sub(r"\s+", "", claim_text)
+    evidence_text = re.sub(r"\s+", "", evidence_text)
+
+    expansion_positions = [
+        claim_text.find(cue) for cue in _SCOPE_EXPANSION_CUES
+        if cue in claim_text
+    ]
+    claim_limit_positions = [
+        claim_text.find(cue) for cue in _SCOPE_LIMIT_CUES
+        if cue in claim_text
+    ]
+    expands_scope = bool(expansion_positions)
     limits_scope = any(cue in evidence_text for cue in _SCOPE_LIMIT_CUES)
-    preserves_scope = any(cue in claim_text for cue in _SCOPE_LIMIT_CUES)
+    # 限定词必须出现在每个扩大词之前。把“为例”等字样补在绝对结论后面，
+    # 不能反过来洗掉已经发生的范围扩大。
+    preserves_scope = bool(claim_limit_positions) and all(
+        any(limit_pos < expansion_pos for limit_pos in claim_limit_positions)
+        for expansion_pos in expansion_positions
+    )
     if expands_scope and limits_scope and not preserves_scope:
         return "断言把资料限定的适用范围扩大成了无条件通用结论"
 
@@ -73,6 +94,7 @@ def semantic_boundary_issue(claim_text: str, evidence_text: str) -> str | None:
     has_requirement = (
         any(cue in evidence_text for cue in _REQUIREMENT_CUES)
         or bool(_RISK_REQUIREMENT.search(evidence_text))
+        or bool(_OMISSION_RISK.search(evidence_text))
     )
     if relaxation and not evidence_relaxes and has_requirement:
         return f"断言用“{relaxation}”取消了资料明确保留的条件或步骤"

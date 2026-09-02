@@ -194,6 +194,13 @@ class TestAudit(unittest.TestCase):
         self.assertFalse(dropped)
         self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
 
+    def test_scope_limit_appended_after_expansion_does_not_bypass(self):
+        issue = semantic_boundary_issue(
+            "所有机器人都必须使用MOVJ，以Yaskawa控制器为例。",
+            "以Yaskawa控制器为例，应按工艺轨迹、空间和机型手册选择指令。",
+        )
+        self.assertIsNotNone(issue)
+
     def test_automatic_mode_does_not_hide_cancelled_validation(self):
         issue = semantic_boundary_issue(
             "快速校对完成后无需验证精度。",
@@ -214,6 +221,29 @@ class TestAudit(unittest.TestCase):
             "自检完成后会自动验证精度。",
         )
         self.assertIsNone(issue)
+
+    def test_risk_synonyms_keep_the_requirement(self):
+        for verb in ("造成", "引发", "带来", "引起"):
+            with self.subTest(verb=verb):
+                issue = semantic_boundary_issue(
+                    "使用辨识功能后无需核对负载数据。",
+                    f"不正确的负载数据可能{verb}碰撞检测失效。",
+                )
+                self.assertIsNotNone(issue)
+
+    def test_omission_risk_keeps_the_requirement(self):
+        issue = semantic_boundary_issue(
+            "快速校对完成后无需验证精度。",
+            "未验证精度将导致定位误差。",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_whitespace_does_not_hide_automatic_completion(self):
+        issue = semantic_boundary_issue(
+            "快速校对完成后会自动　验证精度。",
+            "快速校对完成后必须验证精度。",
+        )
+        self.assertIsNotNone(issue)
 
 
 if __name__ == "__main__":

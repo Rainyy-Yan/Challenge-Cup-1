@@ -691,12 +691,22 @@ const REQUIREMENT_CUES = [
   "应当验证", "应当核对", "应当确认", "仍需验证", "仍需核对", "仍需确认",
   "另行验证", "前提满足"
 ];
-const RISK_REQUIREMENT_RE = /(?:错误|不正确)(?:的)?[^，。；]{0,16}(?:时)?可能(?:导致|触发)/;
+const RISK_REQUIREMENT_RE = /(?:错误|不正确)(?:的)?[^，,。.;；]{0,16}(?:时)?可能(?:导致|触发|造成|引发|带来|引起)/;
+const OMISSION_RISK_RE = /(?:未|不|没有|省略)[^，,。.;；]{0,16}(?:验证|核对|确认|满足)[^，,。.;；]{0,16}(?:会|将|可能)(?:导致|触发|造成|引发|带来|引起)/;
 
 function semanticBoundaryIssue(claimText, evidenceText) {
-  const expandsScope = SCOPE_EXPANSION_CUES.some(cue => claimText.includes(cue));
+  claimText = String(claimText || "").replace(/\s+/gu, "");
+  evidenceText = String(evidenceText || "").replace(/\s+/gu, "");
+
+  const expansionPositions = SCOPE_EXPANSION_CUES
+    .filter(cue => claimText.includes(cue)).map(cue => claimText.indexOf(cue));
+  const claimLimitPositions = SCOPE_LIMIT_CUES
+    .filter(cue => claimText.includes(cue)).map(cue => claimText.indexOf(cue));
+  const expandsScope = expansionPositions.length > 0;
   const limitsScope = SCOPE_LIMIT_CUES.some(cue => evidenceText.includes(cue));
-  const preservesScope = SCOPE_LIMIT_CUES.some(cue => claimText.includes(cue));
+  const preservesScope = claimLimitPositions.length > 0 && expansionPositions.every(
+    expansionPos => claimLimitPositions.some(limitPos => limitPos < expansionPos)
+  );
   if (expandsScope && limitsScope && !preservesScope)
     return "断言把资料限定的适用范围扩大成了无条件通用结论";
 
@@ -704,7 +714,7 @@ function semanticBoundaryIssue(claimText, evidenceText) {
   const relaxation = relaxationCues.find(cue => claimText.includes(cue));
   const evidenceRelaxes = relaxationCues.some(cue => evidenceText.includes(cue));
   const hasRequirement = REQUIREMENT_CUES.some(cue => evidenceText.includes(cue)) ||
-    RISK_REQUIREMENT_RE.test(evidenceText);
+    RISK_REQUIREMENT_RE.test(evidenceText) || OMISSION_RISK_RE.test(evidenceText);
   if (relaxation && !evidenceRelaxes && hasRequirement)
     return `断言用“${relaxation}”取消了资料明确保留的条件或步骤`;
   return null;
