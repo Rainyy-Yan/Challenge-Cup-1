@@ -178,6 +178,18 @@ class TestClosingIssueParsing(unittest.TestCase):
         body = "``hidden Closes #18``\n<code>Closes #19</code>\nCloses #17"
         self.assertEqual(parse_closing_issue(body), 17)
 
+    def test_literal_html_code_tags_in_hidden_markdown_do_not_hide_visible_target(self) -> None:
+        cases = (
+            "```text\n<code>\n```\nCloses #17",
+            "`<code>`\nCloses #17",
+            "``<code>``\nCloses #17",
+            "before ``\n<code>\n`` after\nCloses #17",
+            "<!-- <code> -->\nCloses #17",
+        )
+        for body in cases:
+            with self.subTest(body=body):
+                self.assertEqual(parse_closing_issue(body), 17)
+
     def test_rejects_overly_large_pull_body_before_markdown_scanning(self) -> None:
         self.assertIsNone(parse_closing_issue("x" * (256 * 1024) + "\nCloses #17"))
 

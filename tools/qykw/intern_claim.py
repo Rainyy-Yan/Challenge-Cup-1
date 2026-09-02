@@ -488,10 +488,11 @@ def parse_closing_issue(body: str) -> int | None:
 
     if not isinstance(body, str) or len(body.encode("utf-8")) > _MAX_CLOSING_BODY_BYTES:
         return None
-    without_html_code = _strip_html_code(body)
+    visible_markdown = "\n".join(_visible_lines(body, preserve_inline_code=False))
+    without_html_code = _strip_html_code(visible_markdown)
     if without_html_code is None:
         return None
-    text = "\n".join(_visible_lines(without_html_code, preserve_inline_code=False))
+    text = without_html_code
     matches = list(_CLOSING.finditer(text))
     references = list(_ISSUE_REF.finditer(text))
     if len(matches) != 1 or len(references) != 1:
