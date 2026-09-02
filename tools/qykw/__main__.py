@@ -6,12 +6,23 @@ import argparse
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 from typing import Sequence
 
+from tools.qykw.change_phases import (
+    CHANGE_ARTIFACT_LIMITS as _CHANGE_ARTIFACT_LIMITS,
+    CHANGE_HANDLER_NAMES as _CHANGE_HANDLER_NAMES,
+    CHANGE_PHASES as _CHANGE_CLI_PHASES,
+    CHANGE_PREDECESSORS,
+    build_change_artifact,
+    validate_change_artifact,
+)
 
-_CLI_PHASES = frozenset({"control", "authorize", "analyze", "publish", "record-failure"})
+
+_REVIEW_CLI_PHASES = frozenset({"control", "authorize", "analyze", "publish", "record-failure"})
+_CLI_PHASES = _REVIEW_CLI_PHASES | _CHANGE_CLI_PHASES
 _ARTIFACT_PHASES = _CLI_PHASES | {"request"}
 _PREDECESSORS = {
     "control": frozenset({"control"}),
@@ -19,6 +30,7 @@ _PREDECESSORS = {
     "analyze": frozenset({"authorize"}),
     "publish": frozenset({"analyze"}),
     "record-failure": frozenset({"authorize", "analyze", "publish"}),
+    **CHANGE_PREDECESSORS,
 }
 _MAX_ARTIFACT_BYTES = 64 * 1024
 _ARTIFACT_KEYS = frozenset({"version", "phase", "run", "payload"})
@@ -42,17 +54,29 @@ def main(argv: Sequence[str] | None = None, *, controller: object | None = None)
     except SystemExit as error:
         return int(error.code)
     try:
-        root = args.phase in {"control", "authorize"} and (
-            not args.artifact or not Path(args.artifact).is_file()
+        if args.phase == "authorize-change" and args.artifact:
+            raise ValueError("root_artifact_not_allowed")
+        root = args.phase == "authorize-change" or (
+            args.phase in {"control", "authorize"}
+            and (not args.artifact or not Path(args.artifact).is_file())
         )
         if controller is None and (root or os.environ.get("GITHUB_ACTIONS") == "true"):
-            from tools.qykw.phases import build_production_controller
-            controller = build_production_controller(args.phase)
+            if args.phase in _CHANGE_CLI_PHASES:
+                from tools.qykw.change_phases import build_change_controller
+
+                controller = build_change_controller(args.phase)
+            else:
+                from tools.qykw.phases import build_production_controller
+
+                controller = build_production_controller(args.phase)
         if root:
-            root_method = getattr(controller, "root", None)
-            if not callable(root_method):
-                raise ValueError("root_phase_not_available")
-            result = root_method()
+            if args.phase in _CHANGE_CLI_PHASES:
+                result = _run_change_root(args.phase, controller)
+            else:
+                root_method = getattr(controller, "root", None)
+                if not callable(root_method):
+                    raise ValueError("root_phase_not_available")
+                result = root_method()
             _validate_artifact(result, expected_phase=args.phase)
         else:
             if not args.artifact:
@@ -67,6 +91,10 @@ def main(argv: Sequence[str] | None = None, *, controller: object | None = None)
 
 def _run_phase(phase: str, artifact: dict[str, object], controller: object | None,
                error_code: str | None) -> dict[str, object]:
+    if phase in _CHANGE_CLI_PHASES:
+        if error_code is not None:
+            raise ValueError("error_code_not_allowed")
+        return _run_change_phase(phase, artifact, controller)
     if artifact["phase"] not in _PREDECESSORS[phase]:
         raise ValueError("artifact_phase_mismatch")
     if phase == "control" and artifact["run"]["command"]["name"] != "停止":  # type: ignore[index]
@@ -98,29 +126,132 @@ def _run_phase(phase: str, artifact: dict[str, object], controller: object | Non
     return result
 
 
+def _run_change_root(phase: str, controller: object | None) -> dict[str, object]:
+    if phase != "authorize-change" or controller is None:
+        raise ValueError("root_phase_not_available")
+    runtime = _trusted_runtime(controller, phase)
+    method = getattr(controller, _CHANGE_HANDLER_NAMES[phase], None)
+    if not callable(method):
+        raise ValueError("phase_not_available")
+    result = method()
+    if not isinstance(result, dict) or set(result) != {"run", "payload"}:
+        raise ValueError("invalid_phase_result")
+    return _change_artifact(
+        phase,
+        result["run"],
+        result["payload"],
+        workflow_run_id=runtime.workflow_run_id,
+        controller_sha=runtime.controller_sha,
+        verification_profile=runtime.verification_profile,
+        predecessor=None,
+    )
+
+
+def _run_change_phase(
+    phase: str, artifact: dict[str, object], controller: object | None
+) -> dict[str, object]:
+    _validate_artifact(artifact)
+    if artifact["phase"] not in _PREDECESSORS[phase]:
+        raise ValueError("artifact_phase_mismatch")
+    if artifact["run"] is None:
+        raise ValueError("invalid_run_binding")
+    if controller is None:
+        raise ValueError("phase_controller_required")
+    runtime = _trusted_runtime(controller, phase)
+    expected_runtime = {
+        "controller_sha": runtime.controller_sha,
+        "verification_profile": runtime.verification_profile,
+    }
+    if (
+        artifact["workflow_run_id"] != runtime.workflow_run_id
+        or artifact["runtime"] != expected_runtime
+    ):
+        raise ValueError("artifact_runtime_mismatch")
+    method = getattr(controller, _CHANGE_HANDLER_NAMES[phase], None)
+    if not callable(method):
+        raise ValueError("phase_not_available")
+    payload = method(artifact)
+    return _change_artifact(
+        phase,
+        artifact["run"],
+        payload,
+        workflow_run_id=runtime.workflow_run_id,
+        controller_sha=runtime.controller_sha,
+        verification_profile=runtime.verification_profile,
+        predecessor=artifact,
+    )
+
+
+def _trusted_runtime(controller: object, phase: str):
+    from tools.qykw.change_phases import TrustedPhaseRuntime
+
+    runtime = getattr(controller, "runtime", None)
+    if type(runtime) is not TrustedPhaseRuntime or runtime.phase != phase:
+        raise ValueError("untrusted_phase_runtime")
+    return runtime
+
+
 def _artifact(phase: str, run: object, payload: object) -> dict[str, object]:
     result = {"version": 1, "phase": phase, "run": run, "payload": payload}
     _validate_artifact(result, expected_phase=phase)
     return result
 
 
+def _change_artifact(
+    phase: str,
+    run: object,
+    payload: object,
+    *,
+    workflow_run_id: int,
+    controller_sha: str,
+    verification_profile: str,
+    predecessor: dict[str, object] | None,
+) -> dict[str, object]:
+    return build_change_artifact(
+        phase,
+        run,
+        payload,
+        workflow_run_id=workflow_run_id,
+        controller_sha=controller_sha,
+        verification_profile=verification_profile,
+        predecessor=predecessor,
+        validate_run=_validate_run,
+    )
+
+
 def _read_artifact(path: Path) -> dict[str, object]:
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink() or not path.is_file() or not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
         raise ValueError("unsafe_artifact_path")
-    if path.stat().st_size > _MAX_ARTIFACT_BYTES:
+    largest = max(_MAX_ARTIFACT_BYTES, *_CHANGE_ARTIFACT_LIMITS.values())
+    if path.stat().st_size > largest:
         raise ValueError("artifact_too_large")
     raw = path.read_bytes()
-    if len(raw) > _MAX_ARTIFACT_BYTES:
+    if len(raw) > largest:
         raise ValueError("artifact_too_large")
     try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError("invalid_artifact_json") from error
     _validate_artifact(payload)
+    phase = payload.get("phase")
+    limit = _CHANGE_ARTIFACT_LIMITS.get(phase, _MAX_ARTIFACT_BYTES)
+    if len(raw) > limit:
+        raise ValueError("artifact_too_large")
+    if phase in _CHANGE_CLI_PHASES and path.name != payload["file"]["name"]:
+        raise ValueError("artifact_file_mismatch")
     return payload
 
 
 def _validate_artifact(payload: object, *, expected_phase: str | None = None) -> None:
+    if isinstance(payload, dict) and (
+        payload.get("phase") in _CHANGE_CLI_PHASES or "schema_version" in payload
+    ):
+        _validate_change_artifact(payload, expected_phase=expected_phase)
+        return
     if not isinstance(payload, dict) or set(payload) != _ARTIFACT_KEYS:
         raise ValueError("invalid_artifact_schema")
     phase = payload.get("phase")
@@ -139,6 +270,30 @@ def _validate_artifact(payload: object, *, expected_phase: str | None = None) ->
         _validate_skipped_payload(payload["payload"])
         return
     _validate_payload(phase, payload.get("payload"))
+
+
+def _validate_change_artifact(
+    payload: object, *, expected_phase: str | None = None
+) -> None:
+    validate_change_artifact(
+        payload,
+        expected_phase=expected_phase,
+        validate_run=_validate_run,
+    )
+
+
+def _unique_object(items: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    del value
+    raise ValueError("invalid_json_constant")
 
 
 def _validate_run(run: object) -> None:
@@ -258,8 +413,12 @@ def _write_artifact(path: Path, payload: dict[str, object]) -> None:
     if not path.parent.exists() or path.parent.is_symlink():
         raise ValueError("unsafe_output_path")
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > _MAX_ARTIFACT_BYTES:
+    phase = payload.get("phase")
+    limit = _CHANGE_ARTIFACT_LIMITS.get(phase, _MAX_ARTIFACT_BYTES)
+    if len(encoded) > limit:
         raise ValueError("artifact_too_large")
+    if phase in _CHANGE_CLI_PHASES and path.name != payload["file"]["name"]:
+        raise ValueError("artifact_file_mismatch")
     with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=".qykw-artifact-", delete=False) as temporary:
         temporary.write(encoded)
         temporary_path = Path(temporary.name)

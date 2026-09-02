@@ -56,6 +56,8 @@ class ProductionPhaseController:
             return _skipped(self.phase, reason)
         if self.phase == "control":
             return self._control_event(event)
+        if getattr(getattr(event, "command", None), "mode", None) is CommandMode.CHANGE:
+            return _skipped("authorize", "review_lane_noop")
         return self._authorize_event(event)
 
     def authorize(self, artifact: dict[str, object]) -> dict[str, object]:
@@ -104,6 +106,8 @@ class ProductionPhaseController:
         run = _run_from_artifact(artifact)
         if run is None:
             return _skipped("publish", "upstream_skipped")
+        if run.command.mode is CommandMode.CHANGE:
+            return _published_artifact(run, False, "review_lane_noop")
         payload = artifact["payload"]
         if not isinstance(payload, dict) or payload.get("status") != "completed":
             return _published_artifact(run, False, str(payload.get("status", "invalid")) if isinstance(payload, dict) else "invalid")
