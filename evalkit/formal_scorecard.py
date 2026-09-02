@@ -124,8 +124,14 @@ def _is_machine_owned(identity: object) -> bool:
     normalised = _normalise_identity(identity)
     if normalised is None:
         return False
-    tokens = re.findall(r"[a-z0-9]+", normalised)
-    return any(token in MACHINE_OWNED_IDENTITIES for token in tokens)
+    canonical = re.sub(r"[^a-z0-9]+", "", normalised)
+    return any(fragment in canonical for fragment in MACHINE_OWNED_IDENTITIES)
+
+
+def _canonical_case_id(case_id: object) -> str | None:
+    if not isinstance(case_id, str) or not case_id.strip():
+        return None
+    return case_id.strip().casefold()
 
 
 def _reviewer_values(
@@ -202,7 +208,7 @@ def _validate_records(
     key: str,
     allowed: set[str],
     reviewers: list[str] | None,
-    case_ids: set[str],
+    case_profiles: dict[str, str],
     errors: list[str],
 ) -> list[dict]:
     records = data.get(key)
@@ -235,7 +241,12 @@ def _validate_records(
             record_ids.add(record_id)
 
         case_id = record.get("case_id")
-        if not isinstance(case_id, str) or not case_id or case_id not in case_ids:
+        canonical_case_id = _canonical_case_id(case_id)
+        if not isinstance(case_id, str) or canonical_case_id is None:
+            errors.append(f"{singular} {display_id} references an unknown case_id")
+        elif case_id != case_id.strip():
+            errors.append(f"{singular} {display_id} case_id must equal its stripped form")
+        elif canonical_case_id not in case_profiles:
             errors.append(f"{singular} {display_id} references an unknown case_id")
         if prohibited.intersection(record):
             errors.append(f"{singular} {display_id} exposes a prohibited system conclusion")
@@ -316,50 +327,76 @@ def validate_truth(data: dict) -> list[str]:
     else:
         reviewer_ids = [reviewer for reviewer in reviewers if reviewer is not None]
 
-    cases = data.get("cases")
+    dataset = data.get("dataset")
+    cases = dataset.get("cases") if isinstance(dataset, dict) else None
     if not isinstance(cases, list):
-        return errors + ["cases must be a list"]
+        return errors + ["dataset.cases must be a list"]
     if len(cases) < 50:
         errors.append("at least 50 cases are required")
 
-    dataset = data.get("dataset")
-    profile_ids = dataset.get("profile_ids") if isinstance(dataset, dict) else None
-    valid_profile_ids = {
-        profile_id.strip()
-        for profile_id in profile_ids
-        if isinstance(profile_id, str) and profile_id.strip()
-    } if isinstance(profile_ids, list) else set()
+    profile_ids = dataset.get("profile_ids")
+    valid_profile_ids: set[str] = set()
+    if isinstance(profile_ids, list):
+        for profile_id in profile_ids:
+            if not isinstance(profile_id, str) or not profile_id.strip():
+                continue
+            canonical_profile_id = profile_id.strip().casefold()
+            if canonical_profile_id in valid_profile_ids:
+                errors.append(f"duplicate dataset profile_id: {profile_id}")
+            else:
+                valid_profile_ids.add(canonical_profile_id)
     if len(valid_profile_ids) < 3:
         errors.append("dataset.profile_ids must contain at least 3 distinct non-empty values")
+    profile_universe_valid = len(valid_profile_ids) >= 3
 
-    case_ids: set[str] = set()
+    case_profiles: dict[str, str] = {}
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             errors.append(f"case {index} must be an object")
             continue
         case_id = case.get("id")
-        display_id = case_id if isinstance(case_id, str) and case_id else str(index)
-        if not isinstance(case_id, str) or not case_id:
+        canonical_case_id = _canonical_case_id(case_id)
+        display_id = case_id.strip() if canonical_case_id is not None else str(index)
+        if canonical_case_id is None:
             errors.append(f"case {index} needs a non-empty id")
-        elif case_id in case_ids:
-            errors.append(f"duplicate case id: {case_id}")
-        else:
-            case_ids.add(case_id)
+            continue
+        if case_id != case_id.strip():
+            errors.append(f"case {display_id} must equal its stripped form")
+        if canonical_case_id in case_profiles:
+            errors.append(f"duplicate case id: {display_id}")
+            continue
+
+        profile_id = case.get("profile_id")
+        canonical_profile_id = _normalise_identity(profile_id)
+        if canonical_profile_id is None:
+            errors.append(f"case {display_id} needs a non-empty profile_id")
+            continue
+        if profile_universe_valid and canonical_profile_id not in valid_profile_ids:
+            errors.append(f"case {display_id} references an undeclared profile_id")
+        case_profiles[canonical_case_id] = canonical_profile_id
 
     claims = _validate_records(
-        data, "claims", HALLUCINATION_LABELS, reviewer_ids, case_ids, errors
+        data, "claims", HALLUCINATION_LABELS, reviewer_ids, case_profiles, errors
     )
     adaptations = _validate_records(
-        data, "adaptations", ADAPTATION_LABELS, reviewer_ids, case_ids, errors
+        data, "adaptations", ADAPTATION_LABELS, reviewer_ids, case_profiles, errors
     )
     for key, records in (("claims", claims), ("adaptations", adaptations)):
         distinct_case_ids = {
-            record.get("case_id")
+            _canonical_case_id(record.get("case_id"))
             for record in records
-            if isinstance(record.get("case_id"), str) and record["case_id"] in case_ids
+            if (
+                isinstance(record.get("case_id"), str)
+                and record["case_id"] == record["case_id"].strip()
+                and _canonical_case_id(record.get("case_id")) in case_profiles
+            )
         }
-        if len(case_ids) >= 50 and len(distinct_case_ids) < 50:
+        if len(case_profiles) >= 50 and len(distinct_case_ids) < 50:
             errors.append(f"{key} must cover at least 50 distinct case_ids")
+        elif len(case_profiles) >= 50:
+            covered_profiles = {case_profiles[case_id] for case_id in distinct_case_ids}
+            if len(covered_profiles) < 3:
+                errors.append(f"{key} must represent at least 3 distinct profile_ids")
         assessable_share = (
             sum(record.get("final_label") != "unassessable" for record in records) / len(records)
             if records
@@ -434,12 +471,12 @@ def build_scorecard(data: dict) -> dict:
     claims = data["claims"]
     adaptations = data["adaptations"]
     hallucination_records = [
-        {"case_id": record["case_id"], "label": record["final_label"]}
+        {"case_id": _canonical_case_id(record["case_id"]), "label": record["final_label"]}
         for record in claims
         if record["final_label"] != "unassessable"
     ]
     adaptation_records = [
-        {"case_id": record["case_id"], "label": record["final_label"]}
+        {"case_id": _canonical_case_id(record["case_id"]), "label": record["final_label"]}
         for record in adaptations
         if record["final_label"] != "unassessable"
     ]

@@ -54,10 +54,12 @@ def valid_truth() -> dict:
         "seed": 731,
         "blind_to_system_output": True,
         "independent_ratings": True,
-        "dataset": {"profile_ids": ["profile-1", "profile-2", "profile-3"]},
+        "dataset": {
+            "profile_ids": ["profile-1", "profile-2", "profile-3"],
+            "cases": cases,
+        },
         "provenance": {"repository_sha": "a" * 40},
         "reviewers": ["reviewer-one", "reviewer-two"],
-        "cases": cases,
         "claims": claims,
         "adaptations": adaptations,
         "coverage_universe": [
@@ -114,7 +116,7 @@ class TestIntervals(unittest.TestCase):
 class TestTruthValidation(unittest.TestCase):
     def test_rejects_fewer_than_fifty_cases(self):
         truth = valid_truth()
-        truth["cases"] = truth["cases"][:49]
+        truth["dataset"]["cases"] = truth["dataset"]["cases"][:49]
         truth["claims"] = truth["claims"][:49]
         truth["adaptations"] = truth["adaptations"][:49]
         self.assertEqual(validate_truth(truth), ["at least 50 cases are required"])
@@ -137,7 +139,7 @@ class TestTruthValidation(unittest.TestCase):
 
     def test_rejects_duplicate_case_ids(self):
         truth = valid_truth()
-        truth["cases"][1]["id"] = truth["cases"][0]["id"]
+        truth["dataset"]["cases"][1]["id"] = truth["dataset"]["cases"][0]["id"]
         for records in (truth["claims"], truth["adaptations"]):
             records[1]["case_id"] = "case-000"
         self.assertEqual(validate_truth(truth), ["duplicate case id: case-000"])
@@ -159,7 +161,7 @@ class TestTruthValidation(unittest.TestCase):
         )
 
     def test_rejects_structured_machine_reviewer_tokens(self):
-        for identity in ("agent-1", "GPT_Reviewer"):
+        for identity in ("agent-1", "GPT_Reviewer", "agent1", "GPTReviewer"):
             with self.subTest(identity=identity):
                 truth = valid_truth()
                 truth["reviewers"] = [identity, "reviewer-two"]
@@ -405,3 +407,50 @@ class TestTruthValidation(unittest.TestCase):
                     validate_truth(truth),
                     ["reviewers must contain exactly two distinct non-empty identities"],
                 )
+
+    def test_rejects_whitespace_duplicate_dataset_case_ids(self):
+        truth = valid_truth()
+        truth["dataset"]["cases"][1]["id"] = " case-000 "
+        truth["claims"][1]["case_id"] = " case-000 "
+        truth["adaptations"][1]["case_id"] = " case-000 "
+        errors = validate_truth(truth)
+        self.assertIn("case case-000 must equal its stripped form", errors)
+        self.assertIn("duplicate case id: case-000", errors)
+        self.assertIn("claim claim-001 case_id must equal its stripped form", errors)
+        self.assertIn("adaptation adaptation-001 case_id must equal its stripped form", errors)
+
+    def test_rejects_case_profile_not_declared_by_dataset(self):
+        truth = valid_truth()
+        truth["dataset"]["cases"][0]["profile_id"] = "unknown-profile"
+        self.assertEqual(
+            validate_truth(truth),
+            ["case case-000 references an undeclared profile_id"],
+        )
+
+    def test_rejects_case_coverage_that_represents_one_profile(self):
+        truth = valid_truth()
+        for case in truth["dataset"]["cases"]:
+            case["profile_id"] = "profile-1"
+        self.assertEqual(
+            validate_truth(truth),
+            [
+                "claims must represent at least 3 distinct profile_ids",
+                "adaptations must represent at least 3 distinct profile_ids",
+            ],
+        )
+
+    def test_rejects_casefolded_record_reference_that_inflates_case_coverage(self):
+        truth = valid_truth()
+        truth["claims"][1]["case_id"] = "CASE-000"
+        self.assertEqual(
+            validate_truth(truth),
+            ["claims must cover at least 50 distinct case_ids"],
+        )
+
+    def test_rejects_normalized_duplicate_dataset_profile_ids(self):
+        truth = valid_truth()
+        truth["dataset"]["profile_ids"] = [" Profile-1 ", "profile-1", "profile-2", "profile-3"]
+        self.assertEqual(
+            validate_truth(truth),
+            ["duplicate dataset profile_id: profile-1"],
+        )
