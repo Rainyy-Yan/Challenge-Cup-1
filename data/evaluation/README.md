@@ -7,18 +7,21 @@ a separately controlled truth file; the empty template is intentionally
 
 ## Freeze before scoring
 
-Freeze the case list, learner profiles, system commit, seed, coverage universe,
-and the system outputs before reviewers receive their materials. Record the
-repository Git SHA and cryptographic hashes for frozen input and output artifacts
-in the evidence register. Do not replace a frozen artifact in place: make a new
-dataset identifier and preserve its predecessor.
+Freeze the case list, learner profiles, seed, coverage universe, and the system
+outputs before reviewers receive their materials. Record
+`provenance.repository_sha` and `provenance.artifact_manifest_sha256` (do not
+add a root-level commit field) plus cryptographic hashes for frozen input and output
+artifacts in the evidence register. Root `version` and `artifact_manifest.version`
+must be exact integer `1`; Boolean values are rejected. Do not replace a frozen
+artifact in place: make a new dataset identifier and preserve its predecessor.
 
 The version-1 `artifact_manifest` binds the truth rows to actual frozen UTF-8
-content. Every artifact has exactly `id`, `kind`, `subject_id`, `content`,
+content. Artifact records use exactly `id`, `kind`, `subject_id`, `content`,
 `sha256`, `citation_ids`, and `review_status`; `claim_output` and
 `resource_output` additionally require `case_id`, while all other kinds forbid
-`case_id`. Allowed kinds are `profile_snapshot`, `case_input`, `claim_output`,
-`resource_output`, and `coverage_evidence`.
+`case_id`. Citation records use exactly `id`, `source_id`, `locator`, `excerpt`,
+`sha256`, and `review_status`. Allowed artifact kinds are `profile_snapshot`,
+`case_input`, `claim_output`, `resource_output`, and `coverage_evidence`.
 
 Ownership is bidirectional rather than an ID-only declaration:
 
@@ -39,13 +42,14 @@ extra artifacts competing for an existing subject are rejected. Coverage may
 reference multiple evidence artifacts for one knowledge point, but every
 manifested coverage artifact must appear in at least one coverage row.
 
-Profile-snapshot content hashes must be unique. Claim, resource, and coverage
-content may legitimately repeat across different owned subjects, so those
-hashes are not globally unique; ownership and the closed ID sets prevent row
-inflation. Case-input hashes may repeat across different profiles, while the
-required 50 unique `(profile_snapshot.sha256, case_input.sha256)` pairs prevent
-duplicate cases under the same profile. Claim, resource, and coverage artifacts
-must cite at least one approved citation.
+Profile-snapshot content hashes must be unique. Claim and resource content may
+legitimately repeat across different owned subjects, so those hashes are not
+globally unique; ownership and the closed ID sets prevent row inflation.
+Case-input hashes may repeat across different profiles, while the required 50
+unique `(profile_snapshot.sha256, case_input.sha256)` pairs prevent duplicate
+cases under the same profile. Claim, resource, and coverage artifacts must cite
+at least one approved citation. A covered knowledge point requires at least one
+valid evidence ID; an uncovered point must use exactly `"evidence_ids": []`.
 
 Every citation has exactly `id`, `source_id`, `locator`, `excerpt`, `sha256`,
 and `review_status`. Its digest binds the UTF-8 excerpt; an artifact digest binds
@@ -57,11 +61,11 @@ py -3 -X utf8 -c "import hashlib; print(hashlib.sha256('exact content'.encode('u
 
 After the artifacts and citations are final, compute the manifest digest from
 canonical JSON (`sort_keys=True`, compact separators, and `ensure_ascii=False`)
-and store it as `provenance.artifact_manifest_sha256`:
+and store it as `provenance.artifact_manifest_sha256`. This runnable command
+uses the same canonicalization as the scorer (replace the placeholder path):
 
-```python
-canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+```powershell
+py -3 -X utf8 -c "import hashlib,json,pathlib; d=json.loads(pathlib.Path('manifest.json').read_text(encoding='utf-8')); c=json.dumps(d,sort_keys=True,separators=(',',':'),ensure_ascii=False); print(hashlib.sha256(c.encode('utf-8')).hexdigest())"
 ```
 
 Freeze first, then hash, then assign reviewers. Any later content, citation, or
@@ -82,7 +86,8 @@ the final label through `adjudicated_by`. Never use a reviewer as their own
 adjudicator. Mark genuinely undecidable material as `unassessable` rather than
 inventing a conclusion.
 
-For each of claims and adaptations, at least 95% of all rows must have two
+For each of claims and adaptations, rows must cover at least 50 distinct cases
+and represent at least three profiles. At least 95% of all rows must have two
 non-`unassessable` reviewer labels, and those common valid pairs must span at
 least 50 distinct cases. Cohen's Kappa is computed only from those pairs. The
 separate final-label assessable-share gate also remains 95%.

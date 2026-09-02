@@ -74,7 +74,9 @@ python3 -X utf8 server.py
 ### 正式指标评分（独立人工真值）
 
 `evalkit.run_eval` 的规则评测用于内部回归；它不能证明专业正确性或真实适配效果。
-正式 G2 指标只接受冻结的独立人工真值，并由离线评分器复算：
+正式 G2 指标只接受冻结的独立人工真值，并由离线评分器复算。完整的冻结、version-1
+artifact manifest/hash、双人盲评、共同有效 pair、仲裁和证据登记操作见
+[正式指标操作指南](data/evaluation/README.md)：
 
 **Windows PowerShell**
 
@@ -102,7 +104,7 @@ test "$?" -eq 2 && test -f "$scorecard_out/scorecard.json" && test -f "$scorecar
 评分器对可评估的 `pass` 或 `fail` 返回退出码 0，对无效或不完整的
 `not_assessable` 返回退出码 2。其公式、保守置信区间、输入门禁与信任边界见
 [官方指标数学口径与验收](docs/官方指标数学口径与验收.md)；冻结、盲评、仲裁和
-证据登记说明见[data/evaluation/README.md](data/evaluation/README.md)。空模板、
+证据登记说明见[正式指标操作指南](data/evaluation/README.md)。空模板、
 规划文件和未签字的材料均不能证明官方三项指标达标。
 
 ### 接真模型

@@ -12,12 +12,12 @@
 
 ## Global Constraints
 
-- Official taskbook clauses are the source of truth; internal stretch targets must be labeled as internal.
-- Formal evidence requires at least 50 differentiated test cases and at least 3 learner profiles.
+- Official taskbook clauses are the source of truth. Page 8 lists fewer than 50 test cases as an incomplete test-plan deduction, so `>=50` is the project completeness boundary, not a separately stated full-score tier; internal stretch targets must be labeled as internal.
+- Formal evidence requires at least 50 differentiated test cases and at least 3 learner profiles. Blind review, 10,000 case-cluster bootstrap, conservative intervals, and the evidence state machine are internal credibility strengthening.
 - Official thresholds are hallucination rate `< 0.05`, adaptation accuracy `>= 0.85`, and core-knowledge coverage `>= 0.90`.
 - Machine processing must never create human-review identities, labels, authorization conclusions, or `human_verified` status.
 - Formal scoring is offline and deterministic; it must not read `.env` or call a model provider.
-- A metric passes only on the conservative confidence-interval boundary, not the point estimate alone.
+- A metric passes only on the conservative confidence-interval boundary, not the point estimate alone. Thresholds have one source: `config.py` (`TARGET_HALLUCINATION`, `TARGET_ADAPT`, `TARGET_COVERAGE`, `FORMAL_KAPPA_MIN`).
 - Existing frontend behavior and model routing are out of scope unless a regression blocks the formal workflow.
 
 ---
@@ -99,7 +99,7 @@ Run the command from Step 2. Expected: all interval tests pass.
 
 - [ ] **Step 5: Write failing truth-validation tests**
 
-Cover fewer than 50 cases, fewer than 3 profiles, malformed SHA, duplicated IDs, reviewer identity collisions, exposed system conclusions, incomplete labels, unresolved disagreements, invalid coverage weights, missing evidence for covered points, low assessable share, and low/undefined Kappa.
+Cover fewer than 50 cases, fewer than 3 profiles, malformed repository/manifest SHA, Boolean versions, duplicated IDs, reviewer identity collisions, exposed system conclusions, incomplete labels, unresolved disagreements, invalid coverage weights, missing evidence for covered points, non-empty evidence on uncovered points, low assessable/common-pair share, fewer than 50 common-pair cases, and low/undefined Kappa.
 
 - [ ] **Step 6: Run validation tests and confirm RED**
 
@@ -150,11 +150,11 @@ Expected: failures because report building and CLI output do not exist.
 
 - [ ] **Step 3: Implement report building and rendering**
 
-The JSON must include provenance, data-quality gates, Kappa, numerator, denominator, point estimate, 95% interval, threshold, conservative decision, limitations, and `overall_status`. The Markdown must render the same values and explicitly state that this is an evidence gate, not the jury's 100-point score.
+The JSON must include provenance (`repository_sha`, canonical `artifact_manifest_sha256`), data-quality gates, Kappa n/agreement/value, assessable/common-pair fields, numerator, denominator, point estimate, Wilson/bootstrap/conservative interval, threshold, conservative decision, limitations, and `overall_status`. Coverage is weighted census evidence and has no CI. The Markdown must render the same values and explicitly state that this is an evidence gate, not the jury's 100-point score.
 
 - [ ] **Step 4: Add a non-claiming template and operator guide**
 
-The template must contain no invented human names or conclusions. Its status stays `draft`, and the guide must explain freezing, blinding, adjudication, hashing, scoring, and evidence registration.
+The template must contain no invented human names or conclusions. Its status stays `draft`; the guide must explain version-1 strict artifact/citation manifests, UTF-8 content/excerpt hashes, canonical manifest hash, profile/case/output/coverage reverse ownership and five-kind closure, the `covered` evidence-list rule, blinding, adjudication, scoring, and evidence registration.
 
 - [ ] **Step 5: Run end-to-end tests and confirm GREEN**
 

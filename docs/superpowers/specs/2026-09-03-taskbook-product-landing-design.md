@@ -15,11 +15,8 @@
 
 官方要求与内部强化门槛分开管理：
 
-- 官方硬要求包括一个垂直领域、至少三个职责明确的智能体、三种资源形态、动态
-  反馈、三类可视化、源码与部署说明、单元测试、至少两组差异化初始数据，以及
-  满分档的三类画像、五十组以上测试和三项指标门槛。
-- 三百条知识切片、双人盲评、置信区间、证据索引状态机属于项目为提高可信度设置
-  的内部门禁，不得写成官方原文要求。
+- 官方要求包括一个垂直领域、至少三个职责明确的智能体、三种资源形态、动态反馈、三类可视化、源码与部署说明、单元测试、至少两组差异化初始数据及三项指标门槛。第 8 页还将“测试用例不足 50 组”列为测试方案不完整的扣分条件，因此项目以 `>=50` 组为满足完整性边界；任务书未将“50+”单列为满分档原文。
+- 三百条知识切片、双人盲评、10,000 次 case-cluster Bootstrap、保守 CI 和证据索引状态机属于项目为提高可信度设置的内部门禁，不得写成官方原文要求。
 - 本轮不新增生产鉴权、数据库、多租户、移动端、第二领域，也不继续做非阻塞视觉
   微调。
 
@@ -63,7 +60,7 @@
 修改知识库。输入、计算和输出分离：
 
 ```text
-冻结的 50+ 用例与系统输出
+冻结的 >=50 用例、输出与严格 artifact manifest
         |
         v
 两名独立盲评表 --分歧--> 第三人仲裁
@@ -82,13 +79,15 @@ scorecard.json + scorecard.md
 
 真值文件包含：
 
-- `dataset_id`、`frozen_at`、`system_commit`、`seed` 和不少于 50 个 `case_id`；
-- 三类画像标识；
+- `dataset_id`、`frozen_at`、`seed`、不少于 50 个 `case_id`，以及 `provenance.repository_sha` 与 `provenance.artifact_manifest_sha256`；根级不设置提交字段；
+- 至少三类画像标识和 `dataset.profile_artifact_ids`；根级 `version` 与 `artifact_manifest.version` 都是严格整数 `1`，拒绝布尔值；
 - 独立性声明，包括两名评分者、是否隐藏系统结论、是否独立完成；
 - `claims`：断言、两名评分者标签、最终仲裁标签；
 - `adaptations`：学习者、资源、两名评分者标签、最终仲裁标签；
 - `coverage_universe`：预先冻结的核心知识点全集、权重、是否产出有效资源及证据 ID；
 - 仲裁者身份和所有分歧条目的仲裁结果。
+
+version-1 manifest 包含字段白名单的 `artifacts` 与 `citations`。artifact 的 UTF-8 `content` 和 citation 的 UTF-8 `excerpt` 各自须匹配 SHA-256；manifest canonical JSON（排序键、紧凑分隔符、`ensure_ascii=False`）的 SHA-256 须等于 provenance 声明。五类 artifact 是 profile snapshot、case input、claim output、resource output、coverage evidence。profile/case/claim/resource/coverage 必须按 `subject_id`（输出另按 `case_id`）完成反向 ownership 和每类 ID 闭集校验；profile 内容唯一，至少有 50 个唯一 profile-snapshot/case-input 哈希组合。claim/resource 可在不同合法 owner 间重复正文。coverage evidence 必须有 approved citation；`covered=true` 至少一项 evidence，`covered=false` 必须为 `evidence_ids=[]`。绑定不证明外部来源、摘录、签名或身份真实性。
 
 评分者身份使用项目内稳定代号；公开报告不写联系方式或其他个人敏感信息。
 
@@ -97,12 +96,12 @@ scorecard.json + scorecard.md
 出现以下任一情况，报告状态为 `not_assessable`，不得给出达标结论：
 
 - 唯一测试用例少于 50，或差异化画像少于 3；
-- 系统提交不是 40 位 Git SHA，或数据集缺少冻结时间和固定种子；
+- `provenance.repository_sha` 不是 40 位 Git SHA、manifest hash 不匹配，或数据集缺少冻结时间和固定种子；
 - 评分者少于两人、评分者相同、看过系统结论或未独立评分；
-- 两名评分者的共同有效标注不足，或 Cohen's Kappa 小于 0.60；
+- 任一类别未覆盖 50 个不同 case 或至少三类 profile、最终可评估占比低于 95%，共同有效双评 pair 少于 50 个不同 case 或其占比低于 95%，或 Cohen's Kappa 小于 `config.FORMAL_KAPPA_MIN`（当前 0.60）；
 - 分歧没有第三人仲裁，或仲裁者与两名评分者重合；
 - `无法判断` 比例导致可判定率低于 95%；
-- 核心知识点全集存在未判定项、重复 ID、非正权重或缺少证据引用。
+- 核心知识点全集存在未判定项、重复 ID、非正权重；已覆盖点缺少证据引用，或未覆盖点的证据列表非空。
 
 ## 5. 数学口径
 
@@ -117,7 +116,7 @@ H = (sum y_i) / n_claim
 断言在同一测试用例内可能相关，因此不把所有断言错误地视作独立伯努利样本。
 置信区间使用按 `case_id` 聚类的非参数 Bootstrap：每轮有放回抽取同样数量的测试
 用例，带出该用例的全部断言，重算 `H`；固定随机种子，重复 10,000 次，取 2.5%
-和 97.5% 分位数。只有 95% 区间上界严格小于 0.05 才判定该项达标。
+和 97.5% 分位数。报告同时给出 Wilson、Bootstrap 与两者保守包络；唯一阈值来源为 `config.TARGET_HALLUCINATION`（当前 0.05），只有保守包络上界严格小于它才达标。
 
 ### 5.2 画像-资源难度适配准确率
 
@@ -128,7 +127,7 @@ A = (sum a_i) / n_fit
 ```
 
 同样按 `case_id` 聚类执行 10,000 次 Bootstrap。只有 95% 区间下界不小于 0.85
-才判定达标。系统内部的难度值、掌握概率和原规则不进入评分者材料。
+才判定达标。唯一阈值来源为 `config.TARGET_ADAPT`（当前 0.85）。系统内部的难度值、掌握概率和原规则不进入评分者材料。
 
 ### 5.3 核心知识点覆盖率
 
@@ -139,8 +138,7 @@ A = (sum a_i) / n_fit
 C = sum(w_k * c_k) / sum(w_k)
 ```
 
-这是对完整冻结全集的普查，不做抽样置信区间。只有所有核心知识点均有明确判定且
-`C >= 0.90` 才达标。
+这是对完整冻结全集的加权普查，不做抽样置信区间。唯一阈值来源为 `config.TARGET_COVERAGE`（当前 0.90）；只有所有核心知识点均有明确判定且 `C >=` 该值才达标。
 
 ### 5.4 评分者一致性
 
@@ -150,8 +148,7 @@ C = sum(w_k * c_k) / sum(w_k)
 kappa = (p_o - p_e) / (1 - p_e)
 ```
 
-`p_o` 为实际一致率，`p_e` 为按两名评分者边际分布计算的随机一致率。`kappa < 0.60`
-时不能取平均或强行出分，必须对齐标准后重新盲评。
+`p_o` 为实际一致率，`p_e` 为按两名评分者边际分布计算的随机一致率。`kappa < config.FORMAL_KAPPA_MIN`（当前 0.60）时不能取平均或强行出分，必须对齐标准后重新盲评。报告还必须显示每类 Kappa 的 n/agreement/value、最终 assessable share 与 common-pair fields。
 
 ### 5.5 总结论
 
@@ -167,8 +164,7 @@ kappa = (p_o - p_e) / (1 - p_e)
 作为评测负责人，肖云涵需要把候选提交 SHA、随机种子、50 组以上用例和系统输出
 冻结，使任何人能够确认评分针对的是哪一版产品。
 
-验收：真值文件通过结构校验；SHA、时间、种子、用例数和画像数进入报告；修改任一
-冻结字段会改变文件哈希。
+验收：真值文件通过结构校验；repository SHA、manifest hash、时间、种子、用例数、画像数、共同 pair 与可评估字段进入报告；修改任一冻结内容或引用会改变相应哈希。
 
 ### US-2 领域评分者独立盲评
 
@@ -230,7 +226,7 @@ kappa = (p_o - p_e) / (1 - p_e)
 
 ## 9. 决策记录
 
-- ADR-001：官方原文件为上位规范，仓库内部基线只用于补充验收细节。
+- ADR-001：官方任务书为上位规范；第 8 页“测试用例不足 50 组”为方案不完整扣分条件，项目据此以 `>=50` 为完整性边界，但不虚称为明确满分档。双人盲评、10,000 次 case-cluster Bootstrap、保守 CI 与证据状态机仅补充可信度。
 - ADR-002：模型负责生成语言，数学、状态机、审计门禁和最终计分由确定性代码负责。
 - ADR-003：正式指标只接受独立人工真值；自动规则结果保留为内部一致性和回归证据。
 - ADR-004：置信区间按测试用例聚类 Bootstrap，避免把同一会话中的多条断言错误地
