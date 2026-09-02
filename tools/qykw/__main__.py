@@ -480,10 +480,25 @@ def _error(code: str) -> int:
 
 
 def _safe_code(error: BaseException) -> str:
+    from tools.qykw.config import ConfigError
+    from tools.qykw.context import ContextError
+    from tools.qykw.domain import InferenceError, InferenceErrorCode
+    from tools.qykw.github import GitHubError
+    from tools.qykw.prompts import PromptError
     from tools.qykw.provider import ProviderError
 
     if isinstance(error, ProviderError):
         return f"inference_{error.code.value}"
+    if isinstance(error, InferenceError) and isinstance(error.failure.code, InferenceErrorCode):
+        return f"inference_{error.failure.code.value}"
+    for error_type, public_code in (
+        (ConfigError, "analysis_config_failed"),
+        (ContextError, "analysis_context_failed"),
+        (GitHubError, "analysis_github_failed"),
+        (PromptError, "analysis_prompt_failed"),
+    ):
+        if isinstance(error, error_type):
+            return public_code
     code = str(error)
     return code if code in _PUBLIC_ERROR_CODES else "phase_failed"
 
