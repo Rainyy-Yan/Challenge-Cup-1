@@ -106,14 +106,14 @@
       "gate": "G2",
       "category": "statistical-result",
       "title": "经人工签字批准的正式指标计分卡",
-      "path": "delivery/evidence/formal-scorecard/scorecard.json",
+      "path": "delivery/evidence/G2/EV-G2-FORMAL-SCORECARD-APPROVED-001/UTC_TIMESTAMP_CANDIDATE_SHA/scorecard.json",
       "status": "planned",
       "owner": "unassigned",
       "related_issues": [67],
       "source": "externally signed frozen formal truth, independent reviews, and adjudication",
       "repo_commit": null,
       "visibility": "restricted",
-      "limitations": "外部独立评分、仲裁、签字和冻结真值尚未实际形成；本计划条目不能作为正式指标或官方验收已完成的证明。"
+      "limitations": "外部独立评分、仲裁、签字和冻结真值尚未实际形成；每次冻结必须创建新的不可变运行目录，旧记录改为 superseded，禁止原地提升此计划路径；本条不能作为正式指标或官方验收已完成的证明。"
     },
     {
       "id": "EV-G2-EVAL-SUMMARY-001",

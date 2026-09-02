@@ -16,29 +16,56 @@ scorecard、PPT、视频、盖章报名表和外部提交回执仍未形成。�
 
 不需要装任何第三方包，不需要联网，不需要 API key。
 
-```bash
-cd agentedu
+在仓库根目录按所用系统完整运行其中一块；最后一条会启动服务并持续占用当前终端。
 
+**Windows PowerShell**
+
+```powershell
 # 1. 跑一遍完整闭环，看调度时间线
-python3 cli.py P-A
-python3 cli.py P-C          # 换个基础更弱的学习者，路径会完全不同
+py -3 -X utf8 cli.py P-A
+py -3 -X utf8 cli.py P-C          # 换个基础更弱的学习者，路径会完全不同
 
 # 2. 跑单元测试
 py -3 -X utf8 -m unittest discover -s tests -v
 
 # 3. 跑 50 组批量评测，出三项指标
-python3 -m evalkit.run_eval --n 50
+py -3 -X utf8 -m evalkit.run_eval --n 50
 
 # 4. 红队测试：按幻觉类型分别看检出率，暴露短板
-python3 -m evalkit.redteam
+py -3 -X utf8 -m evalkit.redteam
 
 # 5. 消融对照：分别关掉审核和辩论，看各自贡献
-AGENTEDU_INJECT=0.3 python3 -m evalkit.run_eval --n 50 --no-audit
-AGENTEDU_INJECT=0.3 python3 -m evalkit.run_eval --n 50 --no-debate
+$env:AGENTEDU_INJECT = '0.3'
+py -3 -X utf8 -m evalkit.run_eval --n 50 --no-audit
+py -3 -X utf8 -m evalkit.run_eval --n 50 --no-debate
+Remove-Item Env:AGENTEDU_INJECT -ErrorAction SilentlyContinue
 
-# 6. 启动唯一的在线演示入口
+# 6. 启动唯一的在线演示入口；浏览器打开 http://127.0.0.1:8000
 py -3 -X utf8 server.py
-# 浏览器打开 http://127.0.0.1:8000
+```
+
+**Linux/macOS POSIX shell**
+
+```bash
+# 1. 跑一遍完整闭环，看调度时间线
+python3 cli.py P-A
+python3 cli.py P-C          # 换个基础更弱的学习者，路径会完全不同
+
+# 2. 跑单元测试
+python3 -X utf8 -m unittest discover -s tests -v
+
+# 3. 跑 50 组批量评测，出三项指标
+python3 -X utf8 -m evalkit.run_eval --n 50
+
+# 4. 红队测试：按幻觉类型分别看检出率，暴露短板
+python3 -X utf8 -m evalkit.redteam
+
+# 5. 消融对照：分别关掉审核和辩论，看各自贡献
+AGENTEDU_INJECT=0.3 python3 -X utf8 -m evalkit.run_eval --n 50 --no-audit
+AGENTEDU_INJECT=0.3 python3 -X utf8 -m evalkit.run_eval --n 50 --no-debate
+
+# 6. 启动唯一的在线演示入口；浏览器打开 http://127.0.0.1:8000
+python3 -X utf8 server.py
 ```
 
 > **第一件事请先验第 6 步。** 如启动失败，先检查端口占用、防火墙和本机 Python；
@@ -49,13 +76,27 @@ py -3 -X utf8 server.py
 `evalkit.run_eval` 的规则评测用于内部回归；它不能证明专业正确性或真实适配效果。
 正式 G2 指标只接受冻结的独立人工真值，并由离线评分器复算：
 
+**Windows PowerShell**
+
 ```powershell
 # 空模板是刻意不完整的错误路径：预期退出码 2，仍写出 JSON/Markdown。
-py -3 -X utf8 -m evalkit.formal_scorecard --truth data/evaluation/formal_truth.template.json --out delivery/evidence/local-template-check
+$scorecardOut = Join-Path ([System.IO.Path]::GetTempPath()) ('agentedu-scorecard-' + [guid]::NewGuid())
+py -3 -X utf8 -m evalkit.formal_scorecard --truth data/evaluation/formal_truth.template.json --out $scorecardOut
 if ($LASTEXITCODE -ne 2) { throw "empty formal-truth template must be not_assessable" }
+if (-not (Test-Path (Join-Path $scorecardOut 'scorecard.json')) -or -not (Test-Path (Join-Path $scorecardOut 'scorecard.md'))) { throw "scorecard reports were not written" }
 
-# 仅在完成两名独立盲评和第三人仲裁后，替换为真实冻结真值文件。
-py -3 -X utf8 -m evalkit.formal_scorecard --truth <formal_truth.json> --out <report-directory>
+# 仅在完成两名独立盲评和第三人仲裁后，使用同一命令把模板路径和临时目录替换为实际冻结真值文件与保存目录。
+```
+
+**Linux/macOS POSIX shell**
+
+```bash
+# 空模板是刻意不完整的错误路径：预期退出码 2，仍写出 JSON/Markdown。
+scorecard_out="$(mktemp -d)"
+python3 -X utf8 -m evalkit.formal_scorecard --truth data/evaluation/formal_truth.template.json --out "$scorecard_out"
+test "$?" -eq 2 && test -f "$scorecard_out/scorecard.json" && test -f "$scorecard_out/scorecard.md"
+
+# 仅在完成两名独立盲评和第三人仲裁后，使用同一命令把模板路径和临时目录替换为实际冻结真值文件与保存目录。
 ```
 
 评分器对可评估的 `pass` 或 `fail` 返回退出码 0，对无效或不完整的
@@ -66,16 +107,20 @@ py -3 -X utf8 -m evalkit.formal_scorecard --truth <formal_truth.json> --out <rep
 
 ### 接真模型
 
-```bash
-# Windows PowerShell
+**Windows PowerShell**
+
+```powershell
 Copy-Item .env.example .env
+# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key。
+py -3 -X utf8 -m evalkit.doctor  # 先体检，六项检查，不通过别跑全流程
+```
 
-# macOS / Linux
+**Linux/macOS POSIX shell**
+
+```bash
 cp .env.example .env
-
-# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key
-
-python3 -m evalkit.doctor        # 先体检，六项检查，不通过别跑全流程
+# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key。
+python3 -X utf8 -m evalkit.doctor  # 先体检，六项检查，不通过别跑全流程
 ```
 
 程序启动时会自动读取仓库根目录 `.env`；已经存在的系统环境变量优先于 `.env`。
