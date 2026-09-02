@@ -1210,7 +1210,9 @@ class TestVerificationIntegration(WorkspaceFixture):
 
     def test_rejects_tracked_drift_extra_files_and_git_metadata(self) -> None:
         def mutate_source(_count: int, cwd: Path, _argv: tuple[str, ...]):
-            (cwd / "app.py").write_text("candidate changed source\n", encoding="utf-8")
+            target = cwd / "app.py"
+            target.chmod(0o644)
+            target.write_text("candidate changed source\n", encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "verification_workspace_changed"):
             self.verify(_Executor(on_run=mutate_source))
@@ -1270,11 +1272,12 @@ class TestVerificationIntegration(WorkspaceFixture):
             )
 
     def test_rechecks_workspace_after_container_removal(self) -> None:
-        executor = _Executor(
-            on_close=lambda: (self.workspace.root / "app.py").write_text(
-                "late background write\n", encoding="utf-8"
-            )
-        )
+        def mutate_after_close() -> None:
+            target = self.workspace.root / "app.py"
+            target.chmod(0o644)
+            target.write_text("late background write\n", encoding="utf-8")
+
+        executor = _Executor(on_close=mutate_after_close)
         with self.assertRaisesRegex(ValueError, "verification_workspace_changed"):
             self.verify(executor)
         self.assertEqual(1, executor.close_calls)
