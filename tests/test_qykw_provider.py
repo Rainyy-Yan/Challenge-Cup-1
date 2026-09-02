@@ -12,7 +12,7 @@ from tools.qykw.domain import (
     CommandMode,
     CommandName,
     CommandRequest,
-    FileManifest,
+    ContextChunk,
     InferenceError,
     InferenceErrorCode,
     InferenceRequest,
@@ -21,7 +21,7 @@ from tools.qykw.domain import (
     ProviderCapabilities,
     RunContext,
 )
-from tools.qykw.prompts import build_triage_request
+from tools.qykw.prompts import build_review_request
 from tools.qykw.provider import (
     InferenceProvider,
     ProviderError,
@@ -53,7 +53,7 @@ def request() -> InferenceRequest:
         command=CommandRequest(CommandName.REVIEW, "", CommandMode.READ_ONLY),
         trigger_actor="contributor",
     )
-    return build_triage_request(run, FileManifest(("src/app.py",), ("src/app.py",)))
+    return build_review_request(run, ContextChunk("chunk-1", ("src/app.py",), "review context", 2))
 
 
 class RecordingProvider:
@@ -797,7 +797,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
 
         document = json.loads(official_response().body)
         document["output_text"] = (
-            '{"priorities":["SENTINEL_DUPLICATE"],"priorities":[]}'
+            '{"candidates":["SENTINEL_DUPLICATE"],"candidates":[]}'
         )
         response = TransportResponse(
             200,

@@ -171,9 +171,7 @@ class BoundaryProvider:
             self.started.set()
             if not self.release.wait(2):
                 raise RuntimeError("bounded provider wait expired")
-        if kind == "triage":
-            value: Mapping[str, object] = {"priorities": ["src/a.py"]}
-        elif kind == "review":
+        if kind == "review":
             context = request.payload["untrusted"]["context"]  # type: ignore[index]
             value = {"candidates": [dict(candidate_value(), source_chunk_id=context["chunk_id"])]}
         elif kind == "validation":
@@ -320,7 +318,7 @@ class TestQykwIntegration(unittest.TestCase):
         system = ReviewSystem()
         outcome = system.runner.handle(pull_event("opened"))
         self.assertEqual(outcome.status, RunStatus.COMPLETED)
-        self.assertEqual(system.provider.stages, ["triage", "review", "validation"])
+        self.assertEqual(system.provider.stages, ["review", "validation"])
         public_order = [item for item in system.gateway.write_order if item in {"summary", "inline"}]
         self.assertEqual(public_order, ["summary", "inline"])
         self.assertEqual(len(system.gateway.review_comments), 1)
@@ -333,7 +331,7 @@ class TestQykwIntegration(unittest.TestCase):
         second = system.runner.handle(event)
         self.assertEqual((first.status, second.status), (RunStatus.COMPLETED, RunStatus.COMPLETED))
         self.assertEqual(system.provider.run_count, 1)
-        self.assertEqual(system.provider.stages, ["triage", "review", "validation"])
+        self.assertEqual(system.provider.stages, ["review", "validation"])
         self.assertEqual(tuple(system.gateway.write_order), writes)
 
     def test_initial_draft_ready_and_later_push_matrix_is_bounded(self) -> None:
@@ -344,15 +342,15 @@ class TestQykwIntegration(unittest.TestCase):
         self.assertEqual(draft.error_code, "draft_opened")
         self.assertEqual(ready.status, RunStatus.COMPLETED)
         self.assertEqual(push.error_code, "automatic_event_ignored")
-        self.assertEqual(system.provider.stages, ["triage", "review", "validation"])
+        self.assertEqual(system.provider.stages, ["review", "validation"])
 
     def test_every_command_uses_the_frozen_route_provider_count_and_side_effects(self) -> None:
         cases = (
             (CommandName.HELP, CommandRoute.DETERMINISTIC, 0, False),
             (CommandName.ANALYZE, CommandRoute.ADVISORY, 1, False),
             (CommandName.PLAN, CommandRoute.ADVISORY, 1, False),
-            (CommandName.REVIEW, CommandRoute.REVIEW, 3, True),
-            (CommandName.REREVIEW, CommandRoute.REVIEW, 3, True),
+            (CommandName.REVIEW, CommandRoute.REVIEW, 2, True),
+            (CommandName.REREVIEW, CommandRoute.REVIEW, 2, True),
             (CommandName.STATUS, CommandRoute.DETERMINISTIC, 0, False),
             (CommandName.SUMMARY, CommandRoute.DETERMINISTIC, 0, False),
             (CommandName.FIX, CommandRoute.CHANGE, 0, False),
@@ -1745,11 +1743,6 @@ class TestProductionBranchCoverage(unittest.TestCase):
         for maximum in (True, -1, 101):
             with self.assertRaises(ValueError):
                 subject.ReviewEngine(BoundaryProvider(), max_findings=maximum)
-        for value in (None, {}, {"priorities": "bad"}, {"priorities": ["missing"]},
-                      {"priorities": ["src/a.py", "src/a.py"]}):
-            self.assertIsNone(subject.parse_triage_response(value, ("src/a.py",)))
-        self.assertEqual(subject.parse_triage_response({"priorities": ["src/a.py"]}, ("src/a.py",)), ("src/a.py",))
-
         valid = candidate_value()
         parsed = subject.parse_candidates({"candidates": [valid]})
         self.assertEqual(len(parsed), 1)

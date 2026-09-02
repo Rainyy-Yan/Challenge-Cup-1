@@ -10,7 +10,7 @@ from tools.qykw.domain import (
     ChangedLine, ContextChunk, ContextPlan, CoverageReport, DiffSide, Finding, FindingCandidate,
     PullSnapshot, ReviewResult, RunContext, Severity,
 )
-from tools.qykw.prompts import build_review_request, build_triage_request, build_validation_request
+from tools.qykw.prompts import build_review_request, build_validation_request
 from tools.qykw.provider import InferenceProvider, validate_provider_capabilities
 
 _CANDIDATE_FIELDS = frozenset({"path", "line", "side", "severity", "failure_path", "impact", "evidence", "suggestion", "verification"})
@@ -34,7 +34,7 @@ class _InvalidModelOutput(Exception):
 
 
 class ReviewEngine:
-    """Run fixed triage, deep-review, counterexample, then local validation stages."""
+    """Run deep-review, counterexample, then local validation stages."""
 
     def __init__(self, provider: InferenceProvider, *, max_findings: int) -> None:
         if not isinstance(max_findings, int) or isinstance(max_findings, bool) or not 0 <= max_findings <= _MAX_FINDINGS:
@@ -47,7 +47,6 @@ class ReviewEngine:
             raise ValueError("review_identity_mismatch")
         _validate_plan_chunks(run, plan)
         try:
-            self._triage(build_triage_request(run, plan.manifest), plan)
             candidates: list[_SourcedCandidate] = []
             for chunk in plan.chunks:
                 candidates.extend(self._review_candidates(build_review_request(run, chunk, plan=plan), chunk))
@@ -78,14 +77,6 @@ class ReviewEngine:
         except _InvalidModelOutput:
             return _failure(plan.coverage)
 
-    def _triage(self, request: object, plan: ContextPlan) -> tuple[str, ...]:
-        validate_provider_capabilities(self.provider, request)  # type: ignore[arg-type]
-        response = self.provider.complete(request)  # type: ignore[arg-type]
-        priorities = parse_triage_response(response.value, plan.manifest.paths)
-        if priorities is None:
-            raise _InvalidModelOutput from None
-        return priorities
-
     def _review_candidates(self, request: object, chunk: object) -> tuple[_SourcedCandidate, ...]:
         validate_provider_capabilities(self.provider, request)  # type: ignore[arg-type]
         response = self.provider.complete(request)  # type: ignore[arg-type]
@@ -107,20 +98,6 @@ def parse_candidates(value: object) -> tuple[FindingCandidate, ...]:
     """Parse one exact candidate envelope without any value coercion."""
     parsed = _parse_candidate_envelope(value)
     return () if parsed is None else parsed
-
-
-def parse_triage_response(value: object, manifest_paths: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Accept only bounded manifest priorities; triage cannot create findings."""
-    if not isinstance(value, Mapping) or set(value) != {"priorities"}:
-        return None
-    priorities = value.get("priorities")
-    if not isinstance(priorities, list) or len(priorities) > len(manifest_paths):
-        return None
-    if any(not isinstance(path, str) or path not in manifest_paths for path in priorities):
-        return None
-    if len(set(priorities)) != len(priorities):
-        return None
-    return tuple(priorities)
 
 
 def _parse_candidate_envelope(value: object) -> tuple[FindingCandidate, ...] | None:

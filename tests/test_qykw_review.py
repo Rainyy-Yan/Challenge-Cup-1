@@ -121,13 +121,17 @@ class TestReviewEngine(unittest.TestCase):
         accepted = candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
             failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test"))
         provider = RecordingProvider([
-            {"priorities": []}, {"candidates": [review_candidate_value(candidate(), plan().chunks[0].chunk_id)]}, {"candidates": [review_candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
+            {"candidates": [review_candidate_value(candidate(), plan().chunks[0].chunk_id)]}, {"candidates": [review_candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
             failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test"), plan().chunks[1].chunk_id)]},
             {"conclusion": "validated", "findings": [accepted], "validation_notes": ["counterexample checked"], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
-        self.assertEqual([call.stage.value for call in provider.calls], ["analyzing", "analyzing", "analyzing", "validating"])
-        self.assertEqual([call.schema_name.rsplit("-", 1)[-1] for call in provider.calls], ["triage", "review", "review", "validation"])
+        self.assertEqual([call.stage.value for call in provider.calls], ["analyzing", "analyzing", "validating"])
+        self.assertEqual([call.schema_name.rsplit("-", 1)[-1] for call in provider.calls], ["review", "review", "validation"])
+        self.assertEqual(
+            [call.payload["untrusted"]["context"]["chunk_id"] for call in provider.calls[:2]],
+            [chunk.chunk_id for chunk in plan().chunks],
+        )
         self.assertEqual([(item.path, item.line) for item in result.findings], [("src/b.py", 9)])
         self.assertEqual(result.coverage, plan().coverage)
         self.assertIn("counterexample checked", result.validation_notes)
@@ -135,7 +139,7 @@ class TestReviewEngine(unittest.TestCase):
     def test_engine_fails_closed_for_raw_empty_and_cross_run_context(self) -> None:
         from tools.qykw.review import ReviewEngine
         valid = review_candidate_value(candidate(), plan().chunks[0].chunk_id)
-        for values in (({"priorities": []}, "raw"), ({"priorities": []}, {"candidates": [valid]}, {"candidates": []}, {"conclusion": "x", "findings": [], "validation_notes": [], "limitations": [], "extra": 1})):
+        for values in (("raw",), ({"candidates": [valid]}, {"candidates": []}, {"conclusion": "x", "findings": [], "validation_notes": [], "limitations": [], "extra": 1})):
             with self.subTest(values=values):
                 result = ReviewEngine(RecordingProvider(list(values)), max_findings=20).review(run(), snapshot(), plan())
                 self.assertEqual(result.findings, ())
@@ -143,40 +147,23 @@ class TestReviewEngine(unittest.TestCase):
         wrong = ContextPlan("other/repo", 7, "h" * 40, "wrong", plan().manifest, plan().chunks, plan().coverage, plan().commentable_lines, 1000, 20_000)
         with self.assertRaises(ValueError): ReviewEngine(RecordingProvider([]), max_findings=20).review(run(), snapshot(), wrong)
 
-    def test_malformed_triage_stops_before_more_provider_calls(self) -> None:
-        from tools.qykw.review import ReviewEngine
-        provider = RecordingProvider(["raw response", {"candidates": []}, {"candidates": []},
-                                      {"conclusion": "safe", "findings": [], "validation_notes": [], "limitations": []}])
-        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
-        self.assertEqual(result.conclusion, "审查未完成")
-        self.assertEqual(len(provider.calls), 1)
-
     def test_success_has_deterministic_validation_and_limitation_notes(self) -> None:
         from tools.qykw.review import ReviewEngine
         provider = RecordingProvider([
-            {"priorities": []}, {"candidates": []}, {"candidates": []},
+            {"candidates": []}, {"candidates": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
-        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(len(provider.calls), 2)
         self.assertTrue(result.validation_notes)
         self.assertTrue(result.limitations)
-
-    def test_triage_candidate_shape_cannot_reach_validation_or_publication(self) -> None:
-        from tools.qykw.review import ReviewEngine
-        guessed = candidate_value(candidate())
-        provider = RecordingProvider([{"candidates": [guessed]}, {"candidates": []}, {"candidates": []},
-                                      {"conclusion": "validated", "findings": [guessed], "validation_notes": [], "limitations": []}])
-        result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
-        self.assertEqual(result.conclusion, "审查未完成")
-        self.assertEqual(result.findings, ())
 
     def test_wrong_lines_and_sides_never_call_validation(self) -> None:
         from tools.qykw.review import ReviewEngine
         wrong = [review_candidate_value(candidate(line=1000 + index), plan().chunks[0].chunk_id) for index in range(99)]
         wrong.append(review_candidate_value(candidate(side=DiffSide.LEFT), plan().chunks[0].chunk_id))
-        provider = RecordingProvider([{"priorities": []}, {"candidates": wrong}, {"candidates": []}])
+        provider = RecordingProvider([{"candidates": wrong}, {"candidates": []}])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
-        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(len(provider.calls), 2)
         self.assertEqual(result.findings, ())
         self.assertIn("没有可验证", result.validation_notes[0])
 
@@ -186,7 +173,7 @@ class TestReviewEngine(unittest.TestCase):
         valid = review_candidate_value(candidate(), plan().chunks[0].chunk_id)
         wrong_after = [review_candidate_value(candidate(line=2000 + index), plan().chunks[0].chunk_id) for index in range(50)]
         provider = RecordingProvider([
-            {"priorities": []}, {"candidates": wrong_before + [valid] + wrong_after}, {"candidates": []},
+            {"candidates": wrong_before + [valid] + wrong_after}, {"candidates": []},
             {"conclusion": "validated", "findings": [candidate_value(candidate())], "validation_notes": [], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
@@ -198,7 +185,7 @@ class TestReviewEngine(unittest.TestCase):
         from tools.qykw.review import ReviewEngine
         duplicate = review_candidate_value(candidate(), plan().chunks[0].chunk_id)
         provider = RecordingProvider([
-            {"priorities": []}, {"candidates": [duplicate] * 100}, {"candidates": []},
+            {"candidates": [duplicate] * 100}, {"candidates": []},
             {"conclusion": "validated", "findings": [candidate_value(candidate())], "validation_notes": [], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
@@ -211,7 +198,7 @@ class TestReviewEngine(unittest.TestCase):
         p1 = candidate(path="src/b.py", line=9, severity=Severity.P1,
             failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test")
         provider = RecordingProvider([
-            {"priorities": []}, {"candidates": [review_candidate_value(candidate(), plan().chunks[0].chunk_id), review_candidate_value(left, plan().chunks[0].chunk_id)]},
+            {"candidates": [review_candidate_value(candidate(), plan().chunks[0].chunk_id), review_candidate_value(left, plan().chunks[0].chunk_id)]},
             {"candidates": [review_candidate_value(p1, plan().chunks[1].chunk_id)]},
             {"conclusion": "validated", "findings": [candidate_value(p1)], "validation_notes": [], "limitations": []},
         ])
@@ -226,7 +213,7 @@ class TestReviewEngine(unittest.TestCase):
             failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test")
         bound = review_candidate_value(deep, plan().chunks[1].chunk_id)
         provider = RecordingProvider([
-            {"priorities": ["src/a.py"]}, {"candidates": []}, {"candidates": [bound]},
+            {"candidates": []}, {"candidates": [bound]},
             {"conclusion": "validated", "findings": [candidate_value(deep)], "validation_notes": [], "limitations": []},
         ])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
@@ -238,10 +225,10 @@ class TestReviewEngine(unittest.TestCase):
         from tools.qykw.review import ReviewEngine
         guessed = review_candidate_value(candidate(path="src/b.py", line=9, severity=Severity.P1,
             failure_path="production request deterministically rejects all authenticated users", impact="primary login flow fails in production", evidence="changed condition always returns 403", suggestion="invert condition", verification="login integration test"), plan().chunks[0].chunk_id)
-        provider = RecordingProvider([{"priorities": []}, {"candidates": [guessed]}, {"candidates": []},
+        provider = RecordingProvider([{"candidates": [guessed]}, {"candidates": []},
                                       {"conclusion": "validated", "findings": [], "validation_notes": [], "limitations": []}])
         result = ReviewEngine(provider, max_findings=20).review(run(), snapshot(), plan())
-        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(len(provider.calls), 1)
         self.assertEqual(result.conclusion, "审查未完成")
         self.assertEqual(result.findings, ())
 

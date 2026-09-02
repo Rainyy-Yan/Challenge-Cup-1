@@ -91,24 +91,6 @@ def build_plan_request(
     )
 
 
-def build_triage_request(
-    run: RunContext,
-    manifest: FileManifest,
-    trusted_rules: tuple[RepositoryFile, ...] = (),
-) -> InferenceRequest:
-    """Build a risk-triage request over an untrusted file manifest."""
-
-    return _request(
-        run,
-        request_kind="triage",
-        stage=RunStage.ANALYZING,
-        schema=_triage_schema(),
-        task="Prioritize concrete review risks from the supplied file manifest.",
-        trusted=_trusted_section(run, trusted_rules),
-        untrusted={"manifest": _manifest_data(manifest)},
-    )
-
-
 def build_review_request(
     run: RunContext,
     chunk: ContextChunk,
@@ -340,12 +322,6 @@ def _candidate_schema(kind: str) -> Mapping[str, object]:
     """Return the strict output schema for concrete review candidates."""
 
     return _schema(kind, {"candidates": _finding_array()})
-
-
-def _triage_schema() -> Mapping[str, object]:
-    """Triage can prioritize manifest entries but can never emit line findings."""
-
-    return _schema("triage", {"priorities": {"type": "array", "items": {"type": "string", "minLength": 1}}})
 
 
 def _review_candidate_schema() -> Mapping[str, object]:

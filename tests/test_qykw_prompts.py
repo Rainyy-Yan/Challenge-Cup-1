@@ -30,7 +30,6 @@ from tools.qykw.prompts import (
     build_patch_request,
     build_plan_request,
     build_review_request,
-    build_triage_request,
     build_validation_request,
 )
 from tools.qykw.provider import estimate_request_input_tokens
@@ -150,7 +149,6 @@ class TestQykwPromptBuilders(unittest.TestCase):
         builders = (
             ("analysis", lambda: build_analysis_request(run(), context_plan())),
             ("plan", lambda: build_plan_request(run(), context_plan())),
-            ("triage", lambda: build_triage_request(run(), manifest())),
             ("review", lambda: build_review_request(run(), context_chunk())),
             ("validation", lambda: build_validation_request(run(), candidates())),
             ("patch", lambda: build_patch_request(run(), context_chunk())),
@@ -164,7 +162,6 @@ class TestQykwPromptBuilders(unittest.TestCase):
         builders = (
             ("analysis", lambda: build_analysis_request(run(), context_plan())),
             ("plan", lambda: build_plan_request(run(), context_plan())),
-            ("triage", lambda: build_triage_request(run(), manifest())),
             ("review", lambda: build_review_request(run(), context_chunk())),
             ("validation", lambda: build_validation_request(run(), candidates())),
             ("patch", lambda: build_patch_request(run(), context_chunk())),
@@ -227,13 +224,6 @@ class TestQykwPromptBuilders(unittest.TestCase):
         with self.assertRaises(PromptError):
             build_review_request(run(), forged, plan=forged_plan)
 
-    def test_triage_schema_has_only_manifest_priorities_not_line_findings(self) -> None:
-        request = build_triage_request(run(), manifest())
-        self.assertEqual(set(request.schema["properties"]), {"priorities"})
-        item = request.schema["properties"]["priorities"]["items"]
-        self.assertEqual(set(item), {"type", "minLength"})
-        self.assertNotIn("candidates", request.schema["properties"])
-
     def test_validation_batch_id_is_stable_for_replay_and_changes_with_candidates(self) -> None:
         same = build_validation_request(run(), candidates())
         self.assertEqual(same.idempotency_key, build_validation_request(run(), candidates()).idempotency_key)
@@ -245,7 +235,6 @@ class TestQykwPromptBuilders(unittest.TestCase):
         builders = (
             ("analysis", lambda rules: build_analysis_request(run(), context_plan(), rules)),
             ("plan", lambda rules: build_plan_request(run(), context_plan(), rules)),
-            ("triage", lambda rules: build_triage_request(run(), manifest(), rules)),
             ("review", lambda rules: build_review_request(run(), context_chunk(), rules)),
             ("validation", lambda rules: build_validation_request(run(), candidates(), rules)),
             ("patch", lambda rules: build_patch_request(run(), context_chunk(), rules)),
@@ -272,13 +261,13 @@ class TestQykwPromptBuilders(unittest.TestCase):
         trusted = json.dumps(request.payload["trusted"], ensure_ascii=False)
         self.assertNotIn(untrusted_instruction, trusted)
         with self.assertRaises(TypeError):
-            build_triage_request(run(), manifest(), (untrusted_instruction,))  # type: ignore[arg-type]
+            build_review_request(run(), context_chunk(), (untrusted_instruction,))  # type: ignore[arg-type]
 
     def test_non_default_branch_rule_is_rejected_at_trusted_boundary(self) -> None:
         untrusted_rule = replace(trusted_rules()[0], ref="attacker-branch")
 
         with self.assertRaises(ValueError):
-            build_triage_request(run(), manifest(), (untrusted_rule,))
+            build_review_request(run(), context_chunk(), (untrusted_rule,))
 
     def test_trusted_rules_accept_only_exact_default_branch_allowlist(self) -> None:
         cases = (
@@ -295,11 +284,11 @@ class TestQykwPromptBuilders(unittest.TestCase):
             with self.subTest(path=path, ref=ref):
                 rule = replace(trusted_rules()[0], path=path, ref=ref)
                 if allowed:
-                    request = build_triage_request(run(), manifest(), (rule,))
+                    request = build_review_request(run(), context_chunk(), (rule,))
                     self.assertEqual(request.payload["trusted"]["trusted_rules"][0]["path"], path)
                 else:
                     with self.assertRaises(ValueError):
-                        build_triage_request(run(), manifest(), (rule,))
+                        build_review_request(run(), context_chunk(), (rule,))
 
     def test_payload_keeps_constitution_and_untrusted_input_separate(self) -> None:
         request = build_review_request(run(), context_chunk())
@@ -315,7 +304,7 @@ class TestQykwPromptBuilders(unittest.TestCase):
         )
 
     def test_public_identity_contains_only_qykw(self) -> None:
-        request = build_triage_request(run(), manifest())
+        request = build_review_request(run(), context_chunk())
         serialized = json.dumps(request.payload, ensure_ascii=False)
         forbidden_identity_pattern = re.compile(
             "|".join(("Mini" + "Max", "Open" + "AI", "G" + "PT")),
