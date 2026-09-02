@@ -1307,6 +1307,17 @@ class TestInternPullLifecycle(unittest.TestCase):
             self.assertTrue("暂时失败" in body or "等待安全重放" in body)
             self.assertNotIn("状态已同步", body)
 
+    def test_resolved_issue_guard_rejects_body_drift_before_any_mutation(self) -> None:
+        gateway = InternPullMemoryGateway()
+        gateway.pull = PullSnapshot(9, "open", False, "alice", "Closes #18")
+
+        with self.assertRaisesRegex(InternError, "resolved_issue_mismatch"):
+            self.service(gateway).handle_pull_event(
+                self.event("edited"), expected_issue_number=17,
+            )
+
+        self.assertEqual(gateway.writes, [])
+
 
 class TestInternCli(unittest.TestCase):
     REPOSITORY = "qiyuankaiwu/agentedu"
@@ -1335,6 +1346,8 @@ class TestInternCli(unittest.TestCase):
             if phase != "issue-command":
                 environment["GITHUB_EVENT_NAME"] = "pull_request_target"
                 environment["GITHUB_OUTPUT"] = str(output_path)
+            if phase == "reconcile-pr":
+                environment["QYKW_RESOLVED_ISSUE_NUMBER"] = "17"
             if phase == "resolve-pr":
                 environment.pop("QYKW_INTERN_TOKEN")
                 environment["GITHUB_TOKEN"] = "resolver-token-sentinel-do-not-print"
@@ -1342,6 +1355,7 @@ class TestInternCli(unittest.TestCase):
                 environment.update(environment_updates)
 
             service = mock.Mock()
+            self.last_service = service
             service.handle_issue_event.return_value = outcome or InternOutcome(17, (), "noop")
             service.handle_pull_event.return_value = outcome or InternOutcome(17, (9,), "reconciled")
             stderr = StringIO()
@@ -1449,12 +1463,23 @@ class TestInternCli(unittest.TestCase):
         status, stderr, output = self.invoke("resolve-pr", payload, resolved_issue=17)
         self.assertEqual((status, stderr, output), (0, "", "issue_number=17\n"))
 
-        for value in (None, 0, -1, True, "17", 1 << 80):
+        for value in (0, -1, True, "17", 1 << 80):
             status, stderr, output = self.invoke("resolve-pr", payload, resolved_issue=value)
             with self.subTest(value=value):
                 self.assertEqual(status, 1)
                 self.assertEqual(stderr, "::error title=qykw intern::invalid_issue_number\n")
                 self.assertEqual(output, "")
+
+    def test_unrelated_pull_without_binding_or_closing_target_is_a_successful_resolver_noop(self) -> None:
+        payload = json.dumps(pull_event()).encode("utf-8")
+        status, stderr, output = self.invoke("resolve-pr", payload, resolved_issue=None)
+        self.assertEqual((status, stderr, output), (0, "", ""))
+
+        event = PullLifecycleEvent(self.REPOSITORY, 42, 9, "opened")
+        gateway = mock.Mock(repository=self.REPOSITORY)
+        gateway.get_pull.return_value = PullSnapshot(9, "open", False, "alice", "Unrelated change")
+        gateway.list_pull_comments.return_value = ()
+        self.assertIsNone(intern_claim.resolve_pull_issue_number(event, gateway))
 
     def test_resolver_prefers_the_frozen_trusted_marker_over_an_edited_body(self) -> None:
         event = PullLifecycleEvent(self.REPOSITORY, 42, 9, "edited")
@@ -1499,6 +1524,25 @@ class TestInternCli(unittest.TestCase):
         status, stderr, output = self.invoke("resolve-pr", pull_payload)
         self.assertEqual((status, stderr, output), (0, "", "issue_number=17\n"))
 
+    def test_reconcile_requires_a_strict_resolved_issue_and_passes_it_to_the_service(self) -> None:
+        pull_payload = json.dumps(pull_event()).encode("utf-8")
+        status, stderr, output = self.invoke("reconcile-pr", pull_payload)
+        self.assertEqual((status, stderr, output), (0, "", ""))
+        self.last_service.handle_pull_event.assert_called_once_with(
+            mock.ANY, expected_issue_number=17,
+        )
+
+        for value in ("", "0", "+17", "017", "١٧", "1000000000000000000"):
+            status, stderr, output = self.invoke(
+                "reconcile-pr", pull_payload,
+                environment_updates={"QYKW_RESOLVED_ISSUE_NUMBER": value},
+            )
+            with self.subTest(value=value):
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr, "::error title=qykw intern::invalid_issue_number\n")
+                self.assertEqual(output, "")
+                self.last_service.handle_pull_event.assert_not_called()
+
 
 class TestInternWorkflow(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1]
@@ -1536,6 +1580,10 @@ class TestInternWorkflow(unittest.TestCase):
         })
         self.assertEqual(list(self.jobs()), ["issue_command", "resolve_pr", "reconcile_pr"])
         self.assertEqual(self.jobs()["reconcile_pr"]["needs"], "resolve_pr")
+        self.assertEqual(
+            self.jobs()["reconcile_pr"]["if"],
+            "needs.resolve_pr.outputs.issue_number != ''",
+        )
         source = self.WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("qykw-review.yml", source)
         self.assertNotIn("synchronize", source)
@@ -1568,9 +1616,14 @@ class TestInternWorkflow(unittest.TestCase):
             "contents": "read", "issues": "read", "pull-requests": "read",
         })
         self.assertEqual(jobs["reconcile_pr"]["permissions"], {
-            "contents": "read", "issues": "write", "pull-requests": "write",
+            "contents": "read", "issues": "write", "pull-requests": "read",
         })
         self.assertNotIn("write", str(jobs["resolve_pr"]["permissions"]))
+
+    def test_reconcile_job_reads_pull_requests_without_pull_request_write(self) -> None:
+        self.assertEqual(self.jobs()["reconcile_pr"]["permissions"], {
+            "contents": "read", "issues": "write", "pull-requests": "read",
+        })
 
     def test_every_job_uses_only_the_trusted_default_branch_controller(self) -> None:
         for name, job in self.jobs().items():
@@ -1619,7 +1672,10 @@ class TestInternWorkflow(unittest.TestCase):
         )
         self.assertEqual(
             self.named_step(jobs["reconcile_pr"], "Run qykw intern controller")["env"],
-            {"QYKW_INTERN_TOKEN": "${{ secrets.QYKW_INTERN_TOKEN }}"},
+            {
+                "QYKW_INTERN_TOKEN": "${{ secrets.QYKW_INTERN_TOKEN }}",
+                "QYKW_RESOLVED_ISSUE_NUMBER": "${{ needs.resolve_pr.outputs.issue_number }}",
+            },
         )
         self.assertEqual(
             self.named_step(jobs["resolve_pr"], "Run qykw intern controller")["env"],

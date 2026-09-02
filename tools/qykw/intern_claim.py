@@ -481,7 +481,7 @@ def parse_closing_issue(body: str) -> int | None:
     return int(match.group(1))
 
 
-def resolve_pull_issue_number(event: PullLifecycleEvent, gateway: InternGateway) -> int:
+def resolve_pull_issue_number(event: PullLifecycleEvent, gateway: InternGateway) -> int | None:
     """Resolve the Issue queue key without performing a GitHub mutation."""
 
     if not isinstance(event, PullLifecycleEvent):
@@ -509,7 +509,7 @@ def resolve_pull_issue_number(event: PullLifecycleEvent, gateway: InternGateway)
         return _bounded_issue_number(bindings[0].issue_number)
 
     issue_number = parse_closing_issue(pull.body)
-    return _bounded_issue_number(issue_number)
+    return _bounded_issue_number(issue_number) if issue_number is not None else None
 
 
 def _mapping(value: object) -> Mapping[str, object] | None:
@@ -715,11 +715,14 @@ class InternClaimService:
             status = "noop"
         return InternOutcome(event.issue_number, tuple(processed), status)
 
-    def handle_pull_event(self, event: PullLifecycleEvent) -> InternOutcome:
+    def handle_pull_event(self, event: PullLifecycleEvent, *,
+                          expected_issue_number: int | None = None) -> InternOutcome:
         """Reconcile one PR lifecycle event against its frozen Issue binding."""
 
         if not isinstance(event, PullLifecycleEvent) or event.action not in _PULL_ACTIONS:
             raise InternError("invalid_pull_event")
+        if expected_issue_number is not None:
+            expected_issue_number = _bounded_issue_number(expected_issue_number)
         gateway_repository = getattr(self.gateway, "repository", None)
         if gateway_repository != event.repository:
             return InternOutcome(0, (), "conflict")
@@ -733,9 +736,11 @@ class InternClaimService:
         if binding is None:
             if event.action in {"closed", "reopened"}:
                 return InternOutcome(0, (), "conflict")
-            return self._start_pull_binding(event)
+            return self._start_pull_binding(event, expected_issue_number)
 
         record, pull_comment_id = binding
+        if expected_issue_number is not None and record.issue_number != expected_issue_number:
+            raise InternError("resolved_issue_mismatch")
         try:
             pull = self.gateway.get_pull(event.pull_number)
         except InternError as error:
@@ -748,13 +753,16 @@ class InternClaimService:
             return self._reconcile_closed_pull(event, pull, record, pull_comment_id)
         return self._reconcile_active_pull(event, pull, record, pull_comment_id)
 
-    def _start_pull_binding(self, event: PullLifecycleEvent) -> InternOutcome:
+    def _start_pull_binding(self, event: PullLifecycleEvent,
+                            expected_issue_number: int | None = None) -> InternOutcome:
         try:
             pull = self.gateway.get_pull(event.pull_number)
         except InternError as error:
             status = "conflict" if error.code == "pull_repository_mismatch" else "failed"
             return InternOutcome(0, (), status)
         issue_number = parse_closing_issue(pull.body)
+        if expected_issue_number is not None and issue_number != expected_issue_number:
+            raise InternError("resolved_issue_mismatch")
         if issue_number is None or pull.state != "open":
             return InternOutcome(0, (), "conflict")
         try:
@@ -1700,6 +1708,13 @@ def _cli_token(environment: Mapping[str, str], name: str) -> str:
     return token
 
 
+def _cli_resolved_issue_number(environment: Mapping[str, str]) -> int:
+    value = environment.get("QYKW_RESOLVED_ISSUE_NUMBER")
+    if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]{0,17}", value) is None:
+        raise InternError("invalid_issue_number")
+    return _bounded_issue_number(int(value))
+
+
 def _write_issue_output(environment: Mapping[str, str], issue_number: object) -> None:
     number = _bounded_issue_number(issue_number)
     output_value = environment.get("GITHUB_OUTPUT")
@@ -1750,12 +1765,17 @@ def _run_cli(phase: str, environment: Mapping[str, str]) -> int:
         token = _cli_token(environment, "GITHUB_TOKEN")
         gateway = HttpInternGateway(api_url, repository, token)
         issue_number = resolve_pull_issue_number(event, gateway)
-        _write_issue_output(environment, issue_number)
+        if issue_number is not None:
+            _write_issue_output(environment, issue_number)
         return 0
 
+    expected_issue_number = _cli_resolved_issue_number(environment)
     token = _cli_token(environment, "QYKW_INTERN_TOKEN")
     gateway = HttpInternGateway(api_url, repository, token)
-    return _cli_outcome_status(InternClaimService(gateway).handle_pull_event(event))
+    outcome = InternClaimService(gateway).handle_pull_event(
+        event, expected_issue_number=expected_issue_number,
+    )
+    return _cli_outcome_status(outcome)
 
 
 def _emit_cli_error(error: InternError, stream: TextIO) -> None:
