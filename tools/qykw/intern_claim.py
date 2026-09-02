@@ -125,6 +125,15 @@ class InternRecord:
         return encode_marker(self)
 
 
+@dataclass(frozen=True)
+class InternOutcome:
+    """Bounded result of reconciling the Issue command queue."""
+
+    issue_number: int
+    processed_comment_ids: tuple[int, ...]
+    status: str
+
+
 class InternGateway(Protocol):
     def assert_bot_identity(self, expected_login: str = "qykw") -> None: ...
     def get_issue(self, issue_number: int) -> IssueSnapshot: ...
@@ -575,6 +584,340 @@ def reduce_records(records: tuple[IssueComment, ...], *, repository_id: int, rep
             raise InternError("record_conflict")
         reduced.append(terminal[0] if terminal else first)
     return tuple(reduced)
+
+
+class InternClaimService:
+    """Reconcile trusted Issue commands one externally visible write at a time."""
+
+    _TERMINAL_STAGES = frozenset({"reconciled", "conflict"})
+
+    def __init__(self, gateway: InternGateway) -> None:
+        self.gateway = gateway
+
+    def handle_issue_event(self, event: IssueCommentEvent) -> InternOutcome:
+        if not isinstance(event, IssueCommentEvent):
+            raise InternError("invalid_issue_event")
+        self.gateway.assert_bot_identity()
+        comments = self.gateway.list_issue_comments(event.issue_number)
+        try:
+            records = reduce_records(
+                comments,
+                repository_id=event.repository_id,
+                repository=event.repository,
+                issue_number=event.issue_number,
+            )
+        except InternError:
+            return InternOutcome(event.issue_number, (), "conflict")
+
+        record_by_key = {record.operation_key: record for record in records}
+        commands: list[tuple[IssueComment, InternCommand]] = []
+        for comment in comments:
+            command = parse_intern_command(comment.body)
+            if command is not None:
+                commands.append((comment, command))
+        commands.sort(key=lambda item: item[0].comment_id)
+
+        processed: list[int] = []
+        statuses: list[str] = []
+        for comment, command in commands:
+            operation = self._operation(command)
+            key = (event.repository_id, event.issue_number, comment.comment_id, operation)
+            existing = record_by_key.get(key)
+            if existing is not None and existing.stage in self._TERMINAL_STAGES:
+                continue
+            status = self._handle_command(event, comment, command, existing)
+            processed.append(comment.comment_id)
+            statuses.append(status)
+            if status == "failed":
+                break
+            refreshed = self.gateway.list_issue_comments(event.issue_number)
+            try:
+                current = reduce_records(
+                    refreshed,
+                    repository_id=event.repository_id,
+                    repository=event.repository,
+                    issue_number=event.issue_number,
+                )
+            except InternError:
+                return InternOutcome(event.issue_number, tuple(processed), "conflict")
+            record_by_key = {record.operation_key: record for record in current}
+
+        if "failed" in statuses:
+            status = "failed"
+        elif "conflict" in statuses:
+            status = "conflict"
+        elif statuses:
+            status = "reconciled"
+        else:
+            status = "noop"
+        return InternOutcome(event.issue_number, tuple(processed), status)
+
+    def _handle_command(self, event: IssueCommentEvent, comment: IssueComment,
+                        command: InternCommand, existing: InternRecord | None) -> str:
+        operation = self._operation(command)
+        record = existing or InternRecord(
+            repository_id=event.repository_id,
+            repository=event.repository,
+            issue_number=event.issue_number,
+            trigger_comment_id=comment.comment_id,
+            actor_login=comment.author_login,
+            operation=operation,
+            claimant_login=("qykw" if command is InternCommand.UNASSIGN else
+                            comment.author_login if command is InternCommand.ASSIGN else None),
+            pull_number=None,
+            stage="pending",
+        )
+        marker_comment_id = self._marker_comment_id(event, record.operation_key)
+
+        if existing is None:
+            try:
+                self.gateway.add_reaction(comment.comment_id)
+            except InternError:
+                return "failed"
+            try:
+                marker_comment_id = self.gateway.create_comment(
+                    event.issue_number, self._body("正在处理该命令。", record)
+                )
+            except InternError:
+                return "failed"
+        elif existing.stage == "failed":
+            record = self._with_stage(existing, "pending")
+            if marker_comment_id is None:
+                return "conflict"
+            try:
+                self.gateway.update_comment(marker_comment_id, self._body("正在重试该命令。", record))
+            except InternError:
+                return "failed"
+
+        if marker_comment_id is None:
+            return "conflict"
+        try:
+            issue, records = self._read_state(event)
+        except InternError:
+            self._mark_failed(marker_comment_id, record)
+            return "failed"
+        current = next((item for item in records if item.operation_key == record.operation_key), None)
+        if current is None:
+            return "conflict"
+        record = current
+
+        if command is InternCommand.ASSIGN:
+            return self._reconcile_assign(event, issue, record, marker_comment_id)
+        if command is InternCommand.UNASSIGN:
+            return self._reconcile_release(event, issue, records, record, marker_comment_id)
+        return self._publish_status(event, issue, record, marker_comment_id)
+
+    def _reconcile_assign(self, event: IssueCommentEvent, issue: IssueSnapshot,
+                          record: InternRecord, marker_comment_id: int) -> str:
+        for _ in range(4):
+            labels = set(issue.labels)
+            assignees = issue.assignees
+            if issue.state != "open":
+                return self._finish(marker_comment_id, record, "Issue 已关闭，无法领取。", "reconciled")
+            if "status:blocked" in labels:
+                return self._finish(marker_comment_id, record, "Issue 已阻塞，暂不可领取。", "reconciled")
+            if len(assignees) == 1 and assignees[0].casefold() != record.actor_login.casefold():
+                if "intern:claimable" not in labels and len(labels & {"status:in-progress", "status:in-review"}) == 1:
+                    return self._finish(
+                        marker_comment_id, record,
+                        f"该任务已由 @{assignees[0]} 领取，请选择其他 Issue。", "reconciled",
+                    )
+                return self._finish(marker_comment_id, record, "Issue 的 Assignee 与领取状态冲突，已停止写入。", "conflict")
+            if len(assignees) > 1:
+                return self._finish(marker_comment_id, record, "Issue 存在多个 Assignee 冲突，已停止写入。", "conflict")
+            if "status:in-review" in labels:
+                if len(assignees) == 1:
+                    return self._finish(
+                        marker_comment_id, record,
+                        f"该任务已由 @{assignees[0]} 领取，请选择其他 Issue。", "reconciled",
+                    )
+                return self._finish(marker_comment_id, record, "Issue 审查标签与 Assignee 冲突，已停止写入。", "conflict")
+            if (assignees == (record.actor_login,) and "intern:claimable" not in labels
+                    and "status:in-progress" in labels):
+                return self._finish(
+                    marker_comment_id, record, f"@{record.actor_login} 已成功领取该 Issue。", "reconciled"
+                )
+            if not assignees and "intern:claimable" not in labels:
+                return self._finish(marker_comment_id, record, "Issue 当前不可领取。", "reconciled")
+            if assignees and assignees != (record.actor_login,):
+                return self._finish(marker_comment_id, record, "Issue 的 Assignee 与领取状态冲突，已停止写入。", "conflict")
+
+            if not assignees:
+                mutation = lambda: self.gateway.add_assignee(event.issue_number, record.actor_login)
+            elif "intern:claimable" in labels:
+                mutation = lambda: self.gateway.remove_label(event.issue_number, "intern:claimable")
+            elif "status:in-progress" not in labels:
+                mutation = lambda: self.gateway.add_label(event.issue_number, "status:in-progress")
+            else:
+                return self._finish(marker_comment_id, record, "Issue 领取状态冲突，已停止写入。", "conflict")
+            failed, issue = self._mutate_and_read(event, marker_comment_id, record, mutation)
+            if failed:
+                return "failed"
+        return self._finish(marker_comment_id, record, "Issue 领取状态无法收敛。", "conflict")
+
+    def _reconcile_release(self, event: IssueCommentEvent, issue: IssueSnapshot,
+                           records: tuple[InternRecord, ...], record: InternRecord,
+                           marker_comment_id: int) -> str:
+        labels = set(issue.labels)
+        if issue.state != "open":
+            return self._finish(marker_comment_id, record, "Issue 已关闭，无法释放。", "reconciled")
+        if "status:blocked" in labels:
+            return self._finish(marker_comment_id, record, "Issue 已阻塞，已停止释放。", "reconciled")
+        if len(issue.assignees) > 1:
+            return self._finish(marker_comment_id, record, "Issue 存在多个 Assignee 冲突，已停止写入。", "conflict")
+        if not issue.assignees:
+            if "intern:claimable" in labels and not labels & {"status:in-progress", "status:in-review"}:
+                return self._finish(marker_comment_id, record, "Issue 已处于可领取状态。", "reconciled")
+            if record.claimant_login and record.claimant_login != "qykw":
+                return self._continue_partial_release(event, issue, record, marker_comment_id)
+            return self._finish(marker_comment_id, record, "Issue 的释放状态冲突，已停止写入。", "conflict")
+
+        claimant = issue.assignees[0]
+        authorized = (record.actor_login.casefold() == claimant.casefold() or record.actor_login == "xyh202131")
+        if not authorized:
+            return self._finish(marker_comment_id, record, f"@{record.actor_login} 无权释放 @{claimant} 领取的 Issue。", "reconciled")
+        active_pull = any(item.operation == "pull" and item.pull_number is not None for item in records)
+        if "status:in-review" in labels or active_pull:
+            return self._finish(marker_comment_id, record, "Issue 存在活动 PR 或正在审查，不允许释放。", "reconciled")
+        if "intern:claimable" in labels or "status:in-progress" not in labels:
+            return self._finish(marker_comment_id, record, "Issue 的 Assignee 与进度标签冲突，已停止写入。", "conflict")
+        if record.claimant_login != claimant:
+            record = InternRecord(
+                record.repository_id, record.repository, record.issue_number,
+                record.trigger_comment_id, record.actor_login, record.operation,
+                claimant, record.pull_number, "pending",
+            )
+            try:
+                self.gateway.update_comment(marker_comment_id, self._body("正在处理释放命令。", record))
+                issue, _ = self._read_state(event)
+            except InternError:
+                self._mark_failed(marker_comment_id, record)
+                return "failed"
+        failed, issue = self._mutate_and_read(
+            event, marker_comment_id, record,
+            lambda: self.gateway.remove_assignee(event.issue_number, claimant),
+        )
+        if failed:
+            return "failed"
+        return self._continue_partial_release(event, issue, record, marker_comment_id)
+
+    def _continue_partial_release(self, event: IssueCommentEvent, issue: IssueSnapshot,
+                                  record: InternRecord, marker_comment_id: int) -> str:
+        for _ in range(3):
+            labels = set(issue.labels)
+            if issue.assignees:
+                return self._finish(marker_comment_id, record, "Issue 的 Assignee 在释放时发生冲突。", "conflict")
+            if "status:in-review" in labels:
+                return self._finish(marker_comment_id, record, "Issue 正在审查，不允许释放。", "reconciled")
+            if "status:in-progress" in labels:
+                mutation = lambda: self.gateway.remove_label(event.issue_number, "status:in-progress")
+            elif "intern:claimable" not in labels:
+                mutation = lambda: self.gateway.add_label(event.issue_number, "intern:claimable")
+            else:
+                return self._finish(marker_comment_id, record, "Issue 已成功释放。", "reconciled")
+            failed, issue = self._mutate_and_read(event, marker_comment_id, record, mutation)
+            if failed:
+                return "failed"
+        return self._finish(marker_comment_id, record, "Issue 释放状态无法收敛。", "conflict")
+
+    def _publish_status(self, event: IssueCommentEvent, issue: IssueSnapshot,
+                        record: InternRecord, marker_comment_id: int) -> str:
+        labels = set(issue.labels)
+        if issue.state != "open":
+            message, stage = "Issue 已关闭。", "reconciled"
+        elif len(issue.assignees) > 1:
+            message, stage = "Issue 状态冲突：存在多个 Assignee。", "conflict"
+        elif "status:blocked" in labels:
+            message, stage = "Issue 当前已阻塞。", "reconciled"
+        elif (not issue.assignees and "intern:claimable" in labels
+              and not labels & {"status:in-progress", "status:in-review"}):
+            message, stage = "Issue 当前可领取。", "reconciled"
+        elif (len(issue.assignees) == 1 and "status:in-progress" in labels
+              and "intern:claimable" not in labels and "status:in-review" not in labels):
+            message, stage = f"Issue 由 @{issue.assignees[0]} 处理中。", "reconciled"
+        elif (len(issue.assignees) == 1 and "status:in-review" in labels
+              and "intern:claimable" not in labels and "status:in-progress" not in labels):
+            message, stage = f"Issue 由 @{issue.assignees[0]} 提交，当前审查中。", "reconciled"
+        else:
+            message, stage = "Issue 状态冲突，请管理员核对 Assignee 和标签。", "conflict"
+        return self._finish(marker_comment_id, record, message, stage)
+
+    def _mutate_and_read(self, event: IssueCommentEvent, marker_comment_id: int,
+                         record: InternRecord, mutation: Callable[[], None]) -> tuple[bool, IssueSnapshot]:
+        try:
+            mutation()
+        except InternError:
+            try:
+                issue, _ = self._read_state(event)
+            except InternError:
+                issue = IssueSnapshot(event.issue_number, "unknown", (), ())
+            self._mark_failed(marker_comment_id, record)
+            return True, issue
+        try:
+            issue, _ = self._read_state(event)
+            return False, issue
+        except InternError:
+            self._mark_failed(marker_comment_id, record)
+            return True, IssueSnapshot(event.issue_number, "unknown", (), ())
+
+    def _read_state(self, event: IssueCommentEvent) -> tuple[IssueSnapshot, tuple[InternRecord, ...]]:
+        issue = self.gateway.get_issue(event.issue_number)
+        comments = self.gateway.list_issue_comments(event.issue_number)
+        records = reduce_records(
+            comments,
+            repository_id=event.repository_id,
+            repository=event.repository,
+            issue_number=event.issue_number,
+        )
+        return issue, records
+
+    def _finish(self, marker_comment_id: int, record: InternRecord, message: str, stage: str) -> str:
+        terminal = self._with_stage(record, stage)
+        try:
+            self.gateway.update_comment(marker_comment_id, self._body(message, terminal))
+        except InternError:
+            return "failed"
+        return stage
+
+    def _mark_failed(self, marker_comment_id: int, record: InternRecord) -> None:
+        try:
+            self.gateway.update_comment(
+                marker_comment_id,
+                self._body("处理暂时失败，重放同一事件将自动重试。", self._with_stage(record, "failed")),
+            )
+        except InternError:
+            pass
+
+    def _marker_comment_id(self, event: IssueCommentEvent,
+                           operation_key: tuple[int, int, int, str]) -> int | None:
+        matches: list[int] = []
+        for comment in self.gateway.list_issue_comments(event.issue_number):
+            if comment.author_login != "qykw":
+                continue
+            record = decode_marker(comment.body, repository=event.repository)
+            if record is not None and record.operation_key == operation_key:
+                matches.append(comment.comment_id)
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _operation(command: InternCommand) -> str:
+        return {
+            InternCommand.ASSIGN: "assign",
+            InternCommand.UNASSIGN: "unassign",
+            InternCommand.STATUS: "status",
+        }[command]
+
+    @staticmethod
+    def _with_stage(record: InternRecord, stage: str) -> InternRecord:
+        return InternRecord(
+            record.repository_id, record.repository, record.issue_number,
+            record.trigger_comment_id, record.actor_login, record.operation,
+            record.claimant_login, record.pull_number, stage,
+        )
+
+    @staticmethod
+    def _body(message: str, record: InternRecord) -> str:
+        return f"{message}\n\n{record.marker()}"
 
 
 def _intern_origin(value: str) -> str:

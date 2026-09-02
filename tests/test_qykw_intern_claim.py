@@ -6,13 +6,20 @@ import traceback
 from collections.abc import Mapping
 
 from tools.qykw.intern_claim import (
+    InternClaimService,
     InternCommand,
+    InternError,
+    InternRecord,
+    IssueComment,
     IssueCommentEvent,
+    IssueSnapshot,
     PullLifecycleEvent,
+    decode_marker,
     normalize_issue_comment_event,
     normalize_pull_event,
     parse_closing_issue,
     parse_intern_command,
+    reduce_records,
 )
 
 
@@ -405,3 +412,368 @@ class TestInternGitHubGateway(unittest.TestCase):
             with self.subTest(code=code), self.assertRaisesRegex(InternError, code):
                 invoke()
         self.assertEqual(transport.calls, [])
+
+
+class InternMemoryGateway:
+    """Stateful GitHub boundary fake with observable writes and failures."""
+
+    def __init__(self, *, state: str = "open", labels: tuple[str, ...] = ("intern:claimable",),
+                 assignees: tuple[str, ...] = ()) -> None:
+        self.issue = IssueSnapshot(17, state, labels, assignees)
+        self.comments: list[IssueComment] = []
+        self.reactions: set[int] = set()
+        self.writes: list[tuple[object, ...]] = []
+        self.trace: list[tuple[object, ...]] = []
+        self.failures: dict[str, list[str]] = {}
+        self.next_comment_id = 1000
+        self.authenticated = 0
+
+    def command(self, comment_id: int, actor: str, command: str) -> None:
+        self.comments.append(IssueComment(comment_id, actor, command, "now"))
+
+    def record(self, record: InternRecord, *, comment_id: int | None = None, message: str = "seed") -> None:
+        if comment_id is None:
+            comment_id = self.next_comment_id
+            self.next_comment_id += 1
+        self.comments.append(IssueComment(comment_id, "qykw", f"{message}\n\n{record.marker()}", "now"))
+
+    def fail_next(self, method: str, *, after: bool = False) -> None:
+        self.failures.setdefault(method, []).append("after" if after else "before")
+
+    def _begin_write(self, method: str, *args: object) -> str | None:
+        self.writes.append((method, *args))
+        self.trace.append((method, *args))
+        failures = self.failures.get(method, [])
+        mode = failures.pop(0) if failures else None
+        if mode == "before":
+            raise InternError("injected_failure")
+        return mode
+
+    @staticmethod
+    def _finish_write(mode: str | None) -> None:
+        if mode == "after":
+            raise InternError("injected_failure")
+
+    def assert_bot_identity(self, expected_login: str = "qykw") -> None:
+        self.trace.append(("assert_bot_identity", expected_login))
+        self.authenticated += 1
+        if expected_login != "qykw":
+            raise InternError("bot_identity_mismatch")
+
+    def get_issue(self, issue_number: int) -> IssueSnapshot:
+        self.assertEqualIssue(issue_number)
+        self.trace.append(("get_issue", issue_number))
+        return self.issue
+
+    def list_issue_comments(self, issue_number: int) -> tuple[IssueComment, ...]:
+        self.assertEqualIssue(issue_number)
+        self.trace.append(("list_issue_comments", issue_number))
+        return tuple(self.comments)
+
+    def list_pull_comments(self, pull_number: int) -> tuple[IssueComment, ...]:
+        return ()
+
+    def get_pull(self, pull_number: int):
+        raise AssertionError("pull reads are outside Task 3")
+
+    def add_reaction(self, comment_id: int) -> None:
+        mode = self._begin_write("add_reaction", comment_id)
+        self.reactions.add(comment_id)
+        self._finish_write(mode)
+
+    def add_assignee(self, issue_number: int, login: str) -> None:
+        self.assertEqualIssue(issue_number)
+        mode = self._begin_write("add_assignee", login)
+        if login not in self.issue.assignees:
+            self.issue = IssueSnapshot(17, self.issue.state, self.issue.labels, self.issue.assignees + (login,))
+        self._finish_write(mode)
+
+    def remove_assignee(self, issue_number: int, login: str) -> None:
+        self.assertEqualIssue(issue_number)
+        mode = self._begin_write("remove_assignee", login)
+        self.issue = IssueSnapshot(17, self.issue.state, self.issue.labels,
+                                   tuple(value for value in self.issue.assignees if value != login))
+        self._finish_write(mode)
+
+    def add_label(self, issue_number: int, label: str) -> None:
+        self.assertEqualIssue(issue_number)
+        mode = self._begin_write("add_label", label)
+        if label not in self.issue.labels:
+            self.issue = IssueSnapshot(17, self.issue.state, self.issue.labels + (label,), self.issue.assignees)
+        self._finish_write(mode)
+
+    def remove_label(self, issue_number: int, label: str) -> None:
+        self.assertEqualIssue(issue_number)
+        mode = self._begin_write("remove_label", label)
+        self.issue = IssueSnapshot(17, self.issue.state,
+                                   tuple(value for value in self.issue.labels if value != label), self.issue.assignees)
+        self._finish_write(mode)
+
+    def create_comment(self, issue_number: int, body: str) -> int:
+        self.assertEqualIssue(issue_number)
+        mode = self._begin_write("create_comment", body)
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        self.comments.append(IssueComment(comment_id, "qykw", body, "now"))
+        self._finish_write(mode)
+        return comment_id
+
+    def update_comment(self, comment_id: int, body: str) -> None:
+        mode = self._begin_write("update_comment", comment_id, body)
+        for index, comment in enumerate(self.comments):
+            if comment.comment_id == comment_id:
+                self.comments[index] = IssueComment(comment_id, "qykw", body, "later")
+                break
+        else:
+            raise AssertionError(f"unknown comment {comment_id}")
+        self._finish_write(mode)
+
+    def close_issue(self, issue_number: int) -> None:
+        self.assertEqualIssue(issue_number)
+        mode = self._begin_write("close_issue")
+        self.issue = IssueSnapshot(17, "closed", self.issue.labels, self.issue.assignees)
+        self._finish_write(mode)
+
+    @staticmethod
+    def assertEqualIssue(issue_number: int) -> None:
+        if issue_number != 17:
+            raise AssertionError(f"unexpected issue {issue_number}")
+
+    def records(self) -> tuple[InternRecord, ...]:
+        return reduce_records(tuple(self.comments), repository_id=42,
+                              repository="qiyuankaiwu/agentedu", issue_number=17)
+
+    def bot_body_for(self, trigger_comment_id: int) -> str:
+        bodies = []
+        for comment in self.comments:
+            record = decode_marker(comment.body)
+            if comment.author_login == "qykw" and record and record.trigger_comment_id == trigger_comment_id:
+                bodies.append(comment.body)
+        if len(bodies) != 1:
+            raise AssertionError(f"expected one bot status for {trigger_comment_id}, got {len(bodies)}")
+        return bodies[0]
+
+
+class TestInternClaimService(unittest.TestCase):
+    REPOSITORY = "qiyuankaiwu/agentedu"
+
+    def event(self, comment_id: int, actor: str, command: InternCommand) -> IssueCommentEvent:
+        return IssueCommentEvent(self.REPOSITORY, 42, 17, comment_id, actor, command)
+
+    def service(self, gateway: InternMemoryGateway) -> InternClaimService:
+        return InternClaimService(gateway)
+
+    def test_assign_reconciles_each_mutation_in_order_and_preserves_unrelated_labels(self) -> None:
+        gateway = InternMemoryGateway(labels=("intern:claimable", "area:docs"))
+        gateway.command(101, "alice", "/intern-assign")
+
+        outcome = self.service(gateway).handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+
+        self.assertEqual(outcome.status, "reconciled")
+        self.assertEqual(gateway.issue.assignees, ("alice",))
+        self.assertEqual(gateway.issue.labels, ("area:docs", "status:in-progress"))
+        self.assertEqual([write[0] for write in gateway.writes], [
+            "add_reaction", "create_comment", "add_assignee", "remove_label", "add_label", "update_comment",
+        ])
+        self.assertEqual(gateway.records()[0].stage, "reconciled")
+        self.assertIn("@alice", gateway.bot_body_for(101))
+
+    def test_contenders_are_processed_by_numeric_comment_id_and_later_claim_gets_fixed_reply(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.command(202, "bob", "/intern-assign")
+        gateway.command(101, "alice", "/intern-assign")
+
+        outcome = self.service(gateway).handle_issue_event(self.event(202, "bob", InternCommand.ASSIGN))
+
+        self.assertEqual(outcome.processed_comment_ids, (101, 202))
+        self.assertEqual(gateway.issue.assignees, ("alice",))
+        self.assertEqual([write[1] for write in gateway.writes if write[0] == "add_reaction"], [101, 202])
+        self.assertTrue(gateway.bot_body_for(202).startswith("该任务已由 @alice 领取，请选择其他 Issue。"))
+
+    def test_terminal_replay_performs_zero_duplicate_writes(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        service = self.service(gateway)
+        service.handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+        writes = tuple(gateway.writes)
+
+        outcome = service.handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+
+        self.assertEqual(outcome.status, "noop")
+        self.assertEqual(gateway.writes, list(writes))
+
+    def test_closed_blocked_and_not_claimable_issues_reject_without_issue_mutation(self) -> None:
+        cases = (
+            ("closed", ("intern:claimable",), "Issue 已关闭"),
+            ("open", ("intern:claimable", "status:blocked"), "Issue 已阻塞"),
+            ("open", ("area:docs",), "当前不可领取"),
+        )
+        for state, labels, expected in cases:
+            gateway = InternMemoryGateway(state=state, labels=labels)
+            gateway.command(101, "alice", "/intern-assign")
+            before = gateway.issue
+            with self.subTest(state=state, labels=labels):
+                outcome = self.service(gateway).handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+                self.assertEqual(outcome.status, "reconciled")
+                self.assertEqual(gateway.issue, before)
+                self.assertIn(expected, gateway.bot_body_for(101))
+                self.assertFalse(any(write[0] in {"add_assignee", "remove_assignee", "add_label", "remove_label"}
+                                     for write in gateway.writes))
+
+    def test_unexpected_assignment_conflict_fails_closed_without_deleting_assignee(self) -> None:
+        gateway = InternMemoryGateway(labels=("intern:claimable",), assignees=("bob",))
+        gateway.command(101, "alice", "/intern-assign")
+
+        outcome = self.service(gateway).handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+
+        self.assertEqual(outcome.status, "conflict")
+        self.assertEqual(gateway.issue.assignees, ("bob",))
+        self.assertEqual(gateway.issue.labels, ("intern:claimable",))
+        self.assertEqual(gateway.records()[0].stage, "conflict")
+        self.assertIn("冲突", gateway.bot_body_for(101))
+
+    def test_reaction_failure_is_the_first_write_and_has_zero_followup_writes(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        gateway.fail_next("add_reaction")
+
+        outcome = self.service(gateway).handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(gateway.writes, [("add_reaction", 101)])
+        self.assertEqual(gateway.issue, IssueSnapshot(17, "open", ("intern:claimable",), ()))
+        self.assertEqual(gateway.records(), ())
+
+    def test_assign_and_comment_failures_recover_without_repeating_completed_mutations(self) -> None:
+        cases = (
+            ("create_comment", False),
+            ("add_assignee", True),
+            ("remove_label", True),
+            ("add_label", True),
+            ("update_comment", False),
+        )
+        for failed_method, after in cases:
+            gateway = InternMemoryGateway()
+            gateway.command(101, "alice", "/intern-assign")
+            gateway.fail_next(failed_method, after=after)
+            service = self.service(gateway)
+            with self.subTest(failed_method=failed_method, after=after):
+                first = service.handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+                counts_after_failure = {
+                    method: sum(write[0] == method for write in gateway.writes)
+                    for method in ("add_assignee", "remove_label", "add_label")
+                }
+                second = service.handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+                self.assertEqual(first.status, "failed")
+                self.assertEqual(second.status, "reconciled")
+                self.assertEqual(gateway.issue.assignees, ("alice",))
+                self.assertNotIn("intern:claimable", gateway.issue.labels)
+                self.assertIn("status:in-progress", gateway.issue.labels)
+                for method, count in counts_after_failure.items():
+                    if count:
+                        self.assertEqual(sum(write[0] == method for write in gateway.writes), count)
+
+    def test_release_failures_recover_for_owner_and_admin_without_repeating_mutations(self) -> None:
+        for actor in ("alice", "xyh202131"):
+            for failed_method in ("remove_assignee", "remove_label", "add_label"):
+                gateway = InternMemoryGateway(labels=("status:in-progress",), assignees=("alice",))
+                gateway.command(101, actor, "/intern-unassign")
+                gateway.fail_next(failed_method, after=True)
+                service = self.service(gateway)
+                with self.subTest(actor=actor, failed_method=failed_method):
+                    first = service.handle_issue_event(self.event(101, actor, InternCommand.UNASSIGN))
+                    counts = {
+                        method: sum(write[0] == method for write in gateway.writes)
+                        for method in ("remove_assignee", "remove_label", "add_label")
+                    }
+                    second = service.handle_issue_event(self.event(101, actor, InternCommand.UNASSIGN))
+                    self.assertEqual((first.status, second.status), ("failed", "reconciled"))
+                    self.assertEqual(gateway.issue, IssueSnapshot(17, "open", ("intern:claimable",), ()))
+                    for method, count in counts.items():
+                        if count:
+                            self.assertEqual(sum(write[0] == method for write in gateway.writes), count)
+
+    def test_unknown_mutation_result_is_reread_before_failed_marker_write(self) -> None:
+        gateway = InternMemoryGateway()
+        gateway.command(101, "alice", "/intern-assign")
+        gateway.fail_next("add_assignee", after=True)
+
+        self.service(gateway).handle_issue_event(self.event(101, "alice", InternCommand.ASSIGN))
+
+        mutation_index = next(index for index, item in enumerate(gateway.trace) if item[0] == "add_assignee")
+        later = gateway.trace[mutation_index + 1:]
+        self.assertEqual(later[0][0], "get_issue")
+        self.assertLess(
+            next(index for index, item in enumerate(later) if item[0] == "list_issue_comments"),
+            next(index for index, item in enumerate(later) if item[0] == "update_comment"),
+        )
+
+    def test_release_rejects_unauthorized_actor_without_issue_mutation(self) -> None:
+        gateway = InternMemoryGateway(labels=("status:in-progress", "area:docs"), assignees=("alice",))
+        gateway.command(101, "mallory", "/intern-unassign")
+        before = gateway.issue
+
+        outcome = self.service(gateway).handle_issue_event(self.event(101, "mallory", InternCommand.UNASSIGN))
+
+        self.assertEqual(outcome.status, "reconciled")
+        self.assertEqual(gateway.issue, before)
+        self.assertIn("无权释放", gateway.bot_body_for(101))
+
+    def test_owner_and_exact_admin_can_release(self) -> None:
+        for actor in ("alice", "xyh202131"):
+            gateway = InternMemoryGateway(labels=("status:in-progress", "area:docs"), assignees=("alice",))
+            gateway.command(101, actor, "/intern-unassign")
+            with self.subTest(actor=actor):
+                outcome = self.service(gateway).handle_issue_event(self.event(101, actor, InternCommand.UNASSIGN))
+                self.assertEqual(outcome.status, "reconciled")
+                self.assertEqual(gateway.issue.assignees, ())
+                self.assertEqual(gateway.issue.labels, ("area:docs", "intern:claimable"))
+
+    def test_release_rejects_in_review_or_active_pull(self) -> None:
+        cases = ("review", "pull")
+        for case in cases:
+            labels = ("status:in-review",) if case == "review" else ("status:in-progress",)
+            gateway = InternMemoryGateway(labels=labels, assignees=("alice",))
+            if case == "pull":
+                gateway.record(InternRecord(42, self.REPOSITORY, 17, 90, "alice", "pull", "alice", 9, "reconciled"),
+                               comment_id=900)
+            gateway.command(101, "alice", "/intern-unassign")
+            before = gateway.issue
+            with self.subTest(case=case):
+                outcome = self.service(gateway).handle_issue_event(self.event(101, "alice", InternCommand.UNASSIGN))
+                self.assertEqual(outcome.status, "reconciled")
+                self.assertEqual(gateway.issue, before)
+                self.assertIn("不允许释放", gateway.bot_body_for(101))
+
+    def test_repeated_release_is_acknowledged_once_without_issue_mutation(self) -> None:
+        gateway = InternMemoryGateway(labels=("intern:claimable", "area:docs"))
+        gateway.command(101, "alice", "/intern-unassign")
+        service = self.service(gateway)
+
+        first = service.handle_issue_event(self.event(101, "alice", InternCommand.UNASSIGN))
+        writes = tuple(gateway.writes)
+        second = service.handle_issue_event(self.event(101, "alice", InternCommand.UNASSIGN))
+
+        self.assertEqual((first.status, second.status), ("reconciled", "noop"))
+        self.assertEqual(gateway.issue, IssueSnapshot(17, "open", ("intern:claimable", "area:docs"), ()))
+        self.assertEqual(gateway.writes, list(writes))
+        self.assertIn("已处于可领取状态", gateway.bot_body_for(101))
+
+    def test_status_reports_claimable_in_progress_in_review_and_conflict_read_only(self) -> None:
+        cases = (
+            (("intern:claimable",), (), "可领取"),
+            (("status:in-progress",), ("alice",), "由 @alice 处理中"),
+            (("status:in-review",), ("alice",), "审查中"),
+            (("status:in-progress",), ("alice", "bob"), "冲突"),
+        )
+        mutation_names = {"add_assignee", "remove_assignee", "add_label", "remove_label", "close_issue"}
+        for labels, assignees, expected in cases:
+            gateway = InternMemoryGateway(labels=labels, assignees=assignees)
+            gateway.command(101, "viewer", "/intern-status")
+            before = gateway.issue
+            with self.subTest(labels=labels, assignees=assignees):
+                outcome = self.service(gateway).handle_issue_event(self.event(101, "viewer", InternCommand.STATUS))
+                self.assertIn(outcome.status, {"reconciled", "conflict"})
+                self.assertEqual(gateway.issue, before)
+                self.assertIn(expected, gateway.bot_body_for(101))
+                self.assertFalse(any(write[0] in mutation_names for write in gateway.writes))
