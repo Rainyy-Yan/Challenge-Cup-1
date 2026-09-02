@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 from pathlib import Path
 import re
 import tomllib
@@ -54,22 +55,23 @@ def workflow_jobs(path: Path) -> dict[str, dict[str, object]]:
     return jobs
 
 
-def review_prefilter(event_name: str, *, pull_request: bool, body: str) -> bool:
-    return event_name in {"pull_request_target", "workflow_dispatch"} or (
-        event_name == "issue_comment" and pull_request and "@qykw" in body
-    ) or (event_name == "pull_request_review_comment" and "@qykw" in body)
-
-
-def control_prefilter(event_name: str, *, pull_request: bool, body: str) -> bool:
-    return (
-        event_name == "issue_comment" and pull_request and "@qykw" in body and "停止" in body
-    ) or (
-        event_name == "pull_request_review_comment" and "@qykw" in body and "停止" in body
-    )
-
-
 def compact_expression(value: object) -> str:
     return " ".join(str(value).split())
+
+
+def comment_body_paths(value: object, path: tuple[object, ...] = ()) -> set[tuple[object, ...]]:
+    if isinstance(value, dict):
+        return set().union(*(comment_body_paths(item, path + (key,)) for key, item in value.items()))
+    if isinstance(value, list):
+        return set().union(*(comment_body_paths(item, path + (index,)) for index, item in enumerate(value)))
+    return {path} if isinstance(value, str) and "github.event.comment.body" in value else set()
+
+
+def assert_comment_body_is_only_in_job_if(workflow: dict[str, object], job: str) -> None:
+    expected = {("jobs", job, "if")}
+    actual = comment_body_paths(workflow)
+    if actual != expected:
+        raise AssertionError(f"comment body paths {actual!r} do not equal {expected!r}")
 
 
 class QueuedRuns:
@@ -181,24 +183,24 @@ class TestQykwWorkflow(unittest.TestCase):
         })
         self.assertEqual(compact_expression(workflow_jobs(CONTROL)["control"]["if"]), "(github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@qykw') && contains(github.event.comment.body, '停止')) || (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@qykw') && contains(github.event.comment.body, '停止'))")
 
-    def test_active_comment_prefilters_skip_ordinary_issues_mentions_and_non_stop_commands(self) -> None:
-        review = workflow_jobs(REVIEW)["authorize"]["if"]
-        control = workflow_jobs(CONTROL)["control"]["if"]
-        for expression in (review, control):
-            self.assertIn("github.event.comment.body", expression)
-        self.assertIn("github.event.issue.pull_request", review)
-        self.assertIn("github.event.issue.pull_request", control)
-        self.assertIn("contains(github.event.comment.body, '@qykw')", review)
-        self.assertIn("contains(github.event.comment.body, '@qykw')", control)
-        self.assertIn("contains(github.event.comment.body, '停止')", control)
-        self.assertTrue(review_prefilter("pull_request_target", pull_request=False, body=""))
-        self.assertTrue(review_prefilter("workflow_dispatch", pull_request=False, body=""))
-        self.assertFalse(review_prefilter("issue_comment", pull_request=False, body="@qykw 审查"))
-        self.assertFalse(review_prefilter("issue_comment", pull_request=True, body="请审查"))
-        self.assertFalse(control_prefilter("issue_comment", pull_request=True, body="@qykw 审查"))
-        self.assertFalse(control_prefilter("issue_comment", pull_request=True, body="停止"))
-        self.assertFalse(control_prefilter("issue_comment", pull_request=False, body="@qykw 停止"))
-        self.assertTrue(control_prefilter("pull_request_review_comment", pull_request=True, body="@qykw 停止"))
+    def test_active_comment_prefilters_are_exact_and_comment_body_is_not_executable_data(self) -> None:
+        review = workflow_mapping(REVIEW)
+        control = workflow_mapping(CONTROL)
+        self.assertEqual(compact_expression(workflow_jobs(REVIEW)["authorize"]["if"]), "github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' || (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@qykw')) || (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@qykw'))")
+        self.assertEqual(compact_expression(workflow_jobs(CONTROL)["control"]["if"]), "(github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@qykw') && contains(github.event.comment.body, '停止')) || (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@qykw') && contains(github.event.comment.body, '停止'))")
+        assert_comment_body_is_only_in_job_if(review, "authorize")
+        assert_comment_body_is_only_in_job_if(control, "control")
+
+    def test_comment_body_path_guard_rejects_unconditional_filters_and_step_payloads(self) -> None:
+        review = workflow_mapping(REVIEW)
+        unconditional = deepcopy(review)
+        unconditional["jobs"]["authorize"]["if"] = "true"
+        with self.assertRaises(AssertionError):
+            assert_comment_body_is_only_in_job_if(unconditional, "authorize")
+        executable_payload = deepcopy(review)
+        executable_payload["jobs"]["authorize"]["steps"][2]["run"] += " ${{ github.event.comment.body }}"
+        with self.assertRaises(AssertionError):
+            assert_comment_body_is_only_in_job_if(executable_payload, "authorize")
 
     def test_root_phases_create_outputs_without_impossible_input_artifacts(self) -> None:
         review = job_blocks(REVIEW.read_text(encoding="utf-8"))
