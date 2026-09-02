@@ -47,7 +47,7 @@ def materialize_workspace(
     tracked_files: tuple[FileDigest, ...],
     destination: Path,
 ) -> PreparedWorkspace:
-    """Copy one complete trusted UTF-8 tree into a newly created workspace."""
+    """Copy one complete trusted tracked-file tree into a new workspace."""
 
     _validate_source_head(source_head_sha)
     source = _require_real_directory(source_root, "invalid_source_root")
