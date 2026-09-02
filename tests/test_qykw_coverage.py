@@ -70,6 +70,16 @@ class TestQykwCoverageGate(unittest.TestCase):
         self.assertEqual(after, before, "coverage gate must not rewrite its input")
         return process, after, names
 
+    def run_checker_path(self, report: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(CHECKER), str(report)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
     def test_exact_independent_thresholds_pass_without_writes(self) -> None:
         process, _, names = self.run_checker(
             coverage_payload(), "--line", "95", "--branch", "90"
@@ -127,6 +137,83 @@ class TestQykwCoverageGate(unittest.TestCase):
             with self.subTest(value=value):
                 process, _, _ = self.run_checker(coverage_payload(statements=value))
                 self.assertEqual(process.returncode, 2)
+
+    def test_report_at_two_mebibyte_limit_is_accepted(self) -> None:
+        maximum_size = 2 * 1024 * 1024
+        encoded = json.dumps(coverage_payload(), separators=(",", ":")).encode("utf-8")
+        self.assertLess(len(encoded), maximum_size)
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "coverage.json"
+            report.write_bytes(encoded + b" " * (maximum_size - len(encoded)))
+            process = self.run_checker_path(report)
+        self.assertEqual(process.returncode, 0, process.stderr)
+
+    def test_oversized_report_fails_closed_without_traceback(self) -> None:
+        maximum_size = 2 * 1024 * 1024
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "coverage.json"
+            report.write_bytes(b" " * (maximum_size + 1))
+            process = self.run_checker_path(report)
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("coverage report exceeds 2 MiB", process.stderr)
+        self.assertNotIn("Traceback", process.stderr)
+
+    def test_symlink_report_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            target = base / "target.json"
+            target.write_text(json.dumps(coverage_payload()), encoding="utf-8")
+            link = base / "coverage.json"
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlink creation is unavailable: {error}")
+            process = self.run_checker_path(link)
+            self.assertEqual(process.returncode, 2)
+            self.assertIn("regular file", process.stderr)
+            self.assertNotIn("Traceback", process.stderr)
+
+    def test_non_regular_report_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            process = self.run_checker_path(base)
+            self.assertEqual(process.returncode, 2)
+            self.assertIn("regular file", process.stderr)
+            self.assertNotIn("Traceback", process.stderr)
+
+    def test_deeply_nested_json_fails_closed_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "coverage.json"
+            report.write_text("[" * 20000 + "0" + "]" * 20000, encoding="utf-8")
+            process = self.run_checker_path(report)
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("unreadable or invalid JSON", process.stderr)
+        self.assertNotIn("Traceback", process.stderr)
+
+    def test_oversized_integer_fails_closed_without_traceback(self) -> None:
+        parser_limit = '{"value":' + "9" * 5000 + "}"
+        percentage_overflow = json.dumps(
+            coverage_payload(statements="HUGE"), separators=(",", ":")
+        ).replace('"HUGE"', "9" * 400)
+        for source in (parser_limit, percentage_overflow):
+            with (
+                self.subTest(length=len(source)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                report = Path(directory) / "coverage.json"
+                report.write_text(source, encoding="utf-8")
+                process = self.run_checker_path(report)
+            self.assertEqual(process.returncode, 2)
+            self.assertNotIn("Traceback", process.stderr)
+
+    def test_invalid_utf8_fails_closed_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "coverage.json"
+            report.write_bytes(b"\xff")
+            process = self.run_checker_path(report)
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("unreadable or invalid JSON", process.stderr)
+        self.assertNotIn("Traceback", process.stderr)
 
 
 if __name__ == "__main__":

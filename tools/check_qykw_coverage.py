@@ -6,11 +6,14 @@ import argparse
 from collections.abc import Mapping, Sequence
 import json
 import math
+import os
 from pathlib import Path
+import stat
 import sys
 
 
 _COVERAGE_VERSION = "7.16.0"
+_MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 
 class CoverageDataError(ValueError):
@@ -20,7 +23,10 @@ class CoverageDataError(ValueError):
 def _percentage(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise CoverageDataError(f"invalid {field}")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError) as error:
+        raise CoverageDataError(f"invalid {field}") from error
     if not math.isfinite(number) or not 0.0 <= number <= 100.0:
         raise CoverageDataError(f"invalid {field}")
     return number
@@ -38,12 +44,64 @@ def _mapping(value: object, field: str) -> Mapping[str, object]:
     return value
 
 
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _read_report_bytes(path: Path) -> bytes:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise CoverageDataError("coverage report is unreadable or invalid JSON") from error
+    if not stat.S_ISREG(before.st_mode):
+        raise CoverageDataError("coverage report must be a regular file")
+    if before.st_size > _MAX_REPORT_BYTES:
+        raise CoverageDataError("coverage report exceeds 2 MiB")
+
+    try:
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise CoverageDataError("coverage report must be a regular file")
+            if not _same_file(before, opened):
+                raise CoverageDataError("coverage report changed while reading")
+            if opened.st_size > _MAX_REPORT_BYTES:
+                raise CoverageDataError("coverage report exceeds 2 MiB")
+            if before.st_size != opened.st_size:
+                raise CoverageDataError("coverage report changed while reading")
+            data = stream.read(_MAX_REPORT_BYTES + 1)
+            after = os.fstat(stream.fileno())
+        path_after = path.lstat()
+    except CoverageDataError:
+        raise
+    except OSError as error:
+        raise CoverageDataError("coverage report is unreadable or invalid JSON") from error
+
+    if (
+        len(data) > _MAX_REPORT_BYTES
+        or after.st_size > _MAX_REPORT_BYTES
+        or path_after.st_size > _MAX_REPORT_BYTES
+    ):
+        raise CoverageDataError("coverage report exceeds 2 MiB")
+    if (
+        opened.st_size != after.st_size
+        or len(data) != after.st_size
+        or after.st_size != path_after.st_size
+        or not stat.S_ISREG(path_after.st_mode)
+        or not _same_file(after, path_after)
+    ):
+        raise CoverageDataError("coverage report changed while reading")
+    return data
+
+
 def read_percentages(path: Path) -> tuple[float, float]:
     """Read separate statement and branch percentages without modifying *path*."""
 
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        report = json.loads(_read_report_bytes(path).decode("utf-8"))
+    except CoverageDataError:
+        raise
+    except (UnicodeError, ValueError, RecursionError, OverflowError) as error:
         raise CoverageDataError("coverage report is unreadable or invalid JSON") from error
     root = _mapping(report, "report")
     meta = _mapping(root.get("meta"), "meta")
