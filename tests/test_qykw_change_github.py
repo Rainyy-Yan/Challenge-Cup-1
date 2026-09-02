@@ -139,6 +139,7 @@ def direct_src_payload() -> dict[str, object]:
 
 def blob_payload(oid: str, content: bytes) -> dict[str, object]:
     return {
+        "node_id": "B_kwDOJ1exampleBlobNodeId",
         "sha": oid,
         "size": len(content),
         "encoding": "base64",
@@ -410,6 +411,41 @@ class TestTrustedSourceTreeProvider(unittest.TestCase):
                 with self.assertRaises(ChangeGitHubError) as caught:
                     self.provider(transport).get_complete_tree(REPOSITORY, HEAD)
                 self.assertIn(caught.exception.code, {"invalid_blob_response", "blob_size_mismatch", "blob_oid_mismatch"})
+
+    def test_blob_node_id_is_optional_but_malformed_values_and_unknown_fields_fail_closed(self) -> None:
+        transport = QueueTransport()
+        queue_complete_tree(transport)
+        readme_response = transport.queue[2][4]
+        self.assertIsInstance(readme_response, dict)
+        readme_response.pop("node_id")
+        self.provider(transport).get_complete_tree(REPOSITORY, HEAD)
+
+        invalid_payloads = tuple(
+            {**blob_payload(README_OID, README), "node_id": value}
+            for value in (
+                None,
+                False,
+                7,
+                "",
+                "contains whitespace",
+                "非ASCII",
+                "A=" + "B",
+                "A" * 257,
+            )
+        ) + ({**blob_payload(README_OID, README), "unexpected": "field"},)
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                transport = QueueTransport()
+                transport.add("GET", f"{API}/repos/{REPOSITORY}/commits/{HEAD}", commit_payload())
+                transport.add(
+                    "GET",
+                    f"{API}/repos/{REPOSITORY}/git/trees/{ROOT_TREE}?recursive=1",
+                    recursive_tree_payload(),
+                )
+                transport.add("GET", f"{API}/repos/{REPOSITORY}/git/blobs/{README_OID}", payload)
+                with self.assertRaises(ChangeGitHubError) as caught:
+                    self.provider(transport).get_complete_tree(REPOSITORY, HEAD)
+                self.assertEqual(caught.exception.code, "invalid_blob_response")
 
     def test_empty_blob_is_valid_and_its_sha256_is_bound_into_index_digest(self) -> None:
         content = b""

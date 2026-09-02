@@ -842,8 +842,12 @@ def _read_blobs(
             "invalid_blob_response",
         )
         required = {"sha", "size", "encoding", "content"}
-        if not required.issubset(payload) or not set(payload).issubset(required | {"url"}):
+        if not required.issubset(payload) or not set(payload).issubset(
+            required | {"node_id", "url"}
+        ):
             raise ChangeGitHubError("invalid_blob_response")
+        if "node_id" in payload:
+            _node_id(payload.get("node_id"), "invalid_blob_response")
         if _oid(payload.get("sha"), "invalid_blob_response") != entry.git_sha:
             raise ChangeGitHubError("blob_oid_mismatch")
         if payload.get("encoding") != "base64":
@@ -1074,6 +1078,16 @@ def _login(value: object) -> str:
 
 def _oid(value: object, code: str = "invalid_git_oid") -> str:
     if type(value) is not str or len(value) not in {40, 64} or any(char not in _HEX for char in value):
+        raise ChangeGitHubError(code)
+    return value
+
+
+def _node_id(value: object, code: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) > 256
+        or re.fullmatch(r"[A-Za-z0-9_+/-]+={0,2}", value) is None
+    ):
         raise ChangeGitHubError(code)
     return value
 
