@@ -106,8 +106,11 @@ def main(argv: Sequence[str] | None = None, *, controller: object | None = None)
         if controller is None and (root or os.environ.get("GITHUB_ACTIONS") == "true"):
             if args.phase in _CHANGE_CLI_PHASES:
                 from tools.qykw.change_phases import build_change_controller
+                from tools.qykw.change_runtime import build_production_change_factory
 
-                controller = build_change_controller(args.phase)
+                controller = build_change_controller(
+                    args.phase, factory=build_production_change_factory()
+                )
             else:
                 from tools.qykw.phases import build_production_controller
 
