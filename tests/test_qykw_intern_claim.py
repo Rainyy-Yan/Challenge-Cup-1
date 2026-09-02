@@ -1311,11 +1311,11 @@ class TestInternPullLifecycle(unittest.TestCase):
         gateway = InternPullMemoryGateway()
         gateway.pull = PullSnapshot(9, "open", False, "alice", "Closes #18")
 
-        with self.assertRaisesRegex(InternError, "resolved_issue_mismatch"):
-            self.service(gateway).handle_pull_event(
-                self.event("edited"), expected_issue_number=17,
-            )
+        outcome = self.service(gateway).handle_pull_event(
+            self.event("edited"), expected_issue_number=17,
+        )
 
+        self.assertEqual(outcome, InternOutcome(17, (), "conflict"))
         self.assertEqual(gateway.writes, [])
 
 
@@ -1542,6 +1542,13 @@ class TestInternCli(unittest.TestCase):
                 self.assertEqual(stderr, "::error title=qykw intern::invalid_issue_number\n")
                 self.assertEqual(output, "")
                 self.last_service.handle_pull_event.assert_not_called()
+
+    def test_reconcile_target_drift_is_a_successful_conflict_with_no_output(self) -> None:
+        status, stderr, output = self.invoke(
+            "reconcile-pr", json.dumps(pull_event("edited")).encode("utf-8"),
+            outcome=InternOutcome(17, (), "conflict"),
+        )
+        self.assertEqual((status, stderr, output), (0, "", ""))
 
 
 class TestInternWorkflow(unittest.TestCase):

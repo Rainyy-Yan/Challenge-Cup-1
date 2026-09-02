@@ -740,7 +740,7 @@ class InternClaimService:
 
         record, pull_comment_id = binding
         if expected_issue_number is not None and record.issue_number != expected_issue_number:
-            raise InternError("resolved_issue_mismatch")
+            return InternOutcome(expected_issue_number, (), "conflict")
         try:
             pull = self.gateway.get_pull(event.pull_number)
         except InternError as error:
@@ -762,7 +762,7 @@ class InternClaimService:
             return InternOutcome(0, (), status)
         issue_number = parse_closing_issue(pull.body)
         if expected_issue_number is not None and issue_number != expected_issue_number:
-            raise InternError("resolved_issue_mismatch")
+            return InternOutcome(expected_issue_number, (), "conflict")
         if issue_number is None or pull.state != "open":
             return InternOutcome(0, (), "conflict")
         try:
