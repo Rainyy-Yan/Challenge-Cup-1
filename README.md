@@ -853,3 +853,17 @@ python3 server.py
 调 `config.EVIDENCE_MIN`。调低会放进更多东西，调高会误伤。改之前先跑
 `python3 -m unittest tests.test_audit -v`，那里的四类夹具就是防止调过头的护栏。
 真误伤了，正确做法通常是补切片而不是放松阈值。
+
+---
+
+## 十三、qykw 工程机器人
+
+qykw 采用相互隔离的审查通道和授权变更通道。日常分析、计划、审查、复审、状态与总结
+保持只读；只有配置的 writer 可以通过 `@qykw 修复 <要求>` 或 `@qykw 实现 <要求>`
+发起受限变更。机器人最多创建 Draft PR，最终审查和合并由 `xyh202131` 完成。
+
+- [代码审查机器人说明](docs/qykw代码审查机器人.md)
+- [授权变更通道说明](docs/qykw-authorized-change.md)
+
+当前代码和本地自动化测试已完成；Ubuntu Docker 实跑与真实 GitHub 端到端门禁尚未完成，
+因此不得将该通道表述为已上线或生产可用。

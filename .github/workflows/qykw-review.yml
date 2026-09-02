@@ -1,0 +1,217 @@
+name: qykw review
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, reopened]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number (1 to 999999999999999999)
+        required: true
+        type: number
+      command:
+        description: Read-only qykw command
+        required: true
+        type: choice
+        options: [帮助, 分析, 计划, 审查, 复审, 状态, 总结]
+
+permissions:
+  contents: none
+
+concurrency:
+  group: qykw-${{ github.repository_id }}-pr-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  authorize:
+    name: Authorize review request; change mode exits before side effects
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@qykw')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@qykw'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Authorize trusted request
+        working-directory: controller
+        env:
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/qykw"
+          python -m tools.qykw --phase authorize --output "$RUNNER_TEMP/qykw/authorize.json"
+      - name: Upload authorize artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-authorize-v1
+          path: ${{ runner.temp }}/qykw/authorize.json
+          retention-days: 1
+
+  analyze:
+    needs: authorize
+    outputs:
+      analysis_ready: ${{ steps.analysis_ready.outputs.ready }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Download authorize artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-authorize-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Analyze fixed snapshot
+        working-directory: controller
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QYKW_INFERENCE_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          QYKW_INFERENCE_BASE_URL: ${{ vars.QYKW_INFERENCE_BASE_URL }}
+          QYKW_INFERENCE_MODEL: ${{ vars.QYKW_INFERENCE_MODEL }}
+          QYKW_INFERENCE_ALLOWED_HOSTS: ${{ vars.QYKW_INFERENCE_ALLOWED_HOSTS }}
+          QYKW_INFERENCE_CONTEXT_WINDOW: ${{ vars.QYKW_INFERENCE_CONTEXT_WINDOW }}
+          QYKW_INFERENCE_MAX_OUTPUT_TOKENS: ${{ vars.QYKW_INFERENCE_MAX_OUTPUT_TOKENS }}
+          QYKW_INFERENCE_TIMEOUT_SECONDS: ${{ vars.QYKW_INFERENCE_TIMEOUT_SECONDS }}
+          QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/authorize.json
+          QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/analyze.json
+        run: python -m tools.qykw --phase analyze --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT"
+      - name: Mark completed analysis ready for publication
+        id: analysis_ready
+        working-directory: controller
+        run: |
+          python - "$RUNNER_TEMP/qykw/analyze.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as artifact:
+              payload = json.load(artifact)
+          ready = payload.get("run") is not None and payload.get("payload", {}).get("status") == "completed"
+          print(f"ready={'true' if ready else 'false'}")
+          PY
+      - name: Upload analysis artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-analyze-v1
+          path: ${{ runner.temp }}/qykw/analyze.json
+          retention-days: 1
+
+  publish:
+    needs: analyze
+    if: ${{ needs.analyze.outputs.analysis_ready == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Download analysis artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-analyze-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Publish current result
+        working-directory: controller
+        env:
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
+          QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/analyze.json
+          QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/publish.json
+        run: python -m tools.qykw --phase publish --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT"
+      - name: Upload publish artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-publish-v1
+          path: ${{ runner.temp }}/qykw/publish.json
+          retention-days: 1
+
+  record_failure:
+    needs: [authorize, analyze, publish]
+    if: ${{ always() && needs.authorize.result == 'success' && (needs.analyze.result == 'failure' || needs.publish.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Download authorize artifact for failure
+        if: ${{ needs.analyze.result == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-authorize-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Download analysis artifact for failure
+        if: ${{ needs.publish.result == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-analyze-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Record analysis failure
+        if: ${{ needs.analyze.result == 'failure' }}
+        working-directory: controller
+        env:
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
+          QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/authorize.json
+          QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/failure.json
+        run: python -m tools.qykw --phase record-failure --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT" --error-code analyze_failed
+      - name: Record publish failure
+        if: ${{ needs.publish.result == 'failure' }}
+        working-directory: controller
+        env:
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
+          QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/analyze.json
+          QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/failure.json
+        run: python -m tools.qykw --phase record-failure --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT" --error-code publish_failed
+      - name: Upload failure artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-failure-v1
+          path: ${{ runner.temp }}/qykw/failure.json
+          retention-days: 1
