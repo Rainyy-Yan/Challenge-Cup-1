@@ -567,39 +567,53 @@ class TestProductionChangeFactory(unittest.TestCase):
                 {"QYKW_REVIEW_TOKEN": "review"},
                 self.runtime("authorize-change"),
                 change_runtime._AuthorizeServices,
+                ("QYKW_REVIEW_TOKEN",),
             ),
             (
                 change_runtime._build_prepare,
                 {"GITHUB_TOKEN": "read", "QYKW_INFERENCE_API_KEY": "inference"},
                 self.runtime("prepare-change"),
                 change_runtime._PrepareServices,
+                ("GITHUB_TOKEN", "QYKW_INFERENCE_API_KEY"),
             ),
             (
                 change_runtime._build_verify,
                 {"GITHUB_TOKEN": "read"},
                 self.runtime("verify-change"),
                 change_runtime._VerifyServices,
+                ("GITHUB_TOKEN",),
             ),
             (
                 change_runtime._build_publish,
                 {"QYKW_PUBLISH_TOKEN": "publish"},
-                self.runtime("publish-change", runner_temp=Path("C:/runner/temp")),
+                self.runtime(
+                    "publish-change",
+                    runner_temp=Path(tempfile.gettempdir()).resolve(),
+                ),
                 change_runtime._PublishServices,
+                ("QYKW_PUBLISH_TOKEN",),
             ),
             (
                 change_runtime._build_record,
                 {"QYKW_REVIEW_TOKEN": "review"},
                 self.runtime("record-change-result"),
                 change_runtime._RecordServices,
+                ("QYKW_REVIEW_TOKEN",),
             ),
         )
-        for builder, environment, runtime, expected_type in cases:
+        for builder, environment, runtime, expected_type, required_credentials in cases:
             with self.subTest(builder=builder.__name__):
                 self.assertIsInstance(builder(environment, runtime), expected_type)
-                missing = dict(environment)
-                missing.pop(next(iter(missing)))
-                with self.assertRaisesRegex(ValueError, "phase_credentials_unavailable"):
-                    builder(missing, runtime)
+                for credential in required_credentials:
+                    missing = dict(environment)
+                    missing.pop(credential)
+                    with (
+                        self.subTest(missing=credential),
+                        self.assertRaisesRegex(
+                            ValueError, "phase_credentials_unavailable"
+                        ),
+                    ):
+                        builder(missing, runtime)
         with self.assertRaisesRegex(ValueError, "verification_image_digest_unavailable"):
             change_runtime._build_verify(
                 {"GITHUB_TOKEN": "read"}, SimpleNamespace(image_ref=None)
@@ -816,23 +830,36 @@ class TestProductionChangeFactory(unittest.TestCase):
         environment = {
             "QYKW_PUBLISH_TOKEN": "publish-token",
             "GITHUB_REPOSITORY": "owner/repo",
+            "GITHUB_API_URL": "https://github.example/api",
         }
         runtime = self.runtime(
             "publish-change", runner_temp=Path(tempfile.gettempdir()).resolve()
         )
         service = change_runtime._PublishServices(environment, runtime)
+        target_gateway = object()
+        state_gateway = object()
+        state = object()
+        source_provider = object()
         with (
             patch.object(change_runtime, "_request_from_artifact", return_value=request),
             patch.object(change_runtime, "_manifest_from_artifact", return_value=manifest),
             patch.object(
                 change_runtime, "_attestation_from_artifact", return_value=attestation
             ),
-            patch.object(change_runtime, "HttpChangeGitHubGateway", return_value=object()),
-            patch.object(change_runtime, "HttpGitHubGateway", return_value=object()),
-            patch.object(change_runtime, "GitHubCommentStateStore", return_value=object()),
             patch.object(
-                change_runtime, "HttpTrustedSourceTreeProvider", return_value=object()
-            ),
+                change_runtime, "HttpChangeGitHubGateway", return_value=target_gateway
+            ) as target_gateway_type,
+            patch.object(
+                change_runtime, "HttpGitHubGateway", return_value=state_gateway
+            ) as state_gateway_type,
+            patch.object(
+                change_runtime, "GitHubCommentStateStore", return_value=state
+            ) as state_type,
+            patch.object(
+                change_runtime,
+                "HttpTrustedSourceTreeProvider",
+                return_value=source_provider,
+            ) as source_provider_type,
             patch.object(change_runtime, "_config", return_value=object()),
             patch.object(change_runtime, "DeterministicChangePolicy", return_value=object()),
             patch.object(
@@ -841,8 +868,23 @@ class TestProductionChangeFactory(unittest.TestCase):
         ):
             result = service.publish_change({}, runtime)
         publication_request = publish.call_args.args[0]
+        target_gateway_type.assert_called_once_with(
+            "https://github.example/api", "owner/repo", "publish-token"
+        )
+        state_gateway_type.assert_called_once_with(
+            "https://github.example/api", "owner/repo", "publish-token", ""
+        )
+        state_type.assert_called_once_with(state_gateway, repository="owner/repo")
+        source_provider_type.assert_called_once_with(
+            api_url="https://github.example/api",
+            repository="owner/repo",
+            source_head_sha="a" * 40,
+            token="publish-token",
+        )
         self.assertEqual(publication_request.change, request)
         self.assertEqual(publication_request.branch_name, f"qykw/{request.context.run_id.lower()}-fix")
+        self.assertIs(publish.call_args.args[1], target_gateway)
+        self.assertIs(publish.call_args.args[2], state)
         self.assertEqual(publish.call_args.kwargs["runtime"].image_digest, IMAGE_DIGEST)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["data"]["publication"]["pull_number"], 9)
