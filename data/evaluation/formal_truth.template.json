@@ -6,7 +6,7 @@
   "blind_to_system_output": false,
   "independent_ratings": false,
   "dataset": {
-    "dataset_id": "<frozen-dataset-id>",
+    "dataset_id": "<replace-with-frozen-dataset-id>",
     "profile_ids": [],
     "cases": []
   },

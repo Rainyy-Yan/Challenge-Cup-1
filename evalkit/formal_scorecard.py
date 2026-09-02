@@ -20,6 +20,35 @@ COVERAGE_THRESHOLD = 0.90
 KAPPA_THRESHOLD = 0.60
 
 
+def _quality_gates(
+    *,
+    cases: int | None,
+    profiles: int | None,
+    claims_assessable_share: float | None,
+    adaptations_assessable_share: float | None,
+    hallucination_kappa: float | None,
+    adaptation_kappa: float | None,
+) -> dict:
+    """Return explicit actual/threshold decisions for every quality gate."""
+    gates = {
+        "cases": (cases, 50),
+        "profiles": (profiles, 3),
+        "claims_assessable_share": (claims_assessable_share, 0.95),
+        "adaptations_assessable_share": (adaptations_assessable_share, 0.95),
+        "hallucination_kappa": (hallucination_kappa, KAPPA_THRESHOLD),
+        "adaptation_kappa": (adaptation_kappa, KAPPA_THRESHOLD),
+    }
+    return {
+        name: {
+            "actual": actual,
+            "threshold": threshold,
+            "operator": ">=",
+            "decision": actual is not None and actual >= threshold,
+        }
+        for name, (actual, threshold) in gates.items()
+    }
+
+
 def wilson_interval(
     successes: int, total: int, confidence: float = 0.95
 ) -> tuple[float, float]:
@@ -374,6 +403,13 @@ def validate_truth(data: dict) -> list[str]:
                     )
 
     dataset = data.get("dataset")
+    dataset_id = dataset.get("dataset_id") if isinstance(dataset, dict) else None
+    if (
+        not isinstance(dataset_id, str)
+        or not dataset_id.strip()
+        or dataset_id != dataset_id.strip()
+    ):
+        errors.append("dataset.dataset_id must be a non-empty stable string")
     cases = dataset.get("cases") if isinstance(dataset, dict) else None
     if not isinstance(cases, list):
         return errors + ["dataset.cases must be a list"]
@@ -550,7 +586,10 @@ def _provenance(data: object) -> dict:
         return {}
     provenance = data.get("provenance")
     result = dict(provenance) if isinstance(provenance, dict) else {}
-    for key in ("dataset_id", "frozen_at", "seed"):
+    dataset = data.get("dataset")
+    if isinstance(dataset, dict) and "dataset_id" in dataset:
+        result["dataset_id"] = dataset["dataset_id"]
+    for key in ("frozen_at", "seed"):
         if key in data:
             result[key] = data[key]
     return result
@@ -568,6 +607,14 @@ def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
                 "minimum_assessable_share": 0.95,
                 "minimum_kappa": KAPPA_THRESHOLD,
             },
+            "gates": _quality_gates(
+                cases=None,
+                profiles=None,
+                claims_assessable_share=None,
+                adaptations_assessable_share=None,
+                hallucination_kappa=None,
+                adaptation_kappa=None,
+            ),
         },
         "kappa": {
             "hallucination": _kappa_placeholder(),
@@ -678,6 +725,24 @@ def build_scorecard(data: dict) -> dict:
                 "minimum_assessable_share": 0.95,
                 "minimum_kappa": KAPPA_THRESHOLD,
             },
+            "gates": _quality_gates(
+                cases=len(data["dataset"]["cases"]),
+                profiles=len(data["dataset"]["profile_ids"]),
+                claims_assessable_share=(
+                    sum(record["final_label"] != "unassessable" for record in claims)
+                    / len(claims)
+                    if claims
+                    else 0.0
+                ),
+                adaptations_assessable_share=(
+                    sum(record["final_label"] != "unassessable" for record in adaptations)
+                    / len(adaptations)
+                    if adaptations
+                    else 0.0
+                ),
+                hallucination_kappa=hallucination_kappa["value"],
+                adaptation_kappa=adaptation_kappa["value"],
+            ),
         },
         "hallucination_rate": hallucination,
         "adaptation_accuracy": adaptation,
@@ -743,6 +808,16 @@ def render_scorecard_markdown(scorecard: dict) -> str:
     ]
     for error in scorecard["data_quality"]["errors"]:
         lines.append(f"- {error}")
+    for gate_name, gate in scorecard["data_quality"]["gates"].items():
+        actual = (
+            f"{float(gate['actual']):.6f}"
+            if isinstance(gate["actual"], (int, float))
+            else _display(gate["actual"])
+        )
+        lines.append(
+            f"- {gate_name}: actual {actual}; threshold {gate['operator']} "
+            f"{float(gate['threshold']):.6f}; decision: {gate['decision']}"
+        )
     lines.extend(["", "## Metrics", ""])
     for title, key in (
         ("Hallucination rate", "hallucination_rate"),

@@ -13,6 +13,7 @@ from unittest.mock import patch
 from evalkit.formal_scorecard import (
     build_scorecard,
     cluster_bootstrap_interval,
+    render_scorecard_markdown,
     validate_truth,
     wilson_interval,
 )
@@ -61,6 +62,7 @@ def valid_truth() -> dict:
         "blind_to_system_output": True,
         "independent_ratings": True,
         "dataset": {
+            "dataset_id": "frozen-eval-v1",
             "profile_ids": ["profile-1", "profile-2", "profile-3"],
             "cases": cases,
         },
@@ -161,6 +163,28 @@ class TestIntervals(unittest.TestCase):
 
 
 class TestTruthValidation(unittest.TestCase):
+    def test_rejects_missing_dataset_id(self):
+        truth = valid_truth()
+        del truth["dataset"]["dataset_id"]
+        self.assertEqual(
+            validate_truth(truth),
+            ["dataset.dataset_id must be a non-empty stable string"],
+        )
+
+    def test_rejects_empty_or_whitespace_dataset_id(self):
+        for dataset_id in ("", "   ", " frozen-eval-v1 "):
+            with self.subTest(dataset_id=dataset_id):
+                truth = valid_truth()
+                truth["dataset"]["dataset_id"] = dataset_id
+                self.assertEqual(
+                    validate_truth(truth),
+                    ["dataset.dataset_id must be a non-empty stable string"],
+                )
+
+    def test_valid_dataset_id_is_in_report_provenance(self):
+        scorecard = build_scorecard(valid_truth())
+        self.assertEqual(scorecard["provenance"]["dataset_id"], "frozen-eval-v1")
+
     def test_rejects_fewer_than_fifty_cases(self):
         truth = valid_truth()
         truth["dataset"]["cases"] = truth["dataset"]["cases"][:49]
@@ -551,6 +575,29 @@ class TestScorecard(unittest.TestCase):
         self.assertIn("provenance", scorecard)
         self.assertIn("limitations", scorecard)
 
+    def test_markdown_renders_each_data_quality_gate_with_json_values(self):
+        scorecard = build_scorecard(passing_truth())
+        markdown = render_scorecard_markdown(scorecard)
+
+        gates = scorecard["data_quality"]["gates"]
+        for gate_name in (
+            "cases",
+            "profiles",
+            "claims_assessable_share",
+            "adaptations_assessable_share",
+            "hallucination_kappa",
+            "adaptation_kappa",
+        ):
+            gate = gates[gate_name]
+            self.assertIn(
+                (
+                    f"- {gate_name}: actual {gate['actual']:.6f}; "
+                    f"threshold {gate['operator']} {gate['threshold']:.6f}; "
+                    f"decision: {gate['decision']}"
+                ),
+                markdown,
+            )
+
     def test_point_estimate_above_adaptation_target_but_lower_bound_below_target_fails(self):
         truth = valid_truth()
         for index, record in enumerate(truth["adaptations"]):
@@ -643,3 +690,34 @@ class TestCli(unittest.TestCase):
             self.assertTrue((output / "scorecard.md").is_file())
             report = json.loads((output / "scorecard.json").read_text("utf-8"))
             self.assertEqual(report["overall_status"], "not_assessable")
+
+    def test_cli_writes_reports_and_exits_zero_for_assessable_metric_fail(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "report"
+            result = self._run_cli(valid_truth(), output)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((output / "scorecard.json").is_file())
+            self.assertTrue((output / "scorecard.md").is_file())
+            report = json.loads((output / "scorecard.json").read_text("utf-8"))
+            self.assertEqual(report["overall_status"], "fail")
+
+    def test_cli_writes_not_assessable_reports_for_top_level_array(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "report"
+            result = self._run_cli([], output)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertTrue((output / "scorecard.json").is_file())
+            self.assertTrue((output / "scorecard.md").is_file())
+
+    def test_cli_writes_not_assessable_reports_for_empty_object_and_missing_fields(self):
+        for truth in ({}, {"version": 1}):
+            with self.subTest(truth=truth):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    output = Path(temporary_directory) / "report"
+                    result = self._run_cli(truth, output)
+
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue((output / "scorecard.json").is_file())
+                    self.assertTrue((output / "scorecard.md").is_file())
