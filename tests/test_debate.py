@@ -37,25 +37,25 @@ class TestDebate(unittest.TestCase):
         self.agent = DebateAgent(self.retriever, self.auditor)
 
     def test_same_claim_same_source_is_agreed(self):
-        t = "报警SRVO-005含义为机器人超程。"
-        out, log = self.agent.run([Claim(text=t, source_id="KB-017")],
-                                  [Claim(text=t, source_id="KB-017")])
+        t = "SRVO-001 表示操作面板急停被按下。"
+        out, log = self.agent.run([Claim(text=t, source_id="KB-015")],
+                                  [Claim(text=t, source_id="KB-015")])
         self.assertEqual(log["stats"]["agreed_n"], 1)
         self.assertEqual(out[0].consensus, CONSENSUS_BOTH)
         self.assertEqual(len(out[0].proposed_by), 2)
 
     def test_unrelated_claims_are_singles(self):
         out, log = self.agent.run(
-            [Claim(text="加注润滑脂时必须打开排脂口。", source_id="KB-020")],
-            [Claim(text="机器人安全围栏高度不低于1.4米。", source_id="KB-022")])
+            [Claim(text="注脂前必须拆下排脂塞。", source_id="KB-020")],
+            [Claim(text="带联锁的安全门打开时应停止自动运行。", source_id="KB-022")])
         self.assertEqual(log["stats"]["single_n"], 2)
         self.assertTrue(all(c.consensus == CONSENSUS_SINGLE for c in out))
 
     def test_conflict_is_arbitrated_by_evidence(self):
         """同一件事两种说法，正确的一方证据分更高，应当胜出。"""
-        right = Claim(text="T1模式下末端移动速度被限制在250毫米每秒以内。",
+        right = Claim(text="手动模式速度最高为250 mm/s。",
                       source_id="KB-004")
-        wrong = Claim(text="T1模式下末端移动速度被限制在600毫米每秒以内。",
+        wrong = Claim(text="手动模式速度最高为600 mm/s。",
                       source_id="KB-004")
         out, log = self.agent.run([right], [wrong])
         self.assertEqual(log["stats"]["arbitrated_n"], 1)
@@ -65,8 +65,8 @@ class TestDebate(unittest.TestCase):
 
     def test_arbitration_records_the_rival(self):
         """被否决的说法要留档，答辩时要能展示裁判否掉了什么。"""
-        right = Claim(text="机器人安全围栏高度不低于1.4米。", source_id="KB-022")
-        wrong = Claim(text="机器人安全围栏高度不低于9.9米。", source_id="KB-022")
+        right = Claim(text="手动模式速度最高为250 mm/s。", source_id="KB-004")
+        wrong = Claim(text="手动模式速度最高为600 mm/s。", source_id="KB-004")
         out, _ = self.agent.run([right], [wrong])
         self.assertTrue(out[0].rival, "对立说法应当被记录")
 

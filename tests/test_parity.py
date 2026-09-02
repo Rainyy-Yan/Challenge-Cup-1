@@ -143,7 +143,7 @@ class TestParity(unittest.TestCase):
         from core.retrieval import Retriever
         from core.schema import Claim
         cases = [
-            ("报警SRVO-005含义为机器人超程。", "KB-017"),
+            ("FANUC 的报警含义必须按报警代码、控制器软件版本和机型在官方 Alarm Code Lookup 或对应技术手册中查询。", "KB-017"),
             ("T1模式下末端法兰中心的移动速度被限制在200毫米每秒以内。", "KB-004"),
             ("机器人安全围栏高度不低于1.4米。", "KB-022"),
             ("报警SRVO-002含义为机器人超程。", "KB-016"),
@@ -166,7 +166,10 @@ class TestParity(unittest.TestCase):
     def test_adaptive_selection_order_matches(self):
         """同一份背景、同一串对错，两边选出的题号序列必须完全一样。"""
         from core.cat import AdaptiveSession
-        items = json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+        from core.demo_items import formal_demo_items
+        items = formal_demo_items(
+            json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+        )
         kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
         bg = {"education": "高职", "hands_on_hours": 480}
         pattern = [True, False, True, True, False, False, True, True,
@@ -352,12 +355,10 @@ class TestEvidenceParity(unittest.TestCase):
             self.assertEqual(got, want, f"{k}/{n} 判定不一致")
 
     def test_ability_profile_matches(self):
-        from agents.diagnose import DiagnoseAgent
         from core.ability import build
-        from core.llm import MockLLM
-        from orchestrator import load_profile
+        from orchestrator import Orchestrator, load_profile
         for pid in ("P-A", "P-B", "P-C"):
-            diag = DiagnoseAgent(MockLLM()).run(load_profile(pid))
+            diag = Orchestrator().diagnoser.run(load_profile(pid))
             want = build(diag)
             js = run_js(f"""
             const d = SNAP.sessions[{pid!r}].diagnosis;

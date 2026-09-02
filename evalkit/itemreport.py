@@ -22,6 +22,7 @@ from collections import Counter
 from pathlib import Path
 
 import config
+from core.demo_items import formal_demo_items
 from core.itemquality import calibrate, position_bias, structural, summarize
 from core.retrieval import Retriever
 
@@ -43,8 +44,10 @@ FLAW_CN = {
 }
 
 
-def build(records: dict | None = None) -> dict:
+def build(records: dict | None = None, *, formal_demo: bool = False) -> dict:
     items = json.loads(config.PRETEST_PATH.read_text(encoding="utf-8"))["items"]
+    if formal_demo:
+        items = formal_demo_items(items)
     R = Retriever.from_jsonl(config.KB_PATH)
     bodies = {}
     for c in R.chunks:
@@ -93,9 +96,11 @@ def _worklist(reports) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="evalkit/report_items")
+    ap.add_argument("--formal-demo", action="store_true",
+                    help="只检查允许在正式 Demo 中出现的固定题")
     args = ap.parse_args()
 
-    res = build()
+    res = build(formal_demo=args.formal_demo)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "items.json").write_text(

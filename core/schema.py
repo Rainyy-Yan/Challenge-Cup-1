@@ -43,7 +43,9 @@ class Chunk:
     source_note: str = ""
     # 来源：手工录入还是从原始文档摄入。摄入的可回溯到文件与位置。
     origin: str = "manual"
-
+    # 资料失效或尚未完成来源核验时，可保留原始切片供内部复核，
+    # 但不得让它进入在线服务、离线快照或答辩展示。
+    demo_eligible: bool = True
 
 @dataclass
 class Mastery:
