@@ -1,0 +1,22 @@
+version = 1
+language = "zh-CN"
+
+[authorization]
+code_writers = ["xyh202131"]
+
+[review]
+auto_initial = true
+auto_on_synchronize = false
+max_findings = 20
+run_timeout_seconds = 900
+
+[context]
+safety_reserve_ratio = 0.20
+max_chunk_ratio = 0.25
+
+[commands]
+enabled = ["帮助", "分析", "计划", "审查", "复审", "状态", "总结", "修复", "实现", "停止"]
+
+[verification]
+required_checks = []
+profiles = ["backend", "frontend", "full"]
