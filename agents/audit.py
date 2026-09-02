@@ -23,11 +23,51 @@ from core.retrieval import Retriever, numbers_in, overlap_ratio, tokenize
 from core.schema import (Claim, VERDICT_CONTRADICTED, VERDICT_SUPPORTED,
                          VERDICT_UNSUPPORTED)
 
+
+_SCOPE_EXPANSION_CUES = (
+    "所有", "任何情况下", "任何品牌", "一律", "无论", "都必须", "都使用",
+)
+_SCOPE_LIMIT_CUES = (
+    "为例", "仅适用", "仅在", "因控制器而异", "实际机型", "具体机型",
+    "机型手册", "现场规程", "通用数值标准",
+)
+_RELAXATION_CUES = (
+    "无需", "不必", "不需要", "不用", "自动", "完全替代", "可以省略",
+)
+_REQUIREMENT_CUES = (
+    "必须", "需要", "需", "应", "不得", "不能", "错误", "未知", "前提",
+    "完成后", "重新",
+)
+
 _SYSTEM = (
     "你是专业内容的审核员。给你一条陈述和一段资料，判断资料是否支持该陈述。"
     "只输出 JSON：{\"verdict\": \"supported|unsupported|contradicted\", \"reason\": \"简短理由\"}。"
     "资料没提到的内容一律判 unsupported，不要凭常识补充。"
 )
+
+
+def semantic_boundary_issue(claim_text: str, evidence_text: str) -> str | None:
+    """识别词面重合无法发现的范围扩大与条件取消。
+
+    这里只处理可由原文边界词直接证明的情况，不把它冒充通用 NLI：开放式
+    语义蕴含仍交给真模型复核。两类规则都要求证据中存在相反的限制信号，
+    避免仅因断言出现“必须”或“自动”等词就误伤。
+    """
+    expands_scope = any(cue in claim_text for cue in _SCOPE_EXPANSION_CUES)
+    limits_scope = any(cue in evidence_text for cue in _SCOPE_LIMIT_CUES)
+    preserves_scope = any(cue in claim_text for cue in _SCOPE_LIMIT_CUES)
+    if expands_scope and limits_scope and not preserves_scope:
+        return "断言把资料限定的适用范围扩大成了无条件通用结论"
+
+    relaxation = next(
+        (cue for cue in _RELAXATION_CUES if cue in claim_text),
+        None,
+    )
+    evidence_relaxes = any(cue in evidence_text for cue in _RELAXATION_CUES)
+    has_requirement = any(cue in evidence_text for cue in _REQUIREMENT_CUES)
+    if relaxation and not evidence_relaxes and has_requirement:
+        return f"断言用“{relaxation}”取消了资料明确保留的条件或步骤"
+    return None
 
 
 class AuditAgent:
@@ -49,6 +89,11 @@ class AuditAgent:
             if extra:
                 return (VERDICT_CONTRADICTED,
                         f"断言中的数值 {sorted(extra)} 在所引切片中不存在", ratio)
+        boundary_issue = semantic_boundary_issue(
+            claim.text, f"{chunk.title} {chunk.text}"
+        )
+        if boundary_issue:
+            return VERDICT_CONTRADICTED, boundary_issue, ratio
         if ratio < config.EVIDENCE_MIN:
             return VERDICT_UNSUPPORTED, f"与所引切片的证据覆盖率仅 {ratio:.2f}", ratio
         if config.TERM_STRICT:

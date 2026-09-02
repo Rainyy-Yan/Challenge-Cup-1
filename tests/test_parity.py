@@ -150,6 +150,10 @@ class TestParity(unittest.TestCase):
             ("减速机润滑脂应当每运行三千小时更换一次。", "KB-022"),
             ("控制柜每运行500小时需要更换一次主控板电池。", None),
             ("工件坐标系可通过六点法标定。", "KB-999"),
+            ("机器人可在手动或自动模式下运行。所有工业机器人的手动模式只能通过"
+             "示教器操作，速度最高为250 mm/s。", "KB-004"),
+            ("工具或有效载荷数据未知时，使用负载辨识功能后无需再核对负载数据。",
+             "KB-024"),
         ]
         auditor = AuditAgent(MockLLM(), Retriever.from_jsonl(config.KB_PATH))
         js = run_js(f"""

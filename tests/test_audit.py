@@ -16,7 +16,7 @@ from agents.audit import AuditAgent
 import config
 from core.llm import MockLLM
 from core.retrieval import Retriever
-from core.schema import (Claim, VERDICT_CONTRADICTED, VERDICT_SUPPORTED,
+from core.schema import (Chunk, Claim, VERDICT_CONTRADICTED, VERDICT_SUPPORTED,
                          VERDICT_UNSUPPORTED)
 
 
@@ -99,6 +99,100 @@ class TestAudit(unittest.TestCase):
         c = Claim(text="SRVO-001 表示操作面板急停被按下。", source_id="KB-015")
         self.auditor.review([c])
         self.assertGreater(c.evidence_score, config.EVIDENCE_MIN)
+
+    def test_scope_expansion_is_contradicted(self):
+        retriever = Retriever([Chunk(
+            id="KB-SCOPE", kp="KP-X", title="特定控制器手册",
+            source="manual", verified=True,
+            text="以ABB所列控制器为例，手动模式速度最高为250 mm/s；"
+                 "具体模式权限应按实际机型手册确认。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="所有工业机器人的手动模式速度最高为250 mm/s。",
+            source_id="KB-SCOPE",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(kept)
+        self.assertEqual(dropped[0].verdict, VERDICT_CONTRADICTED)
+        self.assertIn("适用范围", dropped[0].audit_note)
+
+    def test_requirement_relaxation_is_contradicted(self):
+        retriever = Retriever([Chunk(
+            id="KB-LOAD", kp="KP-X", title="负载数据",
+            source="manual", verified=True,
+            text="工具或有效载荷数据未知时，可用负载辨识功能定义；"
+                 "错误的负载数据可能导致碰撞检测失效。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="使用负载辨识功能后无需再核对工具或有效载荷数据。",
+            source_id="KB-LOAD",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(kept)
+        self.assertEqual(dropped[0].verdict, VERDICT_CONTRADICTED)
+        self.assertIn("条件或步骤", dropped[0].audit_note)
+
+    def test_explicit_universal_scope_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-UNIVERSAL", kp="KP-X", title="通用规则",
+            source="manual", verified=True,
+            text="所有设备都必须在检修前断开能源。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="所有设备都必须在检修前断开能源。",
+            source_id="KB-UNIVERSAL",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_preserved_scope_limit_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-LIMITED", kp="KP-X", title="特定控制器手册",
+            source="manual", verified=True,
+            text="以ABB所列控制器为例，所有该型号设备在检修前必须断开能源。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="以ABB所列控制器为例，所有该型号设备在检修前必须断开能源。",
+            source_id="KB-LIMITED",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_explicit_relaxation_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-RELAX", kp="KP-X", title="自动检查",
+            source="manual", verified=True,
+            text="自检完成后无需再次运行同一项自检。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="自检完成后无需再次运行同一项自检。",
+            source_id="KB-RELAX",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
+
+    def test_equivalent_relaxation_wording_is_not_blocked(self):
+        retriever = Retriever([Chunk(
+            id="KB-RELAX-SYNONYM", kp="KP-X", title="自动检查",
+            source="manual", verified=True,
+            text="自检完成后无需再次运行同一项自检。",
+        )])
+        auditor = AuditAgent(MockLLM(), retriever)
+        claim = Claim(
+            text="自检完成后不需要再次运行同一项自检。",
+            source_id="KB-RELAX-SYNONYM",
+        )
+        kept, dropped = auditor.review([claim])
+        self.assertFalse(dropped)
+        self.assertEqual(kept[0].verdict, VERDICT_SUPPORTED)
 
 
 if __name__ == "__main__":

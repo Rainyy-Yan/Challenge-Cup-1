@@ -673,6 +673,35 @@ function draftClaims(chunks, n) {
 /* ---------- 审核裁判：对应 agents/audit.py ---------- */
 
 const EVIDENCE_MIN = 0.42, MISATTRIB_MARGIN = 0.15;
+const SCOPE_EXPANSION_CUES = [
+  "所有", "任何情况下", "任何品牌", "一律", "无论", "都必须", "都使用"
+];
+const SCOPE_LIMIT_CUES = [
+  "为例", "仅适用", "仅在", "因控制器而异", "实际机型", "具体机型",
+  "机型手册", "现场规程", "通用数值标准"
+];
+const RELAXATION_CUES = [
+  "无需", "不必", "不需要", "不用", "自动", "完全替代", "可以省略"
+];
+const REQUIREMENT_CUES = [
+  "必须", "需要", "需", "应", "不得", "不能", "错误", "未知", "前提", "完成后",
+  "重新"
+];
+
+function semanticBoundaryIssue(claimText, evidenceText) {
+  const expandsScope = SCOPE_EXPANSION_CUES.some(cue => claimText.includes(cue));
+  const limitsScope = SCOPE_LIMIT_CUES.some(cue => evidenceText.includes(cue));
+  const preservesScope = SCOPE_LIMIT_CUES.some(cue => claimText.includes(cue));
+  if (expandsScope && limitsScope && !preservesScope)
+    return "断言把资料限定的适用范围扩大成了无条件通用结论";
+
+  const relaxation = RELAXATION_CUES.find(cue => claimText.includes(cue));
+  const evidenceRelaxes = RELAXATION_CUES.some(cue => evidenceText.includes(cue));
+  const hasRequirement = REQUIREMENT_CUES.some(cue => evidenceText.includes(cue));
+  if (relaxation && !evidenceRelaxes && hasRequirement)
+    return `断言用“${relaxation}”取消了资料明确保留的条件或步骤`;
+  return null;
+}
 
 function auditOne(claim, R) {
   if (!claim.source_id) return {verdict:"unsupported", note:"未给出知识库引用", ratio:0};
@@ -685,6 +714,10 @@ function auditOne(claim, R) {
   const extra = [...cn].filter(x => !kn.has(x));
   if (extra.length)
     return {verdict:"contradicted", note:`断言中的数值 ${extra.join("、")} 在所引切片中不存在`, ratio};
+
+  const boundaryIssue = semanticBoundaryIssue(claim.text, full);
+  if (boundaryIssue)
+    return {verdict:"contradicted", note:boundaryIssue, ratio};
 
   if (ratio < EVIDENCE_MIN)
     return {verdict:"unsupported", note:`与所引切片的证据覆盖率仅 ${ratio.toFixed(2)}`, ratio};
