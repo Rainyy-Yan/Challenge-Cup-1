@@ -344,7 +344,7 @@ def validate_change_artifact(
         expected_phase is not None and phase != expected_phase
     ):
         raise ValueError("artifact_phase_mismatch")
-    if payload.get("schema_version") != 1:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
         raise ValueError("unsupported_artifact_version")
     if type(payload.get("workflow_run_id")) is not int or payload["workflow_run_id"] <= 0:
         raise ValueError("invalid_workflow_run_id")

@@ -240,6 +240,19 @@ class TestChangeArtifactBoundary(TestChangePhaseRouting):
                     _run_phase("prepare-change", artifact, self.controller("prepare-change", services), None)
                 self.assertEqual(services.calls, [])
 
+    def test_boolean_schema_versions_are_rejected(self) -> None:
+        from tools.qykw.__main__ import _validate_artifact
+        from tools.qykw.change_phases import _artifact_digest
+
+        for value in (True, False):
+            artifact = self.artifact("authorize-change")
+            artifact["schema_version"] = value
+            artifact["digest"] = _artifact_digest(artifact)
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "unsupported_artifact_version"
+            ):
+                _validate_artifact(artifact)
+
     def test_cross_phase_direct_publish_and_cross_run_runtime_are_rejected(self) -> None:
         from tools.qykw.__main__ import _run_phase
 
