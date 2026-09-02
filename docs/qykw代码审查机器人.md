@@ -39,6 +39,7 @@ qykw 是启元开物独立工程机器人。默认审查通道只提供分析、
 - Reaction 失败只记录警告，不阻断已授权任务。
 - Head 漂移会将运行标记为 `stale`，不会发布旧行号评论。
 - 后端或执行异常会将运行标记为 `FAILED`；`REVIEW`、`REREVIEW` 记录 `review_failed`，`ANALYZE`、`PLAN` 记录 `analyze_failed`，且不公开请求、响应或凭据。
+- 推理供应商异常同时写入固定的 `inference_<类别>` Actions 错误码，便于区分超时、DNS、TLS、限流和无效响应；错误码来自受控枚举，不包含 URL、响应正文或凭据。
 - 结构化结果不符合约束时不记作上述执行失败；运行会安全返回“审查未完成”和零条 findings。
 - 推理适配器只使用标准 `input` 与 `instructions` 字段；内部 `maximum` 策略映射为后端接受的最高兼容档。完成响应的 `output_text` 会再次执行严格 JSON 解码和本地 Schema 校验，`incomplete`、`failed` 或用量异常均按无效结果关闭。
 - 停止标记独立追加；并发中的旧状态保存不能覆盖它。
@@ -77,4 +78,4 @@ py -3 tools/check_qykw_coverage.py qykw-coverage.json --line 95 --branch 90
 
 门禁分别要求语句覆盖率至少 95%、分支覆盖率至少 90%，不使用语句与分支混合后的总百分比。
 
-授权变更的本地测试和静态工作流检查已经完成，但 Ubuntu Docker 实跑与真实 GitHub 端到端门禁尚未完成。在这两项通过前，不得宣称该通道已上线或生产可用。
+本地 Linux Docker 镜像构建、受限容器运行和真实 Issue 领取流程已通过，仓库已配置 digest-pinned GHCR 引用。授权变更仍需完成真实评论、权限、并发和 Draft PR 端到端验收；审查推理链路也应以实际 PR 的 qykw 终态与行评结果为准，不能用本地测试或单独的 CI 通过代替线上验收。
