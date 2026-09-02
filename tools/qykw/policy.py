@@ -106,28 +106,33 @@ _HIGH_CONFIDENCE_SECRET = re.compile(
     r"(?:"
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
     r"\bgh[pousr]_[A-Za-z0-9]{20,}\b|"
+    r"\bnpm_[A-Za-z0-9]{20,}\b|"
     r"\bAKIA[A-Z0-9]{16}\b|"
-    r"\b(?:api[_-]?key|auth[_-]?token|password|secret)\s*[:=]\s*['\"][^'\"\s]{16,}['\"]"
+    r"(?:^|[^A-Za-z0-9_])_?(?:api[_-]?key|auth[_-]?token|password|secret|token)"
+    r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=~-]{16,}['\"]?|"
+    r"\bauthorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._~+/=-]{16,}"
     r")",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
 )
 _WINDOWS_INVALID_CHARACTERS = frozenset('<>:"|?*')
-_CREDENTIAL_PATHS = frozenset(
+_CREDENTIAL_BASENAMES = frozenset(
     {
         ".npmrc",
         ".netrc",
         ".pypirc",
         ".envrc",
         ".git-credentials",
-        ".docker/config.json",
-        ".aws/credentials",
-        ".config/gcloud/application_default_credentials.json",
-        ".azure/accesstokens.json",
-        ".kube/config",
     }
+)
+_CREDENTIAL_PATH_SUFFIXES = (
+    (".docker", "config.json"),
+    (".aws", "credentials"),
+    (".config", "gcloud", "application_default_credentials.json"),
+    (".azure", "accesstokens.json"),
+    (".kube", "config"),
 )
 
 
@@ -577,7 +582,7 @@ def _normalize_change_path(value: str) -> str:
         raise ValueError("qykw_self_change_forbidden")
     if _collision_key(normalized) in _SENSITIVE_PATHS:
         raise ValueError("sensitive_path_forbidden")
-    if _collision_key(normalized) in _CREDENTIAL_PATHS:
+    if _is_credential_path(normalized):
         raise ValueError("credential_path_forbidden")
     return normalized
 
@@ -626,6 +631,16 @@ def _is_sensitive_component(part: str) -> bool:
             r"^(?:permissions?|secrets?|tokens?|credentials?)(?:$|[_-])",
             stem,
         )
+    )
+
+
+def _is_credential_path(path: str) -> bool:
+    parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
+    if any(part in _CREDENTIAL_BASENAMES for part in parts):
+        return True
+    return any(
+        len(parts) >= len(suffix) and parts[-len(suffix):] == suffix
+        for suffix in _CREDENTIAL_PATH_SUFFIXES
     )
 
 

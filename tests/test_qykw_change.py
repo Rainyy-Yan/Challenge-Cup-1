@@ -450,6 +450,72 @@ class TestPatchGeneration(unittest.TestCase):
             provider.request.payload["untrusted"]["source_omissions"],
         )
 
+    def test_nested_credential_paths_and_unquoted_tokens_fail_closed(self) -> None:
+        cases = (
+            (
+                "packages/app/.npmrc",
+                "//registry.example/:_authToken=npm_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n",
+            ),
+            (
+                "settings.py",
+                "auth_token=npm_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n",
+            ),
+            ("auth.txt", "authToken: ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n"),
+            ("password.txt", "password=ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n"),
+            ("api.txt", "api_key=ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n"),
+            ("token.txt", "token=ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n"),
+            (
+                "header.txt",
+                "Authorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n",
+            ),
+        )
+        for path, content in cases:
+            source = changed_file(path, content=content)
+            parents = ()
+            if path.startswith("packages/app/"):
+                parents = (
+                    SourceTreeEntry("packages", "040000", "tree", "d" * 40),
+                    SourceTreeEntry("packages/app", "040000", "tree", "e" * 40),
+                )
+            source_tree = tree_index(
+                *parents,
+                SourceTreeEntry(
+                    path, "100644", "blob", git_blob_sha(content.encode())
+                )
+            )
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+                    self.generate(
+                        snapshot_value=snapshot(source),
+                        subject=policy(source_tree=source_tree),
+                        provider=provider,
+                    )
+                self.assertEqual(provider.calls, 0)
+
+        safe_content = "token budget calculation uses ordinary words\n"
+        safe = changed_file("notes.txt", content=safe_content)
+        provider = FakeInferenceProvider(
+            patch_value(path="generated.py", before="", after="x\n", create=True)
+        )
+        self.generate(
+            snapshot_value=snapshot(safe),
+            subject=policy(
+                source_tree=tree_index(
+                    SourceTreeEntry(
+                        "notes.txt",
+                        "100644",
+                        "blob",
+                        git_blob_sha(safe_content.encode()),
+                    )
+                )
+            ),
+            provider=provider,
+        )
+        self.assertEqual(provider.calls, 1)
+
     def test_source_selection_truncates_stably_with_path_only_omissions(self) -> None:
         files = tuple(
             changed_file(f"file-{index:03}.py", content=f"value={index}\n")
@@ -491,6 +557,34 @@ class TestPatchGeneration(unittest.TestCase):
             omission_metadata,
             {"total": 1, "included": 1, "truncated": 0},
         )
+
+    def test_trusted_source_path_budget_matches_policy_at_240_and_241_bytes(self) -> None:
+        for length in (240, 241):
+            path = "a" * (length - len(".py")) + ".py"
+            content = "print('safe')\n"
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(length=length):
+                self.generate(
+                    snapshot_value=snapshot(source),
+                    subject=policy(
+                        source_tree=tree_index(
+                            SourceTreeEntry(
+                                path,
+                                "100644",
+                                "blob",
+                                git_blob_sha(content.encode()),
+                            )
+                        )
+                    ),
+                    provider=provider,
+                )
+                self.assertEqual(
+                    provider.request.payload["untrusted"]["source_files"][0]["path"],
+                    path,
+                )
 
     def test_source_selection_truncates_at_serialized_context_budget(self) -> None:
         files = tuple(
@@ -1068,6 +1162,16 @@ class TestChangePolicy(unittest.TestCase):
             ".config/gcloud/application_default_credentials.json",
             ".azure/accessTokens.json",
             ".kube/config",
+            "packages/app/.npmrc",
+            "packages/app/.netrc",
+            "packages/app/.pypirc",
+            "packages/app/.envrc",
+            "packages/app/.git-credentials",
+            "packages/app/.docker/config.json",
+            "packages/app/.aws/credentials",
+            "packages/app/.config/gcloud/application_default_credentials.json",
+            "packages/app/.azure/accessTokens.json",
+            "packages/app/.kube/config",
         )
         for path in dangerous:
             with self.subTest(path=path):

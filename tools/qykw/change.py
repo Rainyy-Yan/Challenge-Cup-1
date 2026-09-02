@@ -618,7 +618,7 @@ def _validate_trusted_source_files(
         )
         if (
             not source.path
-            or len(path_bytes) > 240
+            or len(path_bytes) > 1024
             or not source.content
             or len(encoded) > 256 * 1024
             or context_bytes > _MAX_TRUSTED_SOURCE_CONTEXT_BYTES
@@ -647,7 +647,7 @@ def _validate_source_omissions(
         if (
             not omission.path
             or omission.reason not in _SOURCE_OMISSION_REASONS
-            or len(encoded_path) > 240
+            or len(encoded_path) > 1024
             or (previous_path is not None and omission.path <= previous_path)
         ):
             raise ValueError("invalid_source_omissions")
