@@ -1005,8 +1005,19 @@ class TestPatchGeneration(unittest.TestCase):
                     json.dumps(
                         {
                             "id": "request-1",
-                            "output": {"value": response_value},
-                            "usage": {"input_tokens": 700_000, "output_tokens": 10},
+                            "object": "response",
+                            "created_at": 1_764_000_000,
+                            "model": "configured-model",
+                            "status": "completed",
+                            "output": [],
+                            "output_text": json.dumps(response_value),
+                            "usage": {
+                                "input_tokens": 700_000,
+                                "input_tokens_details": {"cached_tokens": 0},
+                                "output_tokens": 10,
+                                "output_tokens_details": {"reasoning_tokens": 1},
+                                "total_tokens": 700_010,
+                            },
                         }
                     ).encode(),
                 )

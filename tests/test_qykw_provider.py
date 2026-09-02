@@ -184,18 +184,53 @@ class RecordingTransport:
 
 
 def good_response(value: dict[str, object] | None = None) -> TransportResponse:
+    return official_response(value)
+
+
+def official_response(
+    value: dict[str, object] | None = None,
+    *,
+    status: str = "completed",
+) -> TransportResponse:
     import json
 
+    output_value = value or empty_response_value()
+    output_text = json.dumps(output_value, ensure_ascii=False, separators=(",", ":"))
+    document = {
+        "id": "safe-request-id",
+        "object": "response",
+        "created_at": 1_764_000_000,
+        "model": "configured-model",
+        "status": status,
+        "output": [
+            {
+                "id": "safe-request-id_msg",
+                "type": "message",
+                "status": status,
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": output_text, "annotations": []}
+                ],
+            }
+        ],
+        "output_text": output_text,
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 1},
+            "total_tokens": 13,
+        },
+        "error": None,
+        "incomplete_details": None,
+        "parallel_tool_calls": True,
+        "store": False,
+        "truncation": "disabled",
+    }
     return TransportResponse(
         200,
         {"content-type": "application/json"},
-        json.dumps(
-            {
-                "id": "safe-request-id",
-                "output": {"value": value or empty_response_value()},
-                "usage": {"input_tokens": 10, "output_tokens": 3},
-            }
-        ).encode(),
+        json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode(),
     )
 
 
@@ -228,6 +263,8 @@ def secure_provider(
     dns: object | None = None,
     clock: object | None = None,
     sleep: object | None = None,
+    context_window: int = 100_000,
+    max_output_tokens: int = 8_000,
     timeout_seconds: int = 30,
     resolver_slots: object | None = None,
 ) -> ResponsesInferenceProvider:
@@ -236,8 +273,8 @@ def secure_provider(
         base_url=base_url,
         model="configured-model",
         allowed_hosts=allowed_hosts,
-        context_window=100_000,
-        max_output_tokens=8_000,
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
         timeout_seconds=timeout_seconds,
         transport=transport,
         dns_resolver=dns or (lambda _host, _port, _remaining: ("93.184.216.34",)),
@@ -248,6 +285,26 @@ def secure_provider(
 
 
 class TestResponsesInferenceProvider(unittest.TestCase):
+    def test_completed_response_decodes_output_text_and_official_usage(self) -> None:
+        expected = empty_response_value()
+
+        result = secure_provider(RecordingTransport([official_response(expected)])).complete(
+            request()
+        )
+
+        self.assertEqual(result.request_id, "safe-request-id")
+        self.assertEqual(result.value, expected)
+        self.assertEqual(result.usage, InferenceUsage(input_tokens=10, output_tokens=3))
+
+    def test_incomplete_and_failed_responses_fail_closed(self) -> None:
+        for status in ("incomplete", "failed"):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ProviderError, "invalid_response"
+            ):
+                secure_provider(
+                    RecordingTransport([official_response(status=status)])
+                ).complete(request())
+
     def test_supports_bounded_patch_schema_types_without_coercion(self) -> None:
         schema = {
             "title": "patch-v1",
@@ -619,7 +676,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
             ).complete(replace(request(), deadline_seconds=1))
         self.assertEqual(transport.calls, 1)
 
-    def test_complete_request_envelope_is_serialized_before_dispatch(self) -> None:
+    def test_complete_dispatches_an_official_responses_request(self) -> None:
         import json
 
         transport = RecordingTransport([good_response()])
@@ -628,21 +685,71 @@ class TestResponsesInferenceProvider(unittest.TestCase):
 
         wire = json.loads(transport.requests[0].body.decode())
         self.assertEqual(
-            {"run_id", "stage", "prompt_version", "deadline_seconds"},
-            set(wire) & {"run_id", "stage", "prompt_version", "deadline_seconds"},
+            set(wire),
+            {"model", "input", "instructions", "reasoning", "max_output_tokens"},
         )
-        self.assertEqual(wire["run_id"], inference_request.run_id)
-        self.assertEqual(wire["stage"], inference_request.stage.value)
-        self.assertEqual(wire["prompt_version"], inference_request.prompt_version)
-        self.assertEqual(wire["deadline_seconds"], inference_request.deadline_seconds)
-        self.assertEqual(wire["reasoning_profile"], inference_request.reasoning_profile)
-        self.assertEqual(wire["schema"], inference_request.schema)
-        self.assertNotIn("payload", wire)
-        self.assertEqual(
-            wire["input"],
-            json.loads(json.dumps(inference_request.payload, ensure_ascii=False)),
-        )
+        self.assertEqual(wire["model"], "configured-model")
+        self.assertEqual(wire["reasoning"], {"effort": "high"})
+        self.assertIsInstance(wire["instructions"], str)
         self.assertEqual(wire["max_output_tokens"], inference_request.max_output_tokens)
+
+        instructions = json.loads(wire["instructions"])
+        self.assertEqual(
+            set(instructions),
+            {
+                "directive",
+                "run_id",
+                "stage",
+                "prompt_version",
+                "schema_name",
+                "output_schema",
+                "system",
+                "task",
+                "trusted",
+            },
+        )
+        self.assertIn("untrusted", instructions["directive"])
+        self.assertEqual(instructions["run_id"], inference_request.run_id)
+        self.assertEqual(instructions["stage"], inference_request.stage.value)
+        self.assertEqual(instructions["prompt_version"], inference_request.prompt_version)
+        self.assertEqual(instructions["schema_name"], inference_request.schema_name)
+        self.assertEqual(instructions["output_schema"], inference_request.schema)
+        canonical_payload = json.loads(
+            json.dumps(inference_request.payload, ensure_ascii=False)
+        )
+        self.assertEqual(instructions["system"], canonical_payload["system"])
+        self.assertEqual(instructions["task"], canonical_payload["task"])
+        self.assertEqual(instructions["trusted"], canonical_payload["trusted"])
+
+        envelope = json.loads(wire["input"])
+        self.assertEqual(set(envelope), {"untrusted"})
+        self.assertEqual(envelope["untrusted"], canonical_payload["untrusted"])
+
+    def test_input_estimate_counts_model_visible_text_not_json_wire_escaping(self) -> None:
+        import json
+
+        inference_request = replace(request(), payload={"quoted": '"' * 1_000})
+        transport = RecordingTransport([good_response()])
+        secure_provider(transport).complete(inference_request)
+        wire = json.loads(transport.requests[0].body)
+        visible_bytes = len(wire["input"].encode()) + len(wire["instructions"].encode())
+
+        self.assertEqual(estimate_request_input_tokens(inference_request), visible_bytes)
+        self.assertLess(visible_bytes, len(transport.requests[0].body))
+
+    def test_exact_model_visible_context_boundary_dispatches(self) -> None:
+        inference_request = replace(request(), payload={"quoted": '"' * 1_000})
+        required_context = (
+            estimate_request_input_tokens(inference_request)
+            + inference_request.max_output_tokens
+        )
+        transport = RecordingTransport([good_response()])
+
+        secure_provider(transport, context_window=required_context).complete(
+            inference_request
+        )
+
+        self.assertEqual(transport.calls, 1)
 
     def test_certificate_response_and_maybe_accepted_failures_are_not_retried(self) -> None:
         for failure in (
@@ -671,7 +778,7 @@ class TestResponsesInferenceProvider(unittest.TestCase):
             secure_provider(late, clock=lambda: next(late_ticks)).complete(request())
         self.assertEqual(late.calls, 1)
 
-    def test_strict_response_rejects_extra_data_body_and_content_type(self) -> None:
+    def test_response_rejects_missing_official_fields_and_wrong_content_type(self) -> None:
         import json
 
         malformed = TransportResponse(
@@ -685,22 +792,42 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "invalid_response"):
             secure_provider(RecordingTransport([bad_type])).complete(request())
 
-    def test_strict_json_rejects_duplicate_keys_constants_and_deep_values_safely(self) -> None:
-        prefix = b'{"id":"safe-request-id","output":{"value":'
-        suffix = b'},"usage":{"input_tokens":10,"output_tokens":3}}'
+    def test_output_text_strict_json_rejects_duplicate_keys_without_disclosure(self) -> None:
+        import json
+
+        document = json.loads(official_response().body)
+        document["output_text"] = (
+            '{"priorities":["SENTINEL_DUPLICATE"],"priorities":[]}'
+        )
+        response = TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            json.dumps(document).encode(),
+        )
+        transport = RecordingTransport([response])
+
+        with self.assertRaisesRegex(ProviderError, "invalid_response") as caught:
+            secure_provider(transport).complete(request())
+
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn("SENTINEL", repr(caught.exception))
+        self.assertEqual(transport.calls, 1)
+
+    def test_response_body_strict_json_rejects_duplicate_keys_and_constants(self) -> None:
+        valid = official_response().body
         bodies = (
-            b'{"id":"first","id":"SENTINEL_DUPLICATE","output":{"value":{"priorities":[]}},"usage":{"input_tokens":10,"output_tokens":3}}',
-            prefix
-            + b'{"priorities":[],"priorities":["SENTINEL_DUPLICATE"]}'
-            + suffix,
-            b'{"id":"safe-request-id","output":{"value":{"priorities":[]}},"usage":{"input_tokens":NaN,"output_tokens":3}}',
-            prefix + (b"[" * 1_100) + b"0" + (b"]" * 1_100) + suffix,
+            valid.replace(
+                b'"id":"safe-request-id"',
+                b'"id":"first","id":"SENTINEL_DUPLICATE"',
+                1,
+            ),
+            valid.replace(b'"input_tokens":10', b'"input_tokens":NaN', 1),
         )
         for body in bodies:
             transport = RecordingTransport(
                 [TransportResponse(200, {"content-type": "application/json"}, body)]
             )
-            with self.subTest(body_prefix=body[:30]), self.assertRaisesRegex(
+            with self.subTest(body_prefix=body[:50]), self.assertRaisesRegex(
                 ProviderError, "invalid_response"
             ) as caught:
                 secure_provider(transport).complete(request())
@@ -717,9 +844,9 @@ class TestResponsesInferenceProvider(unittest.TestCase):
             {"input_tokens": 100_000, "output_tokens": 1},
         ):
             with self.subTest(usage=usage):
-                body = json.dumps(
-                    {"id": "safe-request-id", "output": {"value": empty_response_value()}, "usage": usage}
-                ).encode()
+                document = json.loads(official_response().body)
+                document["usage"].update(usage)
+                body = json.dumps(document).encode()
                 response = TransportResponse(200, {"content-type": "application/json"}, body)
                 with self.assertRaisesRegex(ProviderError, "invalid_response"):
                     secure_provider(RecordingTransport([response])).complete(request())

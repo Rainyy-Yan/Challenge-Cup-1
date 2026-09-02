@@ -40,6 +40,7 @@ qykw 是启元开物独立工程机器人。默认审查通道只提供分析、
 - Head 漂移会将运行标记为 `stale`，不会发布旧行号评论。
 - 后端或执行异常会将运行标记为 `FAILED`；`REVIEW`、`REREVIEW` 记录 `review_failed`，`ANALYZE`、`PLAN` 记录 `analyze_failed`，且不公开请求、响应或凭据。
 - 结构化结果不符合约束时不记作上述执行失败；运行会安全返回“审查未完成”和零条 findings。
+- 推理适配器只使用标准 `input` 与 `instructions` 字段；内部 `maximum` 策略映射为后端接受的最高兼容档。完成响应的 `output_text` 会再次执行严格 JSON 解码和本地 Schema 校验，`incomplete`、`failed` 或用量异常均按无效结果关闭。
 - 停止标记独立追加；并发中的旧状态保存不能覆盖它。
 - 状态与历史评论使用分页读取，不能假定目标记录在前 100 条内。
 

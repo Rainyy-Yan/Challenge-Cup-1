@@ -869,19 +869,37 @@ class TestProductionBranchCoverage(unittest.TestCase):
         def response(document: object, content_type: str = "application/json"):
             return subject.TransportResponse(200, {"content-type": content_type}, json.dumps(document).encode())
 
-        valid = {"id": "req-1", "output": {"value": {"value": 1}}, "usage": {"input_tokens": 2, "output_tokens": 3}}
+        valid = {
+            "id": "req-1",
+            "object": "response",
+            "created_at": 1_764_000_000,
+            "model": "configured-model",
+            "status": "completed",
+            "output": [],
+            "output_text": json.dumps({"value": 1}),
+            "usage": {
+                "input_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 1},
+                "total_tokens": 5,
+            },
+        }
         parsed = subject._parse_response(response(valid), schema, 10, 20)
         self.assertEqual((parsed.request_id, parsed.value), ("req-1", {"value": 1}))
         invalid_documents = (
-            (valid, "text/plain"), ([], "application/json"), ({**valid, "extra": 1}, "application/json"),
+            (valid, "text/plain"), ([], "application/json"),
+            ({key: value for key, value in valid.items() if key != "status"}, "application/json"),
             ({**valid, "id": ""}, "application/json"), ({**valid, "id": "unsafe/id"}, "application/json"),
-            ({**valid, "output": []}, "application/json"), ({**valid, "output": {"value": []}}, "application/json"),
+            ({**valid, "object": "chat.completion"}, "application/json"),
+            ({**valid, "status": "incomplete"}, "application/json"),
+            ({**valid, "output": {}}, "application/json"), ({**valid, "output_text": []}, "application/json"),
             ({**valid, "usage": []}, "application/json"),
-            ({**valid, "usage": {"input_tokens": True, "output_tokens": 1}}, "application/json"),
-            ({**valid, "usage": {"input_tokens": 21, "output_tokens": 1}}, "application/json"),
-            ({**valid, "usage": {"input_tokens": 2, "output_tokens": 11}}, "application/json"),
-            ({**valid, "usage": {"input_tokens": 18, "output_tokens": 3}}, "application/json"),
-            ({**valid, "output": {"value": {"value": -1}}}, "application/json"),
+            ({**valid, "usage": {**valid["usage"], "input_tokens": True, "output_tokens": 1}}, "application/json"),
+            ({**valid, "usage": {**valid["usage"], "input_tokens": 21, "output_tokens": 1}}, "application/json"),
+            ({**valid, "usage": {**valid["usage"], "input_tokens": 2, "output_tokens": 11}}, "application/json"),
+            ({**valid, "usage": {**valid["usage"], "input_tokens": 18, "output_tokens": 3}}, "application/json"),
+            ({**valid, "output_text": json.dumps({"value": -1})}, "application/json"),
         )
         for document, content_type in invalid_documents:
             with self.subTest(document=document), self.assertRaises((TypeError, ValueError)):
