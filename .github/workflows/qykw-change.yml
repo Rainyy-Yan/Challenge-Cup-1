@@ -1,0 +1,311 @@
+name: qykw authorized change
+
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+
+permissions:
+  contents: none
+
+concurrency:
+  group: qykw-${{ github.repository_id }}-pr-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+  queue: max
+
+env:
+  QYKW_CONFIG_PATH: .github/qykw.toml
+  QYKW_VERIFICATION_PROFILE: full
+
+jobs:
+  authorize:
+    if: >-
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@qykw') &&
+        (contains(github.event.comment.body, '修复') || contains(github.event.comment.body, '实现'))) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@qykw') &&
+        (contains(github.event.comment.body, '修复') || contains(github.event.comment.body, '实现')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      controller_sha: ${{ steps.freeze_controller.outputs.sha }}
+      source_repository: ${{ steps.authorized_context.outputs.source_repository }}
+      source_head_sha: ${{ steps.authorized_context.outputs.source_head_sha }}
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Freeze trusted controller revision
+        id: freeze_controller
+        working-directory: controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          controller_sha="$(git rev-parse HEAD)"
+          test "$controller_sha" = "$GITHUB_SHA"
+          echo "sha=$controller_sha" >> "$GITHUB_OUTPUT"
+      - name: Authorize exact change request
+        working-directory: controller
+        env:
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/qykw"
+          python -m tools.qykw --phase authorize-change --output "$RUNNER_TEMP/qykw/authorize-change.json"
+      - name: Export fixed source identity
+        id: authorized_context
+        working-directory: controller
+        shell: bash
+        run: |
+          python - "$RUNNER_TEMP/qykw/authorize-change.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as artifact:
+              payload = json.load(artifact)
+          run = payload.get("run")
+          if not isinstance(run, dict):
+              raise SystemExit("authorized_change_context_unavailable")
+          print(f"source_repository={run['source_repository']}")
+          print(f"source_head_sha={run['source_head_sha']}")
+          PY
+      - name: Upload authorization artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-change-authorize-v1
+          path: ${{ runner.temp }}/qykw/authorize-change.json
+          retention-days: 1
+
+  prepare:
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      controller_sha: ${{ needs.authorize.outputs.controller_sha }}
+      source_repository: ${{ needs.authorize.outputs.source_repository }}
+      source_head_sha: ${{ needs.authorize.outputs.source_head_sha }}
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Reject controller drift
+        working-directory: controller
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ needs.authorize.outputs.controller_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_CONTROLLER_SHA"
+      - name: Download authorization artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-authorize-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Prepare bounded manifest
+        working-directory: controller
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QYKW_INFERENCE_API_KEY: ${{ secrets.QYKW_INFERENCE_API_KEY }}
+          QYKW_INFERENCE_BASE_URL: ${{ vars.QYKW_INFERENCE_BASE_URL }}
+          QYKW_INFERENCE_MODEL: ${{ vars.QYKW_INFERENCE_MODEL }}
+          QYKW_INFERENCE_ALLOWED_HOSTS: ${{ vars.QYKW_INFERENCE_ALLOWED_HOSTS }}
+          QYKW_INFERENCE_CONTEXT_WINDOW: ${{ vars.QYKW_INFERENCE_CONTEXT_WINDOW }}
+          QYKW_INFERENCE_MAX_OUTPUT_TOKENS: ${{ vars.QYKW_INFERENCE_MAX_OUTPUT_TOKENS }}
+          QYKW_INFERENCE_TIMEOUT_SECONDS: ${{ vars.QYKW_INFERENCE_TIMEOUT_SECONDS }}
+        run: >-
+          python -m tools.qykw --phase prepare-change
+          --artifact "$RUNNER_TEMP/qykw/authorize-change.json"
+          --output "$RUNNER_TEMP/qykw/prepare-change.json"
+      - name: Upload prepared manifest artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-change-prepare-v1
+          path: ${{ runner.temp }}/qykw/prepare-change.json
+          retention-days: 1
+
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      controller_sha: ${{ needs.prepare.outputs.controller_sha }}
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Reject controller drift
+        working-directory: controller
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ needs.prepare.outputs.controller_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_CONTROLLER_SHA"
+      - name: Check out fixed candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ needs.prepare.outputs.source_repository }}
+          ref: ${{ needs.prepare.outputs.source_head_sha }}
+          path: candidate-source
+          persist-credentials: false
+      - name: Download prepared manifest artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-prepare-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Verify in the fixed isolated sandbox
+        working-directory: controller
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QYKW_VERIFICATION_IMAGE_DIGEST: ${{ vars.QYKW_VERIFICATION_IMAGE_DIGEST }}
+        run: |
+          # The trusted phase materializes candidate-workspace and enforces --network none.
+          python -m tools.qykw --phase verify-change --artifact "$RUNNER_TEMP/qykw/prepare-change.json" --output "$RUNNER_TEMP/qykw/verify-change.json"
+      - name: Upload verification artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-change-verify-v1
+          path: ${{ runner.temp }}/qykw/verify-change.json
+          retention-days: 1
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Reject controller drift
+        working-directory: controller
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_CONTROLLER_SHA"
+      - name: Download verified change artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-verify-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Publish verified change
+        working-directory: controller
+        env:
+          QYKW_PUBLISH_TOKEN: ${{ secrets.QYKW_PUBLISH_TOKEN }}
+          QYKW_VERIFICATION_IMAGE_DIGEST: ${{ vars.QYKW_VERIFICATION_IMAGE_DIGEST }}
+        run: >-
+          python -m tools.qykw --phase publish-change
+          --artifact "$RUNNER_TEMP/qykw/verify-change.json"
+          --output "$RUNNER_TEMP/qykw/publish-change.json"
+      - name: Upload publication artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-change-publish-v1
+          path: ${{ runner.temp }}/qykw/publish-change.json
+          retention-days: 1
+
+  record_result:
+    needs: [authorize, prepare, verify, publish]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: controller
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Reject controller drift
+        working-directory: controller
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ needs.authorize.outputs.controller_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_CONTROLLER_SHA"
+      - name: Download authorization result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-authorize-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Download preparation result
+        if: ${{ needs.prepare.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-prepare-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Download verification result
+        if: ${{ needs.verify.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-verify-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Download publication result
+        if: ${{ needs.publish.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: qykw-${{ github.run_id }}-change-publish-v1
+          path: ${{ runner.temp }}/qykw
+      - name: Select latest trusted predecessor
+        id: predecessor
+        shell: bash
+        run: |
+          set -euo pipefail
+          for phase in publish-change verify-change prepare-change authorize-change; do
+            if test -f "$RUNNER_TEMP/qykw/$phase.json"; then
+              echo "artifact=$RUNNER_TEMP/qykw/$phase.json" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          exit 1
+      - name: Record bounded result
+        working-directory: controller
+        env:
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          PREDECESSOR_ARTIFACT: ${{ steps.predecessor.outputs.artifact }}
+        run: >-
+          python -m tools.qykw --phase record-change-result
+          --artifact "$PREDECESSOR_ARTIFACT"
+          --output "$RUNNER_TEMP/qykw/record-change-result.json"
+      - name: Upload recorded result artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: qykw-${{ github.run_id }}-change-record-v1
+          path: ${{ runner.temp }}/qykw/record-change-result.json
+          retention-days: 1

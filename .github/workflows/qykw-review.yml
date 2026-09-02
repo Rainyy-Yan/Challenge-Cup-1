@@ -29,6 +29,7 @@ concurrency:
 
 jobs:
   authorize:
+    name: Authorize review request; change mode exits before side effects
     if: >-
       github.event_name == 'pull_request_target' ||
       github.event_name == 'workflow_dispatch' ||
