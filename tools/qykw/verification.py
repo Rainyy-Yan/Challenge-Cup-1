@@ -145,7 +145,7 @@ _FRONTEND_COMMANDS = (
 )
 
 _SMOKE_COMMAND = VerificationCommand(
-    "full-smoke", ("/opt/qykw/verify_smoke.py", "/workspace", "8765")
+    "full-smoke", ("python", "/opt/qykw/verify_smoke.py", "/workspace", "8765")
 )
 
 _PROFILES = {

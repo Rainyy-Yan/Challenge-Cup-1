@@ -965,7 +965,7 @@ class TestProfiles(unittest.TestCase):
             command.argv
             for command in get_verification_profile("backend").commands
             + frontend.commands
-        ) + (("/opt/qykw/verify_smoke.py", "/workspace", "8765"),)
+        ) + (("python", "/opt/qykw/verify_smoke.py", "/workspace", "8765"),)
         self.assertEqual(expected, tuple(command.argv for command in full.commands))
         self.assertEqual(len(expected), len(set(expected)))
 
