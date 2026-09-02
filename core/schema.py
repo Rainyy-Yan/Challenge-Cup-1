@@ -47,7 +47,6 @@ class Chunk:
     # 但不得让它进入在线服务、离线快照或答辩展示。
     demo_eligible: bool = True
 
-
 @dataclass
 class Mastery:
     """单个知识点的掌握度。"""

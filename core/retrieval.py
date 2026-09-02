@@ -59,6 +59,12 @@ class Retriever:
 
     @classmethod
     def from_jsonl(cls, path: str | Path, *, demo_only: bool = False) -> "Retriever":
+        """从知识库读取切片。
+
+        ``demo_only`` 只加载允许在正式 Demo 中使用的切片。被排除的
+        资料仍留在原始库中，便于补齐可访问的原始来源后重新复核；它们不能
+        因为仍在 JSONL 文件里就重新出现在演示内容中。
+        """
         chunks = []
         known = {f.name for f in dataclasses.fields(Chunk)}
         with open(path, encoding="utf-8") as fh:
