@@ -52,7 +52,7 @@ SmartModelRouter
    ├── ModelRegistry      两个模型的能力和静态配置
    ├── RoutingPolicy      任务适配 + 健康 + 成功率 + 延迟评分
    ├── CircuitBreaker     closed / open / half_open
-   ├── OpenAIAdapter      构造请求、解析响应、JSON 兼容降级
+   ├── OpenAIAdapter[]    每个模型独立端点/密钥，构造并解析请求
    └── RouterMetrics      调用、成功、失败、延迟、Token、Fallback
    │
    ├── deepseek-v4-pro
@@ -70,7 +70,7 @@ SmartModelRouter
 
 | 字段 | 含义 |
 |---|---|
-| `model_id` | 百炼模型 ID |
+| `model_id` | 对应供应商的模型 ID |
 | `role` | `strong` 或 `default` |
 | `task_affinity` | 对各任务的静态适配分 |
 | `supports_json_mode` | 是否优先发送 `response_format` |
@@ -83,14 +83,17 @@ SmartModelRouter
 - `MiniMax-M3`：`default`，其他任务最高，并作为 DeepSeek 的降级候选；
 - 普通任务在 MiniMax 不可用时可反向使用健康的 DeepSeek，两个模型均失败后才进入规则版。
 
-百炼当前把这两个模型都标为不支持原生结构化输出，因此生产注册表中的
-`supports_json_mode` 均为 `false`，JSON 请求直接使用提示词约束。适配器仍保留
-`response_format` 的兼容与降级能力，供后续模型或兼容端点使用。
+生产注册表中的 `supports_json_mode` 均为 `false`，JSON 请求直接使用提示词约束。
+适配器仍保留 `response_format` 的兼容与降级能力，供后续模型或兼容端点使用。
 
 模型 ID 从现有两个环境变量读取：
 
 ```dotenv
+AGENTEDU_MINIMAX_API_KEY=<MiniMax key>
+AGENTEDU_MINIMAX_BASE_URL=https://api.minimax.io/v1
 AGENTEDU_MODEL=MiniMax-M3
+AGENTEDU_DEEPSEEK_API_KEY=<DeepSeek key>
+AGENTEDU_DEEPSEEK_BASE_URL=https://api.deepseek.com
 AGENTEDU_MODEL_STRONG=deepseek-v4-pro
 ```
 
@@ -99,7 +102,7 @@ AGENTEDU_MODEL_STRONG=deepseek-v4-pro
 
 ### 4.2 OpenAIAdapter
 
-适配器只负责一次模型调用所需的协议工作：
+每个模型拥有独立的适配器实例和 Bearer Key。适配器只负责一次模型调用所需的协议工作：
 
 - 构造 `/chat/completions` 请求；
 - 添加 Bearer 鉴权；
@@ -111,7 +114,7 @@ AGENTEDU_MODEL_STRONG=deepseek-v4-pro
 
 | 类型 | 示例 | 路由行为 |
 |---|---|---|
-| `auth` | HTTP 401 | 全链路终止，不切换同一密钥下的模型 |
+| `auth` | HTTP 401 | 独立供应商不重试当前模型但可降级；统一网关共用凭据时全链路终止 |
 | `request` | JSON 降级后仍为普通 400 | 终止，避免把同一错误请求重复发给另一模型 |
 | `model_unavailable` | 403、404，或 400 且供应商错误码明确为模型不存在/无权限 | 立即尝试下一候选 |
 | `rate_limit` | 429 | 当前模型退避重试，耗尽后切换 |
@@ -157,7 +160,7 @@ half_open --1 次失败----------> open
 
 - `rate_limit`、`provider`、`network` 和 `invalid_response` 计入连续失败；
 - `model_unavailable` 直接打开熔断器；
-- `auth` 属于共享密钥问题，不改变单模型健康状态；
+- `auth` 不改变单模型健康状态；独立供应商可降级，统一网关共用凭据时终止全链路；
 - `request` 属于调用方问题，不改变模型健康状态；
 - 成功会清零连续失败计数；
 - 时间通过可注入时钟获取，测试无需真实等待 60 秒。
@@ -253,7 +256,7 @@ GET /api/model-status
 - `TASK_TIER` 可保留为任务风险元数据，但不再直接等于模型选择结果。
 - `MockLLM` 保持完全确定性，单元测试和 CI 不读取真实密钥、不发计费请求。
 - 当前 JSON 模式提示词降级继续保留，并改为按模型记录能力结果。
-- 当前限速和缓存继续生效；限速仍是整个百炼端点共享，避免两个模型同时突破账户级限制。
+- 当前限速、预算和缓存继续生效；本阶段仍使用进程级保守上限统一约束两家调用。
 - 上层固定题库和规则版兜底逻辑不变。
 
 ## 7. 文件边界
@@ -278,7 +281,7 @@ GET /api/model-status
 1. 冷启动时命题优先 DeepSeek，普通任务优先 MiniMax；
 2. 有足够历史样本后，不健康或明显变慢的首选模型被重新排序；
 3. 429/5xx/网络错误按模型重试，耗尽后 Fallback；
-4. 401 不重试、不 Fallback；
+4. 401 不重试当前模型；独立供应商允许 Fallback，统一网关不重复请求；
 5. 普通 400 不 Fallback，JSON 模式不支持时仅做协议降级；
 6. 连续三次失败打开熔断，冷却后进入半开，一次成功关闭；
 7. half_open 并发只允许一个探测请求；
@@ -291,7 +294,7 @@ GET /api/model-status
 真实验收分两层：
 
 - 无密钥环境：全部单元测试和本地假端点集成测试通过；
-- 用户在本机 `.env` 填入百炼 Key 后：运行 `python3 -m evalkit.doctor`，确认两个模型
+- 用户在本机 `.env` 分别填入 MiniMax 与 DeepSeek Key 后：运行 `python3 -m evalkit.doctor`，确认两个模型
   均可调用，再通过受控故障测试观察 `/api/model-status` 的 Fallback 和熔断变化。
 
 ## 9. 实施顺序

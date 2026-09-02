@@ -52,7 +52,7 @@ Copy-Item .env.example .env
 # macOS / Linux
 cp .env.example .env
 
-# 然后在本机编辑 .env，只填写 AGENTEDU_API_KEY；双模型已经固定
+# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key
 
 python3 -m evalkit.doctor        # 先体检，六项检查，不通过别跑全流程
 ```
@@ -687,7 +687,7 @@ Python 和 JS，逐项比对分词、覆盖率、中文数字、BKT 更新、先
 ### 离线模式没有这一层
 
 `showcase.html` 双击打开时**只用固定题库**，因为浏览器里没有模型。
-命题、自述分析、综合诊断都需要 `AGENTEDU_API_KEY`，走 `server.py`。
+命题、自述分析、综合诊断需要两家模型各自的 API Key，走 `server.py`。
 演示时要说清楚这个区别，别让人以为离线也在现场命题。
 
 ## 八、题目质量：题不好，尺子就不准

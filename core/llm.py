@@ -243,7 +243,8 @@ class RealLLM:
                  price_in: float = 0.0, price_out: float = 0.0,
                  rpm: int = 0, budget_calls: int = 0, cache: bool = True, *,
                  router: SmartModelRouter | None = None,
-                 adapter: OpenAIAdapter | None = None) -> None:
+                 adapter: OpenAIAdapter | None = None,
+                 adapters: dict[str, OpenAIAdapter] | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -257,7 +258,15 @@ class RealLLM:
         specs = build_default_specs(
             model, strong_model, timeout, price_in, price_out)
         self.router = router or SmartModelRouter(specs)
-        self.adapter = adapter or OpenAIAdapter(self.base_url, api_key)
+        default_adapter = adapter or OpenAIAdapter(self.base_url, api_key)
+        self.adapters = (
+            dict(adapters)
+            if adapters is not None
+            else {model_id: default_adapter for model_id in self.router.specs}
+        )
+        if set(self.adapters) != set(self.router.specs):
+            raise ValueError("每个路由模型都必须配置一个请求适配器")
+        self.adapter = self.adapters[model]
         self._json_mode_ok = {
             spec.model_id: spec.supports_json_mode
             for spec in self.router.specs.values()
@@ -520,7 +529,8 @@ class RealLLM:
                 try:
                     self._throttle(wait)
                     payload = self._payload(spec, system, user, temp, json_mode)
-                    data, latency_ms = self.adapter.post(payload, spec.timeout)
+                    data, latency_ms = self.adapters[spec.model_id].post(
+                        payload, spec.timeout)
                     result = self._parse_result(spec, data, latency_ms)
                 except ModelCallError as exc:
                     last_error = exc
@@ -533,12 +543,16 @@ class RealLLM:
                         self.router.record_json_downgrade(spec.model_id)
                         protocol_downgraded = True
                         continue
-                    if exc.kind in {AUTH, REQUEST}:
+                    shared_provider = len({
+                        id(provider) for provider in self.adapters.values()
+                    }) == 1
+                    if exc.kind == REQUEST or (
+                            exc.kind == AUTH and shared_provider):
                         with self._state_lock:
                             self.failures += 1
                         raise LLMError(
                             f"调用模型失败（{spec.model_id}）: {exc}") from exc
-                    if exc.kind == MODEL_UNAVAILABLE:
+                    if exc.kind in {AUTH, MODEL_UNAVAILABLE}:
                         break
                     retry_index += 1
                     if retry_index < self.retries:
@@ -795,16 +809,18 @@ class MockLLM:
 
 
 def build_llm() -> RealLLM | MockLLM:
-    """按环境变量选后端。没配 key 就自动退回 Mock，永远不会因为缺 key 起不来。
+    """按环境变量选后端。任一 key 缺失就退回 Mock，避免半配置启动。
 
-    必填：
-      AGENTEDU_API_KEY    模型 key。不填即离线跑，系统照常工作。
+    真模型必填：
+      AGENTEDU_MINIMAX_API_KEY / AGENTEDU_MINIMAX_BASE_URL
+                          MiniMax 独立凭据和 OpenAI 兼容端点。
+      AGENTEDU_DEEPSEEK_API_KEY / AGENTEDU_DEEPSEEK_BASE_URL
+                          DeepSeek 独立凭据和 OpenAI 兼容端点。
 
     选填：
-      AGENTEDU_BASE_URL   OpenAI 兼容端点，默认阿里云百炼
-      AGENTEDU_MODEL      默认及降级模型，默认 MiniMax-M3
+      AGENTEDU_MODEL      默认及降级模型，固定 MiniMax-M3
       AGENTEDU_MODEL_STRONG
-                          强任务主模型，默认 deepseek-v4-pro。该模型重试后
+                          强任务主模型，固定 deepseek-v4-pro。该模型重试后
                           仍失败时，自动降级到 AGENTEDU_MODEL。
       AGENTEDU_PRICE_IN / _OUT
                           单价（元/百万 token），用于统计成本。不填则成本为 0。
@@ -823,8 +839,12 @@ def build_llm() -> RealLLM | MockLLM:
       AGENTEDU_DRIFT      离线桩的数值漂移率
     """
     _load_project_env()
-    key = os.environ.get("AGENTEDU_API_KEY", "").strip()
-    if not key:
+    legacy_key = os.environ.get("AGENTEDU_API_KEY", "").strip()
+    minimax_key = os.environ.get(
+        "AGENTEDU_MINIMAX_API_KEY", legacy_key).strip()
+    deepseek_key = os.environ.get(
+        "AGENTEDU_DEEPSEEK_API_KEY", legacy_key).strip()
+    if not minimax_key or not deepseek_key:
         return MockLLM(
             hallucination_rate=float(os.environ.get("AGENTEDU_INJECT", "0")),
             numeric_drift=float(os.environ.get("AGENTEDU_DRIFT", "0")),
@@ -835,15 +855,33 @@ def build_llm() -> RealLLM | MockLLM:
     if (base_model, strong_model) != (_DEFAULT_MODEL_ID, _STRONG_MODEL_ID):
         raise ValueError(
             "生产模型配置固定为默认 MiniMax-M3、强模型 deepseek-v4-pro")
+    legacy_base_url = os.environ.get("AGENTEDU_BASE_URL", "").strip()
+    minimax_base_url = os.environ.get(
+        "AGENTEDU_MINIMAX_BASE_URL",
+        legacy_base_url or "https://api.minimax.io/v1",
+    ).strip()
+    deepseek_base_url = os.environ.get(
+        "AGENTEDU_DEEPSEEK_BASE_URL",
+        legacy_base_url or "https://api.deepseek.com",
+    ).strip()
+    minimax_adapter = OpenAIAdapter(minimax_base_url, minimax_key)
+    if (minimax_base_url, minimax_key) == (deepseek_base_url, deepseek_key):
+        # 兼容旧版统一网关：同一认证域必须共享实例，确保 401 全链路终止。
+        deepseek_adapter = minimax_adapter
+    else:
+        deepseek_adapter = OpenAIAdapter(deepseek_base_url, deepseek_key)
+    adapters = {
+        base_model: minimax_adapter,
+        strong_model: deepseek_adapter,
+    }
     return RealLLM(
-        base_url=os.environ.get(
-            "AGENTEDU_BASE_URL",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        api_key=key,
+        base_url=minimax_base_url,
+        api_key=minimax_key,
         model=base_model,
         models={
             "strong": strong_model,
         },
+        adapters=adapters,
         timeout=int(os.environ.get("AGENTEDU_TIMEOUT", "60")),
         retries=int(os.environ.get("AGENTEDU_RETRIES", "3")),
         price_in=float(os.environ.get("AGENTEDU_PRICE_IN", "0")),

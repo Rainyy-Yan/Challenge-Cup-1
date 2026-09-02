@@ -293,6 +293,77 @@ class TestRealLLMResilience(unittest.TestCase):
         self.assertEqual(llm.stats()["fallbacks"], 1)
         self.assertEqual(llm.stats()["by_model"]["MiniMax-M3"]["calls"], 1)
 
+    def test_each_model_uses_its_own_provider_adapter(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class ProviderAdapter:
+            def __init__(self, provider: str, unavailable: bool = False) -> None:
+                self.provider = provider
+                self.unavailable = unavailable
+
+            def post(self, payload: dict, timeout: int):
+                calls.append((self.provider, payload["model"]))
+                if self.unavailable:
+                    raise ModelCallError(
+                        "model_unavailable", 404,
+                        "model_unavailable:http_404", 1, "http_404")
+                return ({
+                    "choices": [{"message": {"content": "fallback-ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }, 1)
+
+        llm = RealLLM(
+            "https://unused.invalid/v1",
+            "unused",
+            "MiniMax-M3",
+            models={"strong": "deepseek-v4-pro"},
+            retries=1,
+            cache=False,
+            adapters={
+                "MiniMax-M3": ProviderAdapter("minimax"),
+                "deepseek-v4-pro": ProviderAdapter("deepseek", unavailable=True),
+            },
+        )
+
+        self.assertEqual(llm.run("make_item", "s", "u"), "fallback-ok")
+        self.assertEqual(calls, [
+            ("deepseek", "deepseek-v4-pro"),
+            ("minimax", "MiniMax-M3"),
+        ])
+
+    def test_auth_failure_falls_back_when_providers_have_distinct_keys(self) -> None:
+        calls: list[str] = []
+
+        class ProviderAdapter:
+            def __init__(self, provider: str, auth_failure: bool = False) -> None:
+                self.provider = provider
+                self.auth_failure = auth_failure
+
+            def post(self, payload: dict, timeout: int):
+                calls.append(self.provider)
+                if self.auth_failure:
+                    raise ModelCallError(
+                        "auth", 401, "auth:http_401", 1, "http_401")
+                return ({
+                    "choices": [{"message": {"content": "fallback-ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }, 1)
+
+        llm = RealLLM(
+            "https://unused.invalid/v1", "unused", "MiniMax-M3",
+            models={"strong": "deepseek-v4-pro"},
+            retries=3,
+            cache=False,
+            adapters={
+                "MiniMax-M3": ProviderAdapter("minimax"),
+                "deepseek-v4-pro": ProviderAdapter(
+                    "deepseek", auth_failure=True),
+            },
+        )
+
+        self.assertEqual(llm.run("make_item", "s", "u"), "fallback-ok")
+        self.assertEqual(calls, ["deepseek", "minimax"])
+
     def test_provider_error_retries_then_falls_back(self):
         STATE["mode"] = "primary_unavailable"
         llm = self._llm(

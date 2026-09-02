@@ -10,6 +10,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-02-agentedu-intelligent-model-router-design.md`
 
+## Provider-split correction
+
+The implementation review established that the two production models belong to different
+OpenAI-compatible providers. Any later snippet in this historical task plan that shows one
+shared `base_url`, `api_key`, or `self.adapter` is superseded by the shipped design:
+
+- `MiniMax-M3` uses `AGENTEDU_MINIMAX_BASE_URL` and `AGENTEDU_MINIMAX_API_KEY`;
+- `deepseek-v4-pro` uses `AGENTEDU_DEEPSEEK_BASE_URL` and `AGENTEDU_DEEPSEEK_API_KEY`;
+- `RealLLM.adapters[model_id]` selects the provider before every attempt;
+- a provider-specific 401 skips retries for that model and may fall back to the other provider;
+  a legacy unified gateway sharing one adapter still terminates immediately on 401.
+
 ## Global Constraints
 
 - Register exactly two real model IDs: `deepseek-v4-pro` and `MiniMax-M3`.
@@ -18,7 +30,7 @@
 - Use only Python standard-library dependencies; do not add Spring AI, Redis, a database, Prometheus, or a separate gateway service.
 - Keep `MockLLM` deterministic and prevent unit tests from reading a real key or sending paid requests.
 - Never return API keys, Authorization headers, prompts, learner input, raw provider bodies, or model output from status APIs.
-- HTTP 401 terminates the model chain. JSON-protocol incompatibility gets one same-model protocol downgrade. Retryable transport/provider errors may trigger model fallback.
+- HTTP 401 does not retry the failing model; it may fall back when providers are independent, but terminates a legacy shared-adapter chain. JSON-protocol incompatibility gets one same-model protocol downgrade. Retryable transport/provider errors may trigger model fallback.
 - Use an injectable monotonic clock in router tests; no test may sleep for circuit-breaker cooldowns.
 - Keep existing user changes in the dirty worktree. Stage only files named by the current task.
 - Do not create a commit until the user explicitly authorizes that commit. Each commit step below is an authorization checkpoint.

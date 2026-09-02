@@ -61,6 +61,42 @@ class TestProjectDotenv(unittest.TestCase):
         self.assertEqual(llm.model, "MiniMax-M3")
         self.assertEqual(llm.models, {"strong": "deepseek-v4-pro"})
 
+    def test_build_llm_uses_distinct_provider_endpoints(self) -> None:
+        environment = {
+            "AGENTEDU_MINIMAX_API_KEY": "minimax-test-key",
+            "AGENTEDU_MINIMAX_BASE_URL": "https://minimax.example/v1",
+            "AGENTEDU_DEEPSEEK_API_KEY": "deepseek-test-key",
+            "AGENTEDU_DEEPSEEK_BASE_URL": "https://deepseek.example",
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+                patch("core.llm._load_project_env"):
+            llm = build_llm()
+
+        self.assertIsInstance(llm, RealLLM)
+        actual = {
+            model_id: (adapter.base_url, adapter.api_key)
+            for model_id, adapter in getattr(llm, "adapters", {}).items()
+        }
+        self.assertEqual(actual, {
+            "MiniMax-M3": ("https://minimax.example/v1", "minimax-test-key"),
+            "deepseek-v4-pro": ("https://deepseek.example", "deepseek-test-key"),
+        })
+
+    def test_build_llm_reuses_adapter_for_legacy_unified_gateway(self) -> None:
+        environment = {
+            "AGENTEDU_API_KEY": "gateway-test-key",
+            "AGENTEDU_BASE_URL": "https://gateway.example/v1",
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+                patch("core.llm._load_project_env"):
+            llm = build_llm()
+
+        self.assertIsInstance(llm, RealLLM)
+        self.assertIs(
+            llm.adapters["MiniMax-M3"],
+            llm.adapters["deepseek-v4-pro"],
+        )
+
     def test_build_llm_rejects_unknown_swapped_duplicate_and_blank_models(self) -> None:
         invalid = (
             ("unknown", "deepseek-v4-pro"),
@@ -89,6 +125,8 @@ class TestProjectDotenv(unittest.TestCase):
 
         message = output.getvalue()
         self.assertIn("仓库根目录的 .env", message)
+        self.assertIn("AGENTEDU_MINIMAX_API_KEY", message)
+        self.assertIn("AGENTEDU_DEEPSEEK_API_KEY", message)
         self.assertNotIn("export AGENTEDU_API_KEY", message)
 
 

@@ -48,6 +48,24 @@ def format_model_status(status: dict) -> list[str]:
     return lines
 
 
+def _build_model_probe(llm: RealLLM, name: str, other: str) -> RealLLM:
+    """Build a no-fallback-first probe without changing provider ownership."""
+    target_adapter = llm.adapters[name]
+    return RealLLM(
+        target_adapter.base_url,
+        target_adapter.api_key,
+        name,
+        timeout=llm.timeout,
+        models={"strong": other},
+        retries=1,
+        cache=False,
+        adapters={
+            name: target_adapter,
+            other: llm.adapters[other],
+        },
+    )
+
+
 def _safe_error_detail(exc: LLMError) -> str:
     """Describe an error without exposing a provider response body."""
     text = str(exc)
@@ -66,12 +84,12 @@ def _line(name: str, status: str, detail: str = "") -> None:
 def main() -> None:
     llm = build_llm()
     if isinstance(llm, MockLLM):
-        print("当前是离线桩（未设置 AGENTEDU_API_KEY）。")
+        print("当前是离线桩（两家模型密钥尚未完整配置）。")
         print("系统可以完整运行，但自述解析、命题、综合诊断都走规则版。")
         print("要接真模型，请编辑仓库根目录的 .env：")
-        print("  AGENTEDU_API_KEY=<你的 key>")
-        print("  AGENTEDU_BASE_URL=<OpenAI 兼容端点>")
-        print("  AGENTEDU_MODEL=<模型名>")
+        print("  AGENTEDU_MINIMAX_API_KEY=<你的 MiniMax key>")
+        print("  AGENTEDU_DEEPSEEK_API_KEY=<你的 DeepSeek key>")
+        print("两家 base URL 和模型名已在 .env.example 中分别固定。")
         print("修改后重启 server.py，再运行 python3 -m evalkit.doctor。")
         return
 
@@ -94,15 +112,7 @@ def main() -> None:
     # 2 模型名：每次探针仍保持双模型注册，避免构造非法单模型客户端。
     for name in model_ids:
         other = next(item for item in model_ids if item != name)
-        probe = RealLLM(
-            llm.base_url,
-            llm.api_key,
-            name,
-            timeout=llm.timeout,
-            models={"strong": other},
-            retries=1,
-            cache=False,
-        )
+        probe = _build_model_probe(llm, name, other)
         try:
             probe.run(task="simplify", system="测试", user="回复：ok")
             target = next(
