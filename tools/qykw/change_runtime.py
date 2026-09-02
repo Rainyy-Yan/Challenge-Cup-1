@@ -55,6 +55,7 @@ from tools.qykw.domain import (
     RunRecord,
     RunStage,
     RunStatus,
+    ReactionResult,
     TriggerRef,
 )
 from tools.qykw.github import HttpGitHubGateway
@@ -63,7 +64,7 @@ from tools.qykw.policy import DeterministicChangePolicy, authorize_command
 from tools.qykw.provider import ResponsesInferenceProvider
 from tools.qykw.sandbox import DockerSandboxExecutor
 from tools.qykw.state import GitHubCommentStateStore
-from tools.qykw.triggers import build_run_context, normalize_event
+from tools.qykw.triggers import build_run_context, make_run_id, normalize_event
 from tools.qykw.verification import (
     VerificationRuntimeMetadata,
     get_verification_profile,
@@ -115,22 +116,12 @@ class _AuthorizeServices:
         decision = authorize_command(event.command, Actor(event.actor_login, permission), config)
         if not decision.allowed:
             return _root_skip(decision.reason)
-        if state.find_by_idempotency_key(event.pr_number, event.idempotency_key) is not None:
-            return _root_skip("duplicate")
+        existing = state.find_by_idempotency_key(event.pr_number, event.idempotency_key)
+        if existing is not None:
+            return _authorized_result(_recover_existing(existing, event), runtime)
         run = build_run_context(event, gateway.get_pull_ref(event.pr_number))
         if run is None:
             return _root_skip("stale_pull_ref")
-        request = ChangeRequest(
-            context=run,
-            kind=(ChangeKind.FIX if run.command.name is CommandName.FIX else ChangeKind.IMPLEMENT),
-            instruction=run.command.argument,
-            source_repository=run.source_repository,
-            target_repository=run.repository,
-            source_head_sha=run.source_head_sha,
-            target_base_sha=run.target_base_sha,
-            target_base_ref=run.target_base_ref,
-            verification_profile=runtime.verification_profile,
-        )
         now = _now()
         record = RunRecord(
             run,
@@ -147,10 +138,14 @@ class _AuthorizeServices:
         )
         gateway.assert_bot_identity("qykw")
         if not state.create(record):
-            return _root_skip("duplicate")
+            existing = state.find_by_idempotency_key(event.pr_number, event.idempotency_key)
+            if existing is None:
+                raise ValueError("state_claim_unconfirmed")
+            return _authorized_result(_recover_existing(existing, event), runtime)
         if event.trigger_comment_id is not None and event.trigger_comment_kind is not None:
+            warning_code: str | None = None
             try:
-                gateway.try_add_reaction(
+                reaction = gateway.try_add_reaction(
                     TriggerRef(
                         "issue_comment"
                         if event.trigger_comment_kind is CommentKind.ISSUE
@@ -159,15 +154,28 @@ class _AuthorizeServices:
                     ),
                     "laugh",
                 )
+                if type(reaction) is not ReactionResult or reaction.warning_code not in {
+                    None,
+                    "reaction_failed",
+                }:
+                    warning_code = "reaction_failed"
+                else:
+                    warning_code = reaction.warning_code
             except Exception:
-                pass
-        return {
-            "run": _run_payload(run),
-            "payload": {
-                "status": "accepted",
-                "data": {"request": _request_payload(request)},
-            },
-        }
+                warning_code = "reaction_failed"
+            if warning_code is not None:
+                stored = state.get(run.pr_number, run.run_id)
+                if stored is not None and stored.context == run:
+                    state.save(
+                        replace(
+                            stored,
+                            warning_codes=tuple(
+                                dict.fromkeys((*stored.warning_codes, warning_code))
+                            ),
+                            updated_at=_now(),
+                        )
+                    )
+        return _authorized_result(run, runtime)
 
 
 class _PrepareServices:
@@ -177,8 +185,7 @@ class _PrepareServices:
     def prepare_change(
         self, artifact: dict[str, object], runtime: TrustedPhaseRuntime
     ) -> dict[str, object]:
-        del runtime
-        request = _request_from_artifact(artifact)
+        request = _request_from_artifact(artifact, self._environment, runtime)
         gateway = _read_gateway(self._environment)
         state = GitHubCommentStateStore(gateway, repository=request.target_repository)
         record = state.get(request.context.pr_number, request.context.run_id)
@@ -215,7 +222,7 @@ class _VerifyServices:
     def verify_change(
         self, artifact: dict[str, object], runtime: TrustedPhaseRuntime
     ) -> dict[str, object]:
-        request = _request_from_artifact(artifact)
+        request = _request_from_artifact(artifact, self._environment, runtime)
         manifest = _manifest_from_artifact(artifact)
         if runtime.image_ref is None or runtime.image_digest is None:
             raise ValueError("verification_image_digest_unavailable")
@@ -270,7 +277,7 @@ class _PublishServices:
     def publish_change(
         self, artifact: dict[str, object], runtime: TrustedPhaseRuntime
     ) -> dict[str, object]:
-        request = _request_from_artifact(artifact)
+        request = _request_from_artifact(artifact, self._environment, runtime)
         manifest = _manifest_from_artifact(artifact)
         attestation = _attestation_from_artifact(artifact)
         if runtime.image_digest is None:
@@ -492,6 +499,51 @@ def _root_skip(reason: str) -> dict[str, object]:
     return {"run": None, "payload": {"status": "skipped", "data": {"reason": reason}}}
 
 
+def _recover_existing(record: object, event: EventContext) -> RunContext:
+    if type(record) is not RunRecord:
+        raise ValueError("invalid_existing_change_run")
+    context = record.context
+    if (
+        context.repository_id != event.repository_id
+        or context.repository != event.repository
+        or context.pr_number != event.pr_number
+        or context.event_name != event.event_name
+        or context.event_action != event.action
+        or context.command != event.command
+        or context.trigger_actor != event.actor_login
+        or context.trigger_comment_id != event.trigger_comment_id
+        or context.trigger_comment_kind != event.trigger_comment_kind
+        or context.idempotency_key != event.idempotency_key
+        or context.run_id != make_run_id(event.pr_number, event.idempotency_key)
+        or record.prompt_version != _PROMPT_VERSION
+    ):
+        raise ValueError("invalid_existing_change_run")
+    return context
+
+
+def _authorized_result(
+    run: RunContext, runtime: TrustedPhaseRuntime
+) -> dict[str, object]:
+    request = ChangeRequest(
+        context=run,
+        kind=(ChangeKind.FIX if run.command.name is CommandName.FIX else ChangeKind.IMPLEMENT),
+        instruction=run.command.argument,
+        source_repository=run.source_repository,
+        target_repository=run.repository,
+        source_head_sha=run.source_head_sha,
+        target_base_sha=run.target_base_sha,
+        target_base_ref=run.target_base_ref,
+        verification_profile=runtime.verification_profile,
+    )
+    return {
+        "run": _run_payload(run),
+        "payload": {
+            "status": "accepted",
+            "data": {"request": _request_payload(request)},
+        },
+    }
+
+
 def _run_context(artifact: Mapping[str, object]) -> RunContext:
     from tools.qykw.phases import _run_from_artifact
 
@@ -501,7 +553,11 @@ def _run_context(artifact: Mapping[str, object]) -> RunContext:
     return run
 
 
-def _request_from_artifact(artifact: Mapping[str, object]) -> ChangeRequest:
+def _request_from_artifact(
+    artifact: Mapping[str, object],
+    environment: Mapping[str, str] | None = None,
+    runtime: TrustedPhaseRuntime | None = None,
+) -> ChangeRequest:
     context = _run_context(artifact)
     data = _artifact_data(artifact)
     value = _mapping(data.get("request"), "invalid_change_request")
@@ -533,7 +589,57 @@ def _request_from_artifact(artifact: Mapping[str, object]) -> ChangeRequest:
         raise ValueError("invalid_change_request") from None
     if _request_payload(request) != dict(value):
         raise ValueError("invalid_change_request")
+    expected_kind = {
+        CommandName.FIX: ChangeKind.FIX,
+        CommandName.IMPLEMENT: ChangeKind.IMPLEMENT,
+    }.get(context.command.name)
+    if (
+        context.command.mode is not CommandMode.CHANGE
+        or request.kind is not expected_kind
+        or request.instruction != context.command.argument
+        or request.source_repository != context.source_repository
+        or request.target_repository != context.repository
+        or request.source_head_sha != context.source_head_sha
+        or request.target_base_sha != context.target_base_sha
+        or request.target_base_ref != context.target_base_ref
+    ):
+        raise ValueError("invalid_change_request")
+    if environment is not None:
+        _validate_context_environment(context, environment)
+        if request.target_repository != _required(environment, "GITHUB_REPOSITORY"):
+            raise ValueError("invalid_change_request")
+    if runtime is not None:
+        if (
+            request.verification_profile != runtime.verification_profile
+            or artifact.get("workflow_run_id") != runtime.workflow_run_id
+            or artifact.get("runtime")
+            != {
+                "controller_sha": runtime.controller_sha,
+                "verification_profile": runtime.verification_profile,
+            }
+        ):
+            raise ValueError("invalid_change_request")
     return request
+
+
+def _validate_context_environment(
+    context: RunContext, environment: Mapping[str, str]
+) -> None:
+    event = _event_context(environment)
+    if event is None or (
+        context.run_id != make_run_id(event.pr_number, event.idempotency_key)
+        or context.idempotency_key != event.idempotency_key
+        or context.repository_id != event.repository_id
+        or context.repository != event.repository
+        or context.pr_number != event.pr_number
+        or context.event_name != event.event_name
+        or context.event_action != event.action
+        or context.command != event.command
+        or context.trigger_actor != event.actor_login
+        or context.trigger_comment_id != event.trigger_comment_id
+        or context.trigger_comment_kind != event.trigger_comment_kind
+    ):
+        raise ValueError("invalid_change_request")
 
 
 def _manifest_from_artifact(artifact: Mapping[str, object]) -> PatchManifest:

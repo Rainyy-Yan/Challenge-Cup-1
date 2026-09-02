@@ -2,15 +2,117 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import copy
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from tools.qykw.change_phases import TrustedJobResults, TrustedPhaseRuntime
+from tools.qykw.domain import (
+    AuthorizationDecision,
+    CommandMode,
+    CommandName,
+    CommandRequest,
+    CommentKind,
+    EventContext,
+    ReactionResult,
+    RunContext,
+    RunRecord,
+    RunStage,
+    RunStatus,
+)
+from tools.qykw.triggers import make_run_id
 
 
 CONTROLLER_SHA = "c" * 40
 IMAGE_DIGEST = "sha256:" + "d" * 64
 IMAGE_REF = "ghcr.io/owner/qykw-verify@" + IMAGE_DIGEST
+
+
+def run_payload() -> dict[str, object]:
+    return {
+        "run_id": make_run_id(7, "issue_comment:77"),
+        "idempotency_key": "issue_comment:77",
+        "repository_id": 8,
+        "repository": "owner/repo",
+        "pr_number": 7,
+        "event_name": "issue_comment",
+        "event_action": "created",
+        "source_repository": "owner/repo",
+        "source_head_sha": "a" * 40,
+        "target_base_sha": "b" * 40,
+        "target_base_ref": "main",
+        "actor_login": "owner",
+        "trigger_comment_id": 77,
+        "trigger_comment_kind": "issue",
+        "command": {"name": "修复", "argument": "repair", "mode": "change"},
+    }
+
+
+def request_payload() -> dict[str, object]:
+    return {
+        "kind": "fix",
+        "instruction": "repair",
+        "source_repository": "owner/repo",
+        "target_repository": "owner/repo",
+        "source_head_sha": "a" * 40,
+        "target_base_sha": "b" * 40,
+        "target_base_ref": "main",
+        "verification_profile": "full",
+    }
+
+
+def event_context() -> EventContext:
+    return EventContext(
+        8,
+        "owner/repo",
+        7,
+        "issue_comment",
+        "created",
+        "owner",
+        None,
+        "issue_comment:77",
+        CommandRequest(CommandName.FIX, "repair", CommandMode.CHANGE),
+        77,
+        CommentKind.ISSUE,
+    )
+
+
+def run_context() -> RunContext:
+    event = event_context()
+    return RunContext(
+        make_run_id(event.pr_number, event.idempotency_key),
+        event.idempotency_key,
+        event.repository_id,
+        event.repository,
+        event.pr_number,
+        event.event_name,
+        event.action,
+        "owner/repo",
+        "a" * 40,
+        "b" * 40,
+        "main",
+        event.command,
+        event.actor_login,
+        event.trigger_comment_id,
+        event.trigger_comment_kind,
+    )
+
+
+def run_record() -> RunRecord:
+    return RunRecord(
+        run_context(),
+        RunStage.ACCEPTED,
+        RunStatus.ACTIVE,
+        "qykw-v1",
+        None,
+        False,
+        None,
+        (),
+        None,
+        "2026-09-02T00:00:00Z",
+        "2026-09-02T00:00:00Z",
+    )
 
 
 class TestProductionChangeFactory(unittest.TestCase):
@@ -96,6 +198,16 @@ class TestProductionChangeFactory(unittest.TestCase):
         self.assertIs(verify.call_args.args[3], executor)
         self.assertEqual(result["status"], "verified")
 
+    def test_prepare_rejects_an_invalid_artifact_with_a_fixed_domain_error(self) -> None:
+        from tools.qykw import change_runtime
+
+        service = change_runtime._PrepareServices(
+            environment={"GITHUB_REPOSITORY": "owner/repo"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid_run_binding"):
+            service.prepare_change({}, self.runtime("prepare-change"))
+
     def test_record_terminal_status_comes_only_from_job_results(self) -> None:
         from tools.qykw import change_runtime
 
@@ -123,6 +235,190 @@ class TestProductionChangeFactory(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["data"]["outcome"]["failed_phase"], "verify-change")
         record.assert_called_once_with(context, "failed", "verify-change", {})
+
+    def test_request_codec_rejects_repository_override_from_artifact(self) -> None:
+        from tools.qykw import change_runtime
+
+        request = request_payload()
+        artifact = {
+            "run": run_payload(),
+            "payload": {"data": {"request": request}},
+        }
+        parsed = change_runtime._request_from_artifact(artifact)
+        self.assertEqual(parsed.target_repository, "owner/repo")
+        request["target_repository"] = "attacker/repo"
+        with self.assertRaisesRegex(ValueError, "invalid_change_request"):
+            change_runtime._request_from_artifact(artifact)
+
+    def test_request_run_and_runtime_bindings_reject_each_tampered_field(self) -> None:
+        from tools.qykw import change_runtime
+
+        runtime = self.runtime("verify-change")
+        artifact = {
+            "workflow_run_id": 44,
+            "runtime": {
+                "controller_sha": CONTROLLER_SHA,
+                "verification_profile": "full",
+            },
+            "run": run_payload(),
+            "payload": {"data": {"request": request_payload()}},
+        }
+        environment = {
+            "GITHUB_REPOSITORY": "owner/repo",
+            "GITHUB_REPOSITORY_ID": "8",
+        }
+        with patch.object(change_runtime, "_event_context", return_value=event_context()):
+            change_runtime._request_from_artifact(artifact, environment, runtime)
+            request_mutations = {
+                "kind": "implement",
+                "instruction": "other",
+                "source_repository": "other/repo",
+                "target_repository": "other/repo",
+                "source_head_sha": "f" * 40,
+                "target_base_sha": "e" * 40,
+                "target_base_ref": "other",
+                "verification_profile": "backend",
+            }
+            for field, value in request_mutations.items():
+                tampered = copy.deepcopy(artifact)
+                tampered["payload"]["data"]["request"][field] = value
+                with self.subTest(request_field=field), self.assertRaisesRegex(
+                    ValueError, "invalid_change_request"
+                ):
+                    change_runtime._request_from_artifact(tampered, environment, runtime)
+
+            run_mutations = {
+                "run_id": "QY-PR7-TAMPERED",
+                "idempotency_key": "issue_comment:88",
+                "repository_id": 9,
+                "repository": "other/repo",
+                "pr_number": 8,
+                "event_name": "pull_request_review_comment",
+                "event_action": "edited",
+                "actor_login": "attacker",
+                "trigger_comment_id": 88,
+                "trigger_comment_kind": "review",
+                "command": {"name": "实现", "argument": "repair", "mode": "change"},
+            }
+            for field, value in run_mutations.items():
+                tampered = copy.deepcopy(artifact)
+                tampered["run"][field] = value
+                with self.subTest(run_field=field), self.assertRaisesRegex(
+                    ValueError, "invalid_change_request"
+                ):
+                    change_runtime._request_from_artifact(tampered, environment, runtime)
+
+            for field, value in (
+                ("workflow_run_id", 45),
+                ("controller_sha", "e" * 40),
+                ("verification_profile", "backend"),
+            ):
+                tampered = copy.deepcopy(artifact)
+                if field == "workflow_run_id":
+                    tampered[field] = value
+                else:
+                    tampered["runtime"][field] = value
+                with self.subTest(runtime_field=field), self.assertRaisesRegex(
+                    ValueError, "invalid_change_request"
+                ):
+                    change_runtime._request_from_artifact(tampered, environment, runtime)
+
+    def test_authorize_replay_and_create_race_return_the_fixed_existing_run(self) -> None:
+        from tools.qykw import change_runtime
+
+        results: list[dict[str, object]] = []
+        for finds in ((run_record(),), (None, run_record())):
+            state = Mock()
+            state.find_by_idempotency_key.side_effect = finds
+            state.create.return_value = False
+            gateway = Mock(unsafe=True)
+            gateway.get_actor_permission.return_value = object()
+            gateway.get_pull_ref.return_value = object()
+            service = change_runtime._AuthorizeServices({})
+            with (
+                patch.object(change_runtime, "_event_context", return_value=event_context()),
+                patch.object(change_runtime, "_review_gateway", return_value=gateway),
+                patch.object(change_runtime, "GitHubCommentStateStore", return_value=state),
+                patch.object(change_runtime, "_config", return_value=object()),
+                patch.object(
+                    change_runtime,
+                    "authorize_command",
+                    return_value=AuthorizationDecision(True, "allowed"),
+                ),
+                patch.object(change_runtime, "build_run_context", return_value=run_context()),
+            ):
+                result = service.authorize_change(self.runtime("authorize-change"))
+
+            results.append(result)
+            self.assertEqual(result["run"], run_payload())
+            self.assertEqual(result["payload"]["status"], "accepted")
+            self.assertEqual(result["payload"]["data"]["request"], request_payload())
+        self.assertEqual(results[0], results[1])
+
+    def test_reaction_result_warning_and_exception_are_persisted(self) -> None:
+        from tools.qykw import change_runtime
+
+        for reaction in (ReactionResult("reaction_failed"), RuntimeError("private")):
+            record = run_record()
+            state = Mock()
+            state.find_by_idempotency_key.return_value = None
+            state.create.return_value = True
+            state.get.return_value = record
+            gateway = Mock(unsafe=True)
+            gateway.get_actor_permission.return_value = object()
+            gateway.get_pull_ref.return_value = object()
+            if isinstance(reaction, Exception):
+                gateway.try_add_reaction.side_effect = reaction
+            else:
+                gateway.try_add_reaction.return_value = reaction
+            with (
+                patch.object(change_runtime, "_event_context", return_value=event_context()),
+                patch.object(change_runtime, "_review_gateway", return_value=gateway),
+                patch.object(change_runtime, "GitHubCommentStateStore", return_value=state),
+                patch.object(change_runtime, "_config", return_value=object()),
+                patch.object(
+                    change_runtime,
+                    "authorize_command",
+                    return_value=AuthorizationDecision(True, "allowed"),
+                ),
+                patch.object(change_runtime, "build_run_context", return_value=record.context),
+            ):
+                change_runtime._AuthorizeServices({}).authorize_change(
+                    self.runtime("authorize-change")
+                )
+            self.assertEqual(state.save.call_args.args[0].warning_codes, ("reaction_failed",))
+
+    def test_file_journal_roundtrips_and_rejects_unknown_fields(self) -> None:
+        from tools.qykw import change_runtime
+        from tools.qykw.change import PublicationStage, WriteKind, WriteState
+        from tools.qykw.change_publish import PublicationJournalEntry
+
+        entry = PublicationJournalEntry(
+            1,
+            "QY-PR7-A1B2",
+            "blob:a.py",
+            PublicationStage.BLOBS,
+            WriteKind.BLOB,
+            "a.py",
+            "a" * 40,
+            WriteState.CREATED,
+            "owner/repo",
+            "b" * 40,
+            "c" * 40,
+            "d" * 64,
+            44,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "journal.jsonl")
+            journal = change_runtime._FilePublicationJournal(path)
+            journal.append_synced(entry)
+            self.assertEqual(journal.load(entry.run_id), (entry,))
+            path.write_text(
+                path.read_text(encoding="utf-8").rstrip()[:-1] + ',"extra":1}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid_publication_journal"):
+                journal.load(entry.run_id)
 
 
 if __name__ == "__main__":
