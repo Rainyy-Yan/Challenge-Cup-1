@@ -169,6 +169,7 @@ class ProductionPhaseController:
         run = _run_from_artifact(artifact)
         if run is None:
             return _skipped("record-failure", "upstream_skipped")
+        persisted_code = _failure_code(run, error_code)
         gateway, state, _ = self._review_services()
         record = state.get(run.pr_number, run.run_id)
         if record is not None and record.context == run:
@@ -178,9 +179,9 @@ class ProductionPhaseController:
                 return {"version": 1, "phase": "record-failure", "run": _run_payload(run),
                         "payload": {"error_code": "bot_identity_unavailable"}}
             state.save(replace(record, stage=RunStage.COMPLETED, status=RunStatus.FAILED,
-                               error_code=error_code, updated_at=_now()))
+                               error_code=persisted_code, updated_at=_now()))
         return {"version": 1, "phase": "record-failure", "run": _run_payload(run),
-                "payload": {"error_code": error_code}}
+                "payload": {"error_code": persisted_code}}
 
     def _authorize_event(self, event: object) -> dict[str, object]:
         from tools.qykw.domain import EventContext
@@ -368,6 +369,12 @@ def _matches_run(pull: PullRef, run: RunContext) -> bool:
     return (pull.number == run.pr_number and pull.state == "open" and pull.target_repository == run.repository
             and pull.source_repository == run.source_repository and pull.source_head_sha == run.source_head_sha
             and pull.target_base_sha == run.target_base_sha and pull.target_base_ref == run.target_base_ref)
+
+
+def _failure_code(run: RunContext, error_code: str) -> str:
+    if error_code == "analyze_failed" and run.command.name in {CommandName.REVIEW, CommandName.REREVIEW}:
+        return "review_failed"
+    return error_code
 
 
 def _now() -> str:

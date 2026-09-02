@@ -642,6 +642,38 @@ class TestQykwRunner(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(payload["payload"], {"error_code": "provider_failed"})
 
+    def test_production_failure_normalizes_only_review_analysis_failures(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        cases = (
+            (CommandName.REVIEW, "analyze_failed", "review_failed"),
+            (CommandName.REREVIEW, "analyze_failed", "review_failed"),
+            (CommandName.ANALYZE, "analyze_failed", "analyze_failed"),
+            (CommandName.PLAN, "analyze_failed", "analyze_failed"),
+            (CommandName.REVIEW, "publish_failed", "publish_failed"),
+            (CommandName.REVIEW, "provider_failed", "provider_failed"),
+        )
+        for command, input_code, expected_code in cases:
+            with self.subTest(command=command, input_code=input_code):
+                binding = complete_run()
+                binding["command"] = {"name": command.value, "argument": "", "mode": "read_only"}
+                artifact = artifact_for("authorize", binding, {"authorization": "accepted"})
+                run = _run_from_artifact(artifact)
+                self.assertIsNotNone(run)
+                gateway, state = FakeGateway(), FakeState()
+                state.records[run.run_id] = RunRecord(run, RunStage.ANALYZING, RunStatus.ACTIVE, "qykw-v1", None,
+                                                       False, None, (), None, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z")
+                controller = ProductionPhaseController("record-failure", {})
+                controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+                result = controller.record_failure(artifact, input_code)
+                stored = state.get(53, run.run_id)
+                self.assertEqual(result["run"], binding)
+                self.assertEqual(result["payload"], {"error_code": expected_code})
+                self.assertEqual(stored.stage, RunStage.COMPLETED)  # type: ignore[union-attr]
+                self.assertEqual(stored.status, RunStatus.FAILED)  # type: ignore[union-attr]
+                self.assertEqual(stored.error_code, expected_code)  # type: ignore[union-attr]
+                self.assertNotIn("create_comment", gateway.write_calls)
+
     def test_control_phase_refuses_any_command_except_stop(self) -> None:
         from tools.qykw.__main__ import main
 
