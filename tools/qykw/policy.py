@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import re
 import unicodedata
 from pathlib import PurePosixPath
@@ -13,10 +15,12 @@ from tools.qykw.change import (
     FilePatch,
     PatchManifest,
     SourceBlob,
+    SourceOmission,
     SourceTreeEntry,
     SourceTreeIndex,
     TrustedSourceFile,
     TrustedSourceTreeProvider,
+    compute_manifest_digest,
     compute_source_tree_index_digest,
 )
 from tools.qykw.config import QykwConfig
@@ -96,11 +100,35 @@ _MAX_PATCH_TEXT_BYTES = 512 * 1024
 _MAX_MANIFEST_TEXT_BYTES = 2 * 1024 * 1024
 _MAX_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024
 _MAX_TRUSTED_SOURCE_FILES = 100
-_MAX_TRUSTED_SOURCE_BYTES = 2 * 1024 * 1024
+_MAX_TRUSTED_SOURCE_CONTEXT_BYTES = 650_000
+_MAX_SOURCE_OMISSION_DETAILS = 100
+_HIGH_CONFIDENCE_SECRET = re.compile(
+    r"(?:"
+    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
+    r"\bgh[pousr]_[A-Za-z0-9]{20,}\b|"
+    r"\bAKIA[A-Z0-9]{16}\b|"
+    r"\b(?:api[_-]?key|auth[_-]?token|password|secret)\s*[:=]\s*['\"][^'\"\s]{16,}['\"]"
+    r")",
+    re.IGNORECASE,
+)
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
 )
 _WINDOWS_INVALID_CHARACTERS = frozenset('<>:"|?*')
+_CREDENTIAL_PATHS = frozenset(
+    {
+        ".npmrc",
+        ".netrc",
+        ".pypirc",
+        ".envrc",
+        ".git-credentials",
+        ".docker/config.json",
+        ".aws/credentials",
+        ".config/gcloud/application_default_credentials.json",
+        ".azure/accesstokens.json",
+        ".kube/config",
+    }
+)
 
 
 class DeterministicChangePolicy:
@@ -123,12 +151,18 @@ class DeterministicChangePolicy:
         self._source_files: dict[str, ChangedFile] = {}
         self._tree_entries: dict[str, SourceTreeEntry] = {}
         self._tree_blobs: dict[str, SourceBlob] = {}
+        self._selected_source_files: dict[str, TrustedSourceFile] = {}
+        self._source_omissions: tuple[SourceOmission, ...] = ()
+        self._source_omission_count = 0
 
     def validate_request(self, request: ChangeRequest, snapshot: PullSnapshot) -> None:
         self._validated_request = None
         self._source_files = {}
         self._tree_entries = {}
         self._tree_blobs = {}
+        self._selected_source_files = {}
+        self._source_omissions = ()
+        self._source_omission_count = 0
         context = request.context
         expected_kind = {
             CommandName.FIX: ChangeKind.FIX,
@@ -219,6 +253,12 @@ class DeterministicChangePolicy:
         self._source_files = source_files
         self._tree_entries = tree_entries
         self._tree_blobs = tree_blobs
+        selected, omissions, omission_count = self._select_trusted_source_files()
+        self._selected_source_files = {
+            _collision_key(source.path): source for source in selected
+        }
+        self._source_omissions = omissions
+        self._source_omission_count = omission_count
 
     def _validate_source_tree(
         self, index: SourceTreeIndex, source_head_sha: str
@@ -303,6 +343,8 @@ class DeterministicChangePolicy:
             raise ValueError("manifest_binding_mismatch")
         if not _is_sha256(manifest.digest):
             raise ValueError("invalid_manifest_digest")
+        if not hmac.compare_digest(manifest.digest, compute_manifest_digest(manifest)):
+            raise ValueError("manifest_digest_mismatch")
         if not manifest.files or len(manifest.files) > _MAX_CHANGE_FILES:
             raise ValueError("change_file_limit")
 
@@ -332,63 +374,100 @@ class DeterministicChangePolicy:
 
         if self._validated_request != request:
             raise ValueError("request_not_validated")
-        result: list[TrustedSourceFile] = []
-        total_bytes = 0
-        for key, entry in sorted(
-            self._tree_entries.items(), key=lambda item: item[1].path
+        return tuple(self._selected_source_files.values())
+
+    def trusted_source_omissions(
+        self, request: ChangeRequest
+    ) -> tuple[SourceOmission, ...]:
+        if self._validated_request != request:
+            raise ValueError("request_not_validated")
+        return self._source_omissions
+
+    def trusted_source_omission_count(self, request: ChangeRequest) -> int:
+        if self._validated_request != request:
+            raise ValueError("request_not_validated")
+        return self._source_omission_count
+
+    def _select_trusted_source_files(
+        self,
+    ) -> tuple[tuple[TrustedSourceFile, ...], tuple[SourceOmission, ...], int]:
+        selected: list[TrustedSourceFile] = []
+        omissions: list[SourceOmission] = []
+        omission_count = 0
+        context_bytes = 0
+
+        def omit(path: str, reason: str) -> None:
+            nonlocal omission_count
+            omission_count += 1
+            if len(omissions) < _MAX_SOURCE_OMISSION_DETAILS:
+                omissions.append(SourceOmission(path, reason))
+
+        for key, source in sorted(
+            self._source_files.items(), key=lambda item: item[1].path
         ):
-            if entry.kind != "blob" or entry.mode != _REGULAR_MODE:
-                continue
-            source = self._source_files.get(key)
-            blob = self._tree_blobs.get(key)
-            if source is None and blob is None:
-                continue
+            entry = self._tree_entries.get(key)
             try:
-                path = _normalize_change_path(entry.path)
+                path = _normalize_change_path(source.path)
             except ValueError:
+                omit(source.path, "sensitive_or_unsafe_path")
                 continue
-            if source is not None:
-                if (
-                    source.path != path
-                    or source.binary
-                    or source.generated
-                    or source.status.casefold() in {"removed", "deleted"}
-                    or source.head_mode != entry.mode
-                    or source.head_sha != entry.git_sha
-                    or source.head_content is None
-                ):
-                    continue
-                content = source.head_content
-                try:
-                    encoded = content.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise ValueError("non_utf8_text") from None
-                if _git_blob_object_sha(encoded, entry.git_sha) != entry.git_sha:
-                    raise ValueError("source_content_tree_mismatch")
-            else:
-                assert blob is not None
-                try:
-                    content = blob.content.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-                encoded = blob.content
-            if not content or len(encoded) > _MAX_FILE_BYTES:
-                continue
-            total_bytes += len(encoded)
             if (
-                len(result) >= _MAX_TRUSTED_SOURCE_FILES
-                or total_bytes > _MAX_TRUSTED_SOURCE_BYTES
+                entry is None
+                or entry.path != path
+                or entry.kind != "blob"
+                or entry.mode != _REGULAR_MODE
+                or source.binary
+                or source.generated
+                or source.status.casefold() in {"removed", "deleted"}
+                or source.head_mode != _REGULAR_MODE
+                or source.head_sha != entry.git_sha
+                or source.head_content is None
             ):
-                raise ValueError("trusted_source_context_limit")
-            result.append(
-                TrustedSourceFile(
-                    path=path,
-                    mode=entry.mode,
-                    content=content,
-                    sha256=hashlib.sha256(encoded).hexdigest(),
-                )
+                omit(path, "unsafe_source_file")
+                continue
+            content = source.head_content
+            try:
+                encoded = content.encode("utf-8")
+            except UnicodeEncodeError:
+                omit(path, "non_utf8")
+                continue
+            if (
+                not content
+                or len(encoded) > _MAX_FILE_BYTES
+                or _git_blob_object_sha(encoded, entry.git_sha) != entry.git_sha
+            ):
+                omit(path, "invalid_source_content")
+                continue
+            if _HIGH_CONFIDENCE_SECRET.search(content):
+                omit(path, "secret_content")
+                continue
+            source_view = TrustedSourceFile(
+                path=path,
+                mode=entry.mode,
+                content=content,
+                sha256=hashlib.sha256(encoded).hexdigest(),
             )
-        return tuple(result)
+            serialized_bytes = len(
+                json.dumps(
+                    {
+                        "path": source_view.path,
+                        "mode": source_view.mode,
+                        "sha256": source_view.sha256,
+                        "content": source_view.content,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if len(selected) >= _MAX_TRUSTED_SOURCE_FILES:
+                omit(path, "file_count_budget")
+                continue
+            if context_bytes + serialized_bytes > _MAX_TRUSTED_SOURCE_CONTEXT_BYTES:
+                omit(path, "context_budget")
+                continue
+            context_bytes += serialized_bytes
+            selected.append(source_view)
+        return tuple(selected), tuple(omissions), omission_count
 
     def _validate_patch(self, path: str, patch: FilePatch) -> int:
         key = _collision_key(path)
@@ -426,6 +505,9 @@ class DeterministicChangePolicy:
             raise ValueError("unknown_source_path")
         source = self._source_files.get(key)
         blob = self._tree_blobs.get(key)
+        trusted_source = self._selected_source_files.get(key)
+        if trusted_source is None or trusted_source.path != path:
+            raise ValueError("source_not_in_generation_scope")
         if source is None and blob is None:
             raise ValueError("source_content_unavailable")
         if source is not None and source.path != path:
@@ -466,7 +548,10 @@ class DeterministicChangePolicy:
             trusted_sha256 = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
         except UnicodeEncodeError:
             raise ValueError("non_utf8_text") from None
-        if patch.base_sha256 != trusted_sha256:
+        if (
+            patch.base_sha256 != trusted_sha256
+            or patch.base_sha256 != trusted_source.sha256
+        ):
             raise ValueError("base_digest_mismatch")
         content = source_content
         for edit in patch.edits:
@@ -492,6 +577,8 @@ def _normalize_change_path(value: str) -> str:
         raise ValueError("qykw_self_change_forbidden")
     if _collision_key(normalized) in _SENSITIVE_PATHS:
         raise ValueError("sensitive_path_forbidden")
+    if _collision_key(normalized) in _CREDENTIAL_PATHS:
+        raise ValueError("credential_path_forbidden")
     return normalized
 
 

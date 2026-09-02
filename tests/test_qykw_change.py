@@ -51,6 +51,7 @@ from tools.qykw.domain import (
     RunContext,
 )
 from tools.qykw.policy import DeterministicChangePolicy
+from tools.qykw.provider import ResponsesInferenceProvider, TransportResponse
 
 
 def context(
@@ -149,7 +150,7 @@ def snapshot(*files: ChangedFile) -> PullSnapshot:
 
 
 def manifest(request: ChangeRequest, *files: FilePatch) -> PatchManifest:
-    return PatchManifest(
+    provisional = PatchManifest(
         1,
         request.context.run_id,
         request.source_repository,
@@ -167,8 +168,9 @@ def manifest(request: ChangeRequest, *files: FilePatch) -> PatchManifest:
                 (TextEdit("old", "new"),),
             ),
         ),
-        "1" * 64,
+        "",
     )
+    return replace(provisional, digest=compute_manifest_digest(provisional))
 
 
 def git_blob_sha(content: bytes) -> str:
@@ -312,6 +314,35 @@ def patch_value(
 
 
 class TestPatchGeneration(unittest.TestCase):
+    def test_patch_contract_scalars_are_exact_types(self) -> None:
+        request = change_request()
+        valid_patch = FilePatch("a.py", None, True, (TextEdit("", "x"),))
+        patch_mutations = (
+            {"path": 1},
+            {"base_sha256": 1},
+            {"create": 1},
+            {"create": 0.0},
+        )
+        for mutation in patch_mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(TypeError):
+                replace(valid_patch, **mutation)
+        for before, after in ((1, "x"), ("x", 1)):
+            with self.subTest(before=before, after=after), self.assertRaises(TypeError):
+                TextEdit(before, after)  # type: ignore[arg-type]
+
+        valid_manifest = manifest(request)
+        manifest_mutations = (
+            {"schema_version": True},
+            {"schema_version": 1.0},
+            {"source_pr_number": True},
+            {"source_pr_number": 53.0},
+            {"run_id": 1},
+            {"digest": 1},
+        )
+        for mutation in manifest_mutations:
+            with self.subTest(mutation=mutation), self.assertRaises(TypeError):
+                replace(valid_manifest, **mutation)
+
     def generate(
         self,
         value: object | None = None,
@@ -368,6 +399,201 @@ class TestPatchGeneration(unittest.TestCase):
         forbidden = {"command", "profile", "branch", "identity", "token", "publish"}
         self.assertTrue(forbidden.isdisjoint(item["properties"]))
 
+    def test_credential_paths_and_secret_contents_never_enter_provider_context(self) -> None:
+        credential_content = "//registry.example/:_authToken=top-secret-value\n"
+        credential = changed_file(".npmrc", content=credential_content)
+        credential_tree = tree_index(
+            SourceTreeEntry(
+                ".npmrc", "100644", "blob", git_blob_sha(credential_content.encode())
+            )
+        )
+        provider = FakeInferenceProvider(
+            patch_value(path="generated.py", before="", after="x\n", create=True)
+        )
+        with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+            self.generate(
+                snapshot_value=snapshot(credential),
+                subject=policy(source_tree=credential_tree),
+                provider=provider,
+            )
+        self.assertEqual(provider.calls, 0)
+
+        safe_content = "print('safe')\n"
+        secret_content = "api_key = 'ghp_abcdefghijklmnopqrstuvwxyz123456'\n"
+        safe = changed_file("safe.py", content=safe_content)
+        secret = changed_file("leak.py", content=secret_content)
+        mixed_tree = tree_index(
+            SourceTreeEntry(
+                "leak.py", "100644", "blob", git_blob_sha(secret_content.encode())
+            ),
+            SourceTreeEntry(
+                "safe.py", "100644", "blob", git_blob_sha(safe_content.encode())
+            ),
+        )
+        provider = FakeInferenceProvider(
+            patch_value(
+                path="safe.py",
+                before="print('safe')",
+                after="print('safer')",
+                base_sha256=hashlib.sha256(safe_content.encode()).hexdigest(),
+            )
+        )
+        self.generate(
+            snapshot_value=snapshot(safe, secret),
+            subject=policy(source_tree=mixed_tree),
+            provider=provider,
+        )
+        serialized = json.dumps(provider.request.payload, ensure_ascii=False)
+        self.assertNotIn(secret_content, serialized)
+        self.assertIn(
+            {"path": "leak.py", "reason": "secret_content"},
+            provider.request.payload["untrusted"]["source_omissions"],
+        )
+
+    def test_source_selection_truncates_stably_with_path_only_omissions(self) -> None:
+        files = tuple(
+            changed_file(f"file-{index:03}.py", content=f"value={index}\n")
+            for index in range(101)
+        )
+        entries = tuple(
+            SourceTreeEntry(
+                file.path,
+                "100644",
+                "blob",
+                git_blob_sha(file.head_content.encode()),
+            )
+            for file in files
+        )
+        provider = FakeInferenceProvider(
+            patch_value(path="generated.py", before="", after="x\n", create=True)
+        )
+
+        self.generate(
+            snapshot_value=snapshot(*files),
+            subject=policy(source_tree=tree_index(*entries)),
+            provider=provider,
+        )
+
+        selected = provider.request.payload["untrusted"]["source_files"]
+        omissions = provider.request.payload["untrusted"]["source_omissions"]
+        omission_metadata = provider.request.payload["untrusted"][
+            "source_omission_metadata"
+        ]
+        self.assertEqual(len(selected), 100)
+        self.assertEqual(selected[0]["path"], "file-000.py")
+        self.assertEqual(selected[-1]["path"], "file-099.py")
+        self.assertEqual(
+            omissions,
+            [{"path": "file-100.py", "reason": "file_count_budget"}],
+        )
+        self.assertNotIn("content", omissions[0])
+        self.assertEqual(
+            omission_metadata,
+            {"total": 1, "included": 1, "truncated": 0},
+        )
+
+    def test_source_selection_truncates_at_serialized_context_budget(self) -> None:
+        files = tuple(
+            changed_file(f"large-{index}.py", content=character * 200_000)
+            for index, character in enumerate(("a", "b", "c", "d"))
+        )
+        entries = tuple(
+            SourceTreeEntry(
+                file.path,
+                "100644",
+                "blob",
+                git_blob_sha(file.head_content.encode()),
+            )
+            for file in files
+        )
+        provider = FakeInferenceProvider(
+            patch_value(path="generated.py", before="", after="x\n", create=True)
+        )
+
+        self.generate(
+            snapshot_value=snapshot(*files),
+            subject=policy(source_tree=tree_index(*entries)),
+            provider=provider,
+        )
+
+        selected = provider.request.payload["untrusted"]["source_files"]
+        omissions = provider.request.payload["untrusted"]["source_omissions"]
+        self.assertEqual(
+            [item["path"] for item in selected],
+            ["large-0.py", "large-1.py", "large-2.py"],
+        )
+        self.assertEqual(
+            omissions,
+            [{"path": "large-3.py", "reason": "context_budget"}],
+        )
+        self.assertNotIn("content", omissions[0])
+
+    def test_three_large_files_fit_real_provider_wire_budget_once(self) -> None:
+        large_files = tuple(
+            changed_file(f"large-{index}.py", content=character * 200_000)
+            for index, character in enumerate(("a", "b", "c"))
+        )
+        source_tree = tree_index(
+            *tuple(
+                SourceTreeEntry(
+                    file.path,
+                    "100644",
+                    "blob",
+                    git_blob_sha(file.head_content.encode()),
+                )
+                for file in large_files
+            )
+        )
+        response_value = patch_value(
+            path="generated.py", before="", after="x\n", create=True
+        )
+
+        class RecordingTransport:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def send(self, request):
+                self.requests.append(request)
+                return TransportResponse(
+                    200,
+                    {"content-type": "application/json"},
+                    json.dumps(
+                        {
+                            "id": "request-1",
+                            "output": {"value": response_value},
+                            "usage": {"input_tokens": 700_000, "output_tokens": 10},
+                        }
+                    ).encode(),
+                )
+
+        transport = RecordingTransport()
+        provider = ResponsesInferenceProvider(
+            api_key="secret",
+            base_url="https://allowed.example/v1/responses",
+            model="configured-model",
+            allowed_hosts=("allowed.example",),
+            context_window=2_000_000,
+            max_output_tokens=64_000,
+            timeout_seconds=30,
+            transport=transport,
+            dns_resolver=lambda _host, _port, _remaining: ("93.184.216.34",),
+        )
+
+        result = prepare_change(
+            change_request(),
+            snapshot(*large_files),
+            provider,
+            policy(source_tree=source_tree),
+            FakeStateStore(),
+        )
+
+        self.assertTrue(result.files[0].create)
+        self.assertEqual(len(transport.requests), 1)
+        self.assertLess(len(transport.requests[0].body), 1_048_576)
+        wire = json.loads(transport.requests[0].body)
+        self.assertNotIn("payload", wire)
+        self.assertIn("input", wire)
+
     def test_controller_binds_manifest_and_generates_digest(self) -> None:
         result = self.generate()
 
@@ -381,6 +607,19 @@ class TestPatchGeneration(unittest.TestCase):
         self.assertEqual(result.digest, compute_manifest_digest(result))
         parsed = json.loads(canonical_manifest_bytes(result, include_digest=True))
         self.assertEqual(parsed["digest"], result.digest)
+
+        subject = policy()
+        subject.validate_request(change_request(), snapshot())
+        subject.trusted_source_files(change_request())
+        for tampered in (
+            replace(result, digest="0" * 64),
+            replace(
+                result,
+                files=(replace(result.files[0], edits=(TextEdit("old", "tampered"),)),),
+            ),
+        ):
+            with self.subTest(tampered=tampered), self.assertRaises(ValueError):
+                subject.validate_manifest(change_request(), tampered)
 
     def test_canonical_bytes_sort_paths_preserve_edit_order_and_cover_all_text(self) -> None:
         request = change_request()
@@ -477,12 +716,22 @@ class TestPatchGeneration(unittest.TestCase):
             "old value\n",
             hashlib.sha256(b"old value\n").hexdigest(),
         )
+        large_sources = tuple(
+            TrustedSourceFile(
+                f"large-{index}.py",
+                "100644",
+                character * 200_000,
+                hashlib.sha256((character * 200_000).encode()).hexdigest(),
+            )
+            for index, character in enumerate(("a", "b", "c", "d"))
+        )
         cases: tuple[object, ...] = (
             [valid],
             (replace(valid, sha256="0" * 64),),
             (replace(valid, mode="100755"),),
             (valid, valid),
             (replace(valid, content="\udcff"),),
+            large_sources,
         )
         for source_view in cases:
             subject = policy()
@@ -620,13 +869,10 @@ class TestChangePolicy(unittest.TestCase):
         subject.validate_request(request, snapshot())
         trusted = subject.trusted_source_files(request)
 
-        self.assertEqual([item.path for item in trusted], ["a.py", "core/service.py"])
+        self.assertEqual([item.path for item in trusted], ["core/service.py"])
         self.assertEqual(
             trusted,
             (
-                TrustedSourceFile(
-                    "a.py", "100644", "before\n", hashlib.sha256(unchanged).hexdigest()
-                ),
                 TrustedSourceFile(
                     "core/service.py",
                     "100644",
@@ -812,6 +1058,16 @@ class TestChangePolicy(unittest.TestCase):
             "config/secrets.env",
             ".env.production",
             "config/credentials.json",
+            ".npmrc",
+            ".netrc",
+            ".pypirc",
+            ".envrc",
+            ".git-credentials",
+            ".docker/config.json",
+            ".aws/credentials",
+            ".config/gcloud/application_default_credentials.json",
+            ".azure/accessTokens.json",
+            ".kube/config",
         )
         for path in dangerous:
             with self.subTest(path=path):
@@ -1012,18 +1268,19 @@ class TestChangePolicy(unittest.TestCase):
         )
         subject = policy(source_tree=source_tree)
         subject.validate_request(request, snapshot())
-        subject.validate_manifest(
-            request,
-            manifest(
+        with self.assertRaisesRegex(ValueError, "source_not_in_generation_scope"):
+            subject.validate_manifest(
                 request,
-                FilePatch(
-                    "unchanged.py",
-                    hashlib.sha256(b"before\n").hexdigest(),
-                    False,
-                    (TextEdit("before", "after"),),
+                manifest(
+                    request,
+                    FilePatch(
+                        "unchanged.py",
+                        hashlib.sha256(b"before\n").hexdigest(),
+                        False,
+                        (TextEdit("before", "after"),),
+                    ),
                 ),
-            ),
-        )
+            )
         with self.assertRaises(ValueError):
             subject.validate_manifest(
                 request,

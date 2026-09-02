@@ -637,8 +637,9 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         self.assertEqual(wire["deadline_seconds"], inference_request.deadline_seconds)
         self.assertEqual(wire["reasoning_profile"], inference_request.reasoning_profile)
         self.assertEqual(wire["schema"], inference_request.schema)
+        self.assertNotIn("payload", wire)
         self.assertEqual(
-            wire["payload"],
+            wire["input"],
             json.loads(json.dumps(inference_request.payload, ensure_ascii=False)),
         )
         self.assertEqual(wire["max_output_tokens"], inference_request.max_output_tokens)
@@ -683,6 +684,29 @@ class TestResponsesInferenceProvider(unittest.TestCase):
         bad_type = TransportResponse(200, {"content-type": "text/plain"}, b"{}")
         with self.assertRaisesRegex(ProviderError, "invalid_response"):
             secure_provider(RecordingTransport([bad_type])).complete(request())
+
+    def test_strict_json_rejects_duplicate_keys_constants_and_deep_values_safely(self) -> None:
+        prefix = b'{"id":"safe-request-id","output":{"value":'
+        suffix = b'},"usage":{"input_tokens":10,"output_tokens":3}}'
+        bodies = (
+            b'{"id":"first","id":"SENTINEL_DUPLICATE","output":{"value":{"priorities":[]}},"usage":{"input_tokens":10,"output_tokens":3}}',
+            prefix
+            + b'{"priorities":[],"priorities":["SENTINEL_DUPLICATE"]}'
+            + suffix,
+            b'{"id":"safe-request-id","output":{"value":{"priorities":[]}},"usage":{"input_tokens":NaN,"output_tokens":3}}',
+            prefix + (b"[" * 1_100) + b"0" + (b"]" * 1_100) + suffix,
+        )
+        for body in bodies:
+            transport = RecordingTransport(
+                [TransportResponse(200, {"content-type": "application/json"}, body)]
+            )
+            with self.subTest(body_prefix=body[:30]), self.assertRaisesRegex(
+                ProviderError, "invalid_response"
+            ) as caught:
+                secure_provider(transport).complete(request())
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertNotIn("SENTINEL", repr(caught.exception))
+            self.assertEqual(transport.calls, 1)
 
     def test_response_usage_cannot_exceed_request_or_context_limits(self) -> None:
         import json

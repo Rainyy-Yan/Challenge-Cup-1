@@ -18,9 +18,10 @@ from tools.qykw.domain import (
     RunContext,
     RunStage,
 )
+from tools.qykw.provider import estimate_request_input_tokens
 
 if TYPE_CHECKING:
-    from tools.qykw.change import ChangeRequest, TrustedSourceFile
+    from tools.qykw.change import ChangeRequest, SourceOmission, TrustedSourceFile
 
 
 PROMPT_VERSION = "qykw-review-v1"
@@ -180,6 +181,8 @@ def build_patch_request(
 def build_change_patch_request(
     request: "ChangeRequest",
     source_files: tuple["TrustedSourceFile", ...],
+    omissions: tuple["SourceOmission", ...],
+    omission_count: int,
 ) -> InferenceRequest:
     """Build the write-isolated, exact-text patch-generation request."""
 
@@ -257,6 +260,15 @@ def build_change_patch_request(
                     }
                     for source in source_files
                 ],
+                "source_omissions": [
+                    {"path": omission.path, "reason": omission.reason}
+                    for omission in omissions
+                ],
+                "source_omission_metadata": {
+                    "total": omission_count,
+                    "included": len(omissions),
+                    "truncated": omission_count - len(omissions),
+                },
             },
         },
     )
@@ -300,20 +312,7 @@ def _request(
 
 def _request_tokens(request: InferenceRequest) -> int:
     """Mirror the provider's conservative UTF-8 request-input estimate."""
-    return max(1, _serialized_tokens(
-        {
-            "run_id": request.run_id,
-            "stage": request.stage.value,
-            "prompt_version": request.prompt_version,
-            "reasoning_profile": request.reasoning_profile,
-            "deadline_seconds": request.deadline_seconds,
-            "max_output_tokens": request.max_output_tokens,
-            "idempotency_key": request.idempotency_key,
-            "schema_name": request.schema_name,
-            "schema": request.schema,
-            "payload": request.payload,
-        }
-    ))
+    return estimate_request_input_tokens(request)
 
 
 def _advisory_schema(kind: str) -> Mapping[str, object]:

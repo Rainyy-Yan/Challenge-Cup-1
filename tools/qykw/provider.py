@@ -85,8 +85,7 @@ def validate_provider_capabilities(provider: InferenceProvider, request: Inferen
         raise InferenceError(InferenceFailure(InferenceErrorCode.CAPABILITY_UNSUPPORTED, False, False))
 
 def estimate_request_input_tokens(request: InferenceRequest) -> int:
-    envelope={"run_id":request.run_id,"stage":request.stage.value,"prompt_version":request.prompt_version,"reasoning_profile":request.reasoning_profile,"deadline_seconds":request.deadline_seconds,"max_output_tokens":request.max_output_tokens,"idempotency_key":request.idempotency_key,"schema_name":request.schema_name,"schema":request.schema,"payload":request.payload}
-    return max(1,len(json.dumps(envelope,ensure_ascii=False,separators=(",",":"),sort_keys=True).encode("utf-8")))
+    return max(1,len(json.dumps(_request_wire_envelope("",request),ensure_ascii=False,separators=(",",":"),sort_keys=True).encode("utf-8")))
 
 class ResponsesInferenceProvider:
     """HTTPS-only adapter with DNS pinning, bounded retry, and safe telemetry."""
@@ -114,7 +113,7 @@ class ResponsesInferenceProvider:
                 raise ValueError
         except ProviderError:
             raise
-        except (TypeError, ValueError, UnicodeError):
+        except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
             raise ProviderError(ProviderErrorCode.INVALID_CONFIG) from None
         endpoint=_validate_endpoint(self._base_url,self._allowed_hosts); calls=0
         for attempt in range(2):
@@ -139,7 +138,7 @@ class ResponsesInferenceProvider:
                 self._fail(request,calls,ProviderErrorCode.RATE_LIMITED)
             if response.status!=200: self._fail(request,calls,ProviderErrorCode.INVALID_RESPONSE)
             try: parsed=_parse_response(response,request.schema,request.max_output_tokens,self._context_window)
-            except (TypeError,ValueError,UnicodeDecodeError,json.JSONDecodeError): self._fail(request,calls,ProviderErrorCode.INVALID_RESPONSE)
+            except (TypeError,ValueError,UnicodeError,RecursionError,OverflowError): self._fail(request,calls,ProviderErrorCode.INVALID_RESPONSE)
             self._emit(run_id=request.run_id,stage=request.stage.value,request_id=parsed.request_id,elapsed=max(0.0,self._clock()-started),call_count=calls,token_usage={"input_tokens":parsed.usage.input_tokens,"output_tokens":parsed.usage.output_tokens})
             return parsed
         self._fail(request,calls,ProviderErrorCode.CONNECTION_ERROR)
@@ -209,9 +208,11 @@ def _resolve_with_deadline(host: str, port: int, remaining: float, resolver: Cal
     if not isinstance(value,tuple) or not all(isinstance(address,str) for address in value): raise ValueError
     return value
 def _request_body(model: str, request: InferenceRequest) -> bytes:
-    body=json.dumps({"model":model,"run_id":request.run_id,"stage":request.stage.value,"prompt_version":request.prompt_version,"deadline_seconds":request.deadline_seconds,"idempotency_key":request.idempotency_key,"reasoning_profile":request.reasoning_profile,"reasoning":{"effort":request.reasoning_profile},"max_output_tokens":request.max_output_tokens,"schema_name":request.schema_name,"schema":request.schema,"payload":request.payload,"input":request.payload,"response_format":{"type":"json_schema","name":request.schema_name,"strict":True,"schema":request.schema}},ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    body=json.dumps(_request_wire_envelope(model,request),ensure_ascii=False,separators=(",",":")).encode("utf-8")
     if len(body)>_MAX_RESPONSE_BODY_BYTES: raise ProviderError(ProviderErrorCode.INVALID_CONFIG)
     return body
+def _request_wire_envelope(model: str, request: InferenceRequest) -> dict[str,object]:
+    return {"model":model,"run_id":request.run_id,"stage":request.stage.value,"prompt_version":request.prompt_version,"deadline_seconds":request.deadline_seconds,"idempotency_key":request.idempotency_key,"reasoning_profile":request.reasoning_profile,"reasoning":{"effort":request.reasoning_profile},"max_output_tokens":request.max_output_tokens,"schema_name":request.schema_name,"schema":request.schema,"input":request.payload,"response_format":{"type":"json_schema","name":request.schema_name,"strict":True,"schema":request.schema}}
 def _is_acceptable_global_address(candidate: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return candidate.is_global and not any((candidate.is_private, candidate.is_loopback, candidate.is_link_local, candidate.is_multicast, candidate.is_reserved, candidate.is_unspecified, getattr(candidate, "is_site_local", False)))
 def _validate_schema_contract(
@@ -284,7 +285,7 @@ def _retry_after(headers: Mapping[str,str]) -> float|None:
 def _parse_response(response: TransportResponse, schema: Mapping[str,object], max_output_tokens: int, context_window: int) -> InferenceResponse:
     content_type=next((v for k,v in response.headers.items() if k.lower()=="content-type"),"")
     if "application/json" not in content_type.lower() or len(response.body)>_MAX_RESPONSE_BODY_BYTES: raise ValueError
-    document=json.loads(response.body.decode("utf-8"))
+    document=_strict_json_loads(response.body)
     if not isinstance(document,dict) or set(document)!={"id","output","usage"}: raise ValueError
     request_id,output,usage=document["id"],document["output"],document["usage"]
     if not isinstance(request_id,str) or not request_id or len(request_id)>128 or not set(request_id)<=_SAFE_REQUEST_ID: raise ValueError
@@ -298,6 +299,15 @@ def _parse_response(response: TransportResponse, schema: Mapping[str,object], ma
     if input_tokens is not None and output_tokens is not None and input_tokens + output_tokens > context_window: raise ValueError
     _validate_schema(output["value"],schema)
     return InferenceResponse(request_id,output["value"],InferenceUsage(usage["input_tokens"],usage["output_tokens"]))
+def _strict_json_loads(body: bytes) -> object:
+    def object_from_pairs(pairs: list[tuple[str,object]]) -> dict[str,object]:
+        result: dict[str,object]={}
+        for key,value in pairs:
+            if key in result: raise ValueError
+            result[key]=value
+        return result
+    def reject_constant(_value: str) -> object: raise ValueError
+    return json.loads(body.decode("utf-8"),object_pairs_hook=object_from_pairs,parse_constant=reject_constant)
 def _validate_schema(value: object, schema: Mapping[str,object]) -> None:
     if not isinstance(schema,Mapping): raise ValueError
     if "anyOf" in schema:

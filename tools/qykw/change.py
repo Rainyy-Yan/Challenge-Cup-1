@@ -37,6 +37,10 @@ class TextEdit:
     before: str
     after: str
 
+    def __post_init__(self) -> None:
+        if type(self.before) is not str or type(self.after) is not str:
+            raise TypeError("text_edit_scalars_must_be_strings")
+
 
 @dataclass(frozen=True)
 class FilePatch:
@@ -46,6 +50,12 @@ class FilePatch:
     edits: tuple[TextEdit, ...]
 
     def __post_init__(self) -> None:
+        if type(self.path) is not str:
+            raise TypeError("patch_path_must_be_string")
+        if self.base_sha256 is not None and type(self.base_sha256) is not str:
+            raise TypeError("patch_base_sha256_must_be_string_or_none")
+        if type(self.create) is not bool:
+            raise TypeError("patch_create_must_be_bool")
         _require_tuple_items(self.edits, TextEdit, "edits")
 
 
@@ -64,6 +74,22 @@ class PatchManifest:
     digest: str
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not int:
+            raise TypeError("manifest_schema_version_must_be_int")
+        if type(self.source_pr_number) is not int:
+            raise TypeError("manifest_source_pr_number_must_be_int")
+        scalar_strings = (
+            self.run_id,
+            self.source_repository,
+            self.target_repository,
+            self.source_head_sha,
+            self.target_base_sha,
+            self.target_base_ref,
+            self.verification_profile,
+            self.digest,
+        )
+        if any(type(value) is not str for value in scalar_strings):
+            raise TypeError("manifest_scalar_must_be_string")
         _require_tuple_items(self.files, FilePatch, "files")
 
 
@@ -182,6 +208,30 @@ class TrustedSourceFile:
     mode: str
     content: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class SourceOmission:
+    """Path-only reason for excluding source text from inference context."""
+
+    path: str
+    reason: str
+
+
+_MAX_TRUSTED_SOURCE_CONTEXT_BYTES = 650_000
+_MAX_SOURCE_OMISSION_DETAILS = 100
+_MAX_SOURCE_OMISSION_COUNT = 10_000
+_SOURCE_OMISSION_REASONS = frozenset(
+    {
+        "sensitive_or_unsafe_path",
+        "unsafe_source_file",
+        "non_utf8",
+        "invalid_source_content",
+        "secret_content",
+        "file_count_budget",
+        "context_budget",
+    }
+)
 
 
 class TrustedSourceTreeProvider(Protocol):
@@ -352,6 +402,12 @@ class ChangePolicy(Protocol):
         self, request: ChangeRequest
     ) -> tuple[TrustedSourceFile, ...]: ...
 
+    def trusted_source_omissions(
+        self, request: ChangeRequest
+    ) -> tuple[SourceOmission, ...]: ...
+
+    def trusted_source_omission_count(self, request: ChangeRequest) -> int: ...
+
 
 def prepare_change(
     request: ChangeRequest,
@@ -371,12 +427,25 @@ def prepare_change(
     source_files = _validate_trusted_source_files(
         policy.trusted_source_files(request)
     )
+    omissions = _validate_source_omissions(
+        policy.trusted_source_omissions(request)
+    )
+    omission_count = policy.trusted_source_omission_count(request)
+    if (
+        type(omission_count) is not int
+        or not len(omissions) <= omission_count <= _MAX_SOURCE_OMISSION_COUNT
+    ):
+        raise ValueError("invalid_source_omission_count")
+    if not source_files and omissions:
+        raise ValueError("no_safe_source_context")
 
     # Imported lazily so prompt builders can type-reference the immutable
     # change contracts without creating an import cycle.
     from tools.qykw.prompts import build_change_patch_request
 
-    inference_request = build_change_patch_request(request, source_files)
+    inference_request = build_change_patch_request(
+        request, source_files, omissions, omission_count
+    )
     _raise_if_canceled(request, state_store)
     validate_provider_capabilities(provider, inference_request)
     response = provider.complete(inference_request)
@@ -514,27 +583,76 @@ def _validate_trusted_source_files(
     if type(source_files) is not tuple or len(source_files) > 100:
         raise ValueError("invalid_trusted_source_view")
     previous_path: str | None = None
-    total_bytes = 0
+    context_bytes = 0
     for source in source_files:
-        if type(source) is not TrustedSourceFile or source.mode != "100644":
+        if (
+            type(source) is not TrustedSourceFile
+            or type(source.path) is not str
+            or type(source.mode) is not str
+            or type(source.content) is not str
+            or type(source.sha256) is not str
+            or source.mode != "100644"
+        ):
             raise ValueError("invalid_trusted_source_view")
         if previous_path is not None and source.path <= previous_path:
             raise ValueError("invalid_trusted_source_order")
         previous_path = source.path
         try:
             encoded = source.content.encode("utf-8")
+            path_bytes = source.path.encode("utf-8")
         except (AttributeError, UnicodeEncodeError):
             raise ValueError("invalid_trusted_source_view") from None
-        total_bytes += len(encoded)
+        if source.sha256 != hashlib.sha256(encoded).hexdigest():
+            raise ValueError("invalid_trusted_source_view")
+        context_bytes += len(
+            json.dumps(
+                {
+                    "path": source.path,
+                    "mode": source.mode,
+                    "sha256": source.sha256,
+                    "content": source.content,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
         if (
             not source.path
+            or len(path_bytes) > 240
             or not source.content
             or len(encoded) > 256 * 1024
-            or total_bytes > 2 * 1024 * 1024
-            or source.sha256 != hashlib.sha256(encoded).hexdigest()
+            or context_bytes > _MAX_TRUSTED_SOURCE_CONTEXT_BYTES
         ):
             raise ValueError("invalid_trusted_source_view")
     return source_files
+
+
+def _validate_source_omissions(
+    omissions: object,
+) -> tuple[SourceOmission, ...]:
+    if type(omissions) is not tuple or len(omissions) > _MAX_SOURCE_OMISSION_DETAILS:
+        raise ValueError("invalid_source_omissions")
+    previous_path: str | None = None
+    for omission in omissions:
+        if (
+            type(omission) is not SourceOmission
+            or type(omission.path) is not str
+            or type(omission.reason) is not str
+        ):
+            raise ValueError("invalid_source_omissions")
+        try:
+            encoded_path = omission.path.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("invalid_source_omissions") from None
+        if (
+            not omission.path
+            or omission.reason not in _SOURCE_OMISSION_REASONS
+            or len(encoded_path) > 240
+            or (previous_path is not None and omission.path <= previous_path)
+        ):
+            raise ValueError("invalid_source_omissions")
+        previous_path = omission.path
+    return omissions
 
 
 def _raise_if_canceled(
