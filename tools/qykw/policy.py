@@ -110,7 +110,10 @@ _HIGH_CONFIDENCE_SECRET = re.compile(
     r"\bAKIA[A-Z0-9]{16}\b|"
     r"(?:^|[^A-Za-z0-9_])_?(?:api[_-]?key|auth[_-]?token|password|secret|token)"
     r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=~-]{16,}['\"]?|"
-    r"\bauthorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._~+/=-]{16,}"
+    r"\bauthorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._~+/=-]{16,}|"
+    r"^[ \t]*machine[ \t]+\S+[ \t]+login[ \t]+\S+[ \t]+password[ \t]+"
+    r"[^\s#]{8,}[ \t]*(?:#.*)?$|"
+    r"^[ \t]*password[ \t]+[^\s#]{16,}[ \t]*(?:#.*)?$"
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -126,6 +129,9 @@ _CREDENTIAL_BASENAMES = frozenset(
         ".envrc",
         ".git-credentials",
     }
+)
+_CREDENTIAL_BACKUP_SUFFIXES = frozenset(
+    {".bak", ".backup", ".old", ".orig", ".save", "~"}
 )
 _CREDENTIAL_PATH_SUFFIXES = (
     (".docker", "config.json"),
@@ -636,11 +642,24 @@ def _is_sensitive_component(part: str) -> bool:
 
 def _is_credential_path(path: str) -> bool:
     parts = tuple(part.casefold() for part in PurePosixPath(path).parts)
-    if any(part in _CREDENTIAL_BASENAMES for part in parts):
+    if any(
+        _is_credential_filename(part, basename)
+        for part in parts
+        for basename in _CREDENTIAL_BASENAMES
+    ):
         return True
     return any(
-        len(parts) >= len(suffix) and parts[-len(suffix):] == suffix
+        len(parts) >= len(suffix)
+        and parts[-len(suffix):-1] == suffix[:-1]
+        and _is_credential_filename(parts[-1], suffix[-1])
         for suffix in _CREDENTIAL_PATH_SUFFIXES
+    )
+
+
+def _is_credential_filename(candidate: str, credential_name: str) -> bool:
+    return candidate == credential_name or any(
+        candidate == credential_name + suffix
+        for suffix in _CREDENTIAL_BACKUP_SUFFIXES
     )
 
 

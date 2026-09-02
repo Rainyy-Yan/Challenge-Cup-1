@@ -516,6 +516,139 @@ class TestPatchGeneration(unittest.TestCase):
         )
         self.assertEqual(provider.calls, 1)
 
+    def test_credential_backup_variants_at_any_depth_fail_closed(self) -> None:
+        credential_basenames = (
+            ".npmrc",
+            ".netrc",
+            ".pypirc",
+            ".envrc",
+            ".git-credentials",
+        )
+        backup_suffixes = ("", ".bak", ".backup", ".old", ".orig", ".save", "~")
+        directory_credentials = (
+            ".docker/config.json",
+            ".aws/credentials",
+            ".config/gcloud/application_default_credentials.json",
+            ".azure/accessTokens.json",
+            ".kube/config",
+        )
+        paths = {
+            f"{prefix}{basename.upper()}{suffix.upper()}"
+            for basename in credential_basenames
+            for suffix in backup_suffixes
+            for prefix in ("", "packages/app/")
+        }
+        paths.update(
+            f"packages/app/{credential}{suffix}"
+            for credential in directory_credentials
+            for suffix in backup_suffixes
+        )
+        content = "public_registry_setting=true\n"
+
+        for path in sorted(paths):
+            parts = path.split("/")
+            parents = tuple(
+                SourceTreeEntry(
+                    "/".join(parts[:index]),
+                    "040000",
+                    "tree",
+                    format(index, "x") * 40,
+                )
+                for index in range(1, len(parts))
+            )
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+                    self.generate(
+                        snapshot_value=snapshot(source),
+                        subject=policy(
+                            source_tree=tree_index(
+                                *parents,
+                                SourceTreeEntry(
+                                    path,
+                                    "100644",
+                                    "blob",
+                                    git_blob_sha(content.encode()),
+                                ),
+                            )
+                        ),
+                        provider=provider,
+                    )
+                self.assertEqual(provider.calls, 0)
+
+    def test_netrc_space_syntax_fails_closed_without_natural_language_false_positive(self) -> None:
+        secret_cases = (
+            (
+                "packages/app/.netrc.bak",
+                "machine registry.example login build password ABCDEFGHIJKLMNOPQRSTUVWXYZ\n",
+            ),
+            (
+                "connection.txt",
+                "machine api.example login robot password S3cretValue!234\n",
+            ),
+            (
+                "connection.txt",
+                "machine api.example\nlogin robot\npassword S3cretValueLong234\n",
+            ),
+        )
+        for path, content in secret_cases:
+            parts = path.split("/")
+            parents = tuple(
+                SourceTreeEntry(
+                    "/".join(parts[:index]),
+                    "040000",
+                    "tree",
+                    format(index, "x") * 40,
+                )
+                for index in range(1, len(parts))
+            )
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(path=path, content=content):
+                with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+                    self.generate(
+                        snapshot_value=snapshot(source),
+                        subject=policy(
+                            source_tree=tree_index(
+                                *parents,
+                                SourceTreeEntry(
+                                    path,
+                                    "100644",
+                                    "blob",
+                                    git_blob_sha(content.encode()),
+                                )
+                            )
+                        ),
+                        provider=provider,
+                    )
+                self.assertEqual(provider.calls, 0)
+
+        safe_content = "password rules should be documented for contributors\n"
+        safe = changed_file("guidance.txt", content=safe_content)
+        provider = FakeInferenceProvider(
+            patch_value(path="generated.py", before="", after="x\n", create=True)
+        )
+        self.generate(
+            snapshot_value=snapshot(safe),
+            subject=policy(
+                source_tree=tree_index(
+                    SourceTreeEntry(
+                        "guidance.txt",
+                        "100644",
+                        "blob",
+                        git_blob_sha(safe_content.encode()),
+                    )
+                )
+            ),
+            provider=provider,
+        )
+        self.assertEqual(provider.calls, 1)
+
     def test_source_selection_truncates_stably_with_path_only_omissions(self) -> None:
         files = tuple(
             changed_file(f"file-{index:03}.py", content=f"value={index}\n")
