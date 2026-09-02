@@ -116,10 +116,7 @@ _KNOWN_SECRET = re.compile(
 )
 _SECRET_ASSIGNMENT = re.compile(
     r"(?:^|[^A-Za-z0-9_])_?(?:api[_-]?key|auth[_-]?token|password|secret|token)"
-    r"\s*[:=]\s*(?:"
-    r"(?P<quote>['\"])(?P<quoted>[^'\"\r\n]+)(?P=quote)|"
-    r"(?P<unquoted>[^\s#;,]+)"
-    r")",
+    r"\s*[:=]\s*(?P<rhs>[^\r\n#;]*)",
     re.IGNORECASE | re.MULTILINE,
 )
 _BEARER_VALUE = re.compile(
@@ -148,6 +145,8 @@ _PLACEHOLDER_VALUES = frozenset(
         "xxx-token-placeholder",
     }
 )
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_REFERENCE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+$")
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
 )
@@ -715,13 +714,8 @@ def _is_placeholder_secret_value(value: str) -> bool:
 
 
 def _assignment_contains_secret(match: re.Match[str]) -> bool:
-    quoted = match.group("quoted")
-    if quoted is not None:
-        return not _is_placeholder_secret_value(quoted)
-    value = match.group("unquoted").strip()
-    if not value or _is_placeholder_secret_value(value):
-        return False
-    if value.casefold() in {"none", "null", "nil", "undefined"}:
+    value = match.group("rhs").strip()
+    if not value:
         return False
     if len(value) > _MAX_ASSIGNMENT_EXPRESSION_LENGTH:
         return True
@@ -729,7 +723,69 @@ def _assignment_contains_secret(match: re.Match[str]) -> bool:
         expression = ast.parse(value, mode="eval").body
     except (MemoryError, OverflowError, RecursionError, SyntaxError, ValueError):
         return True
-    return not isinstance(expression, (ast.Attribute, ast.Call, ast.Subscript))
+    if isinstance(expression, ast.Constant):
+        if expression.value is None:
+            return False
+        if isinstance(expression.value, str):
+            return bool(expression.value) and not _is_placeholder_secret_value(
+                expression.value
+            )
+        return True
+    return not _is_safe_assignment_reference(expression)
+
+
+def _is_safe_assignment_reference(expression: ast.expr) -> bool:
+    if isinstance(expression, ast.Name):
+        return expression.id.casefold() in {"null", "nil", "undefined"} or (
+            _REFERENCE_NAME.fullmatch(expression.id) is not None
+        )
+    if isinstance(expression, ast.Attribute):
+        return _attribute_path(expression) is not None
+    if isinstance(expression, ast.Subscript):
+        return _attribute_path(expression.value) == ("os", "environ") and (
+            _environment_name_literal(expression.slice) is not None
+        )
+    if not isinstance(expression, ast.Call) or expression.keywords:
+        return False
+    path = _attribute_path(expression.func)
+    if path is not None and path[-1] == "getpass":
+        return not expression.args
+    if path not in {("os", "getenv"), ("os", "environ", "get")}:
+        return False
+    if len(expression.args) not in {1, 2}:
+        return False
+    if _environment_name_literal(expression.args[0]) is None:
+        return False
+    if len(expression.args) == 1:
+        return True
+    default = expression.args[1]
+    return isinstance(default, ast.Constant) and (
+        default.value is None
+        or (
+            isinstance(default.value, str)
+            and _is_placeholder_secret_value(default.value)
+        )
+    )
+
+
+def _attribute_path(expression: ast.expr) -> tuple[str, ...] | None:
+    if isinstance(expression, ast.Name):
+        return (expression.id,)
+    if isinstance(expression, ast.Attribute):
+        parent = _attribute_path(expression.value)
+        if parent is not None:
+            return (*parent, expression.attr)
+    return None
+
+
+def _environment_name_literal(expression: ast.expr) -> str | None:
+    if not isinstance(expression, ast.Constant) or not isinstance(
+        expression.value, str
+    ):
+        return None
+    if _ENVIRONMENT_NAME.fullmatch(expression.value) is None:
+        return None
+    return expression.value
 
 
 def _validate_text(value: str, *, allow_empty: bool) -> int:

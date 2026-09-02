@@ -697,6 +697,13 @@ class TestPatchGeneration(unittest.TestCase):
             'api_key = os.environ["API_KEY"]\n',
             "password = getpass()\n",
             "secret = config.secret\n",
+            "token = credential_name\n",
+            'secret = os.getenv("SECRET_NAME")\n',
+            'token = os.environ.get("TOKEN_NAME")\n',
+            'api_key = os.environ.get("API_KEY", None)\n',
+            'password = os.environ.get("PASSWORD_NAME", "placeholder_token_value")\n',
+            'token = ""\n',
+            "secret =\n",
         )
         for index, content in enumerate(references):
             path = f"reference-{index}.py"
@@ -780,9 +787,49 @@ class TestPatchGeneration(unittest.TestCase):
             ('api_key="your-secret-key"\n', "settings.py"),
             ('password="None"\n', "settings.py"),
             ('token="config.secret"\n', "settings.py"),
-            ("token=aaaaaaaa\n", "settings.py"),
         )
         for content, path in credentials:
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+                    self.generate(
+                        snapshot_value=snapshot(source),
+                        subject=policy(
+                            source_tree=tree_index(
+                                SourceTreeEntry(
+                                    path,
+                                    "100644",
+                                    "blob",
+                                    git_blob_sha(content.encode()),
+                                )
+                            )
+                        ),
+                        provider=provider,
+                    )
+                self.assertEqual(provider.calls, 0)
+
+    def test_ast_wrappers_cannot_hide_literal_credentials(self) -> None:
+        credentials = (
+            'token=str("ActualSecretValue123")\n',
+            'password=load("ActualSecretValue123")\n',
+            'secret=config["ActualSecretValue123"]\n',
+            'password=getpass("ActualSecretValue123")\n',
+            'token=b"ActualSecretValue123"\n',
+            'token=getpass(prompt="ActualSecretValue123")\n',
+            "token=os.getenv()\n",
+            'token=os.getenv("BAD-NAME")\n',
+            'token=os.getenv("TOKEN_NAME", "ActualSecretValue123")\n',
+            "token=os.environ[dynamic_key]\n",
+            'token=os.environ["BAD-NAME"]\n',
+            "token=(factory()).secret\n",
+            "token=left + right\n",
+            "token=" + "a" * 4097 + "\n",
+        )
+        for index, content in enumerate(credentials):
+            path = f"wrapper-{index}.py"
             source = changed_file(path, content=content)
             provider = FakeInferenceProvider(
                 patch_value(path="generated.py", before="", after="x\n", create=True)
