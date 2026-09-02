@@ -201,6 +201,20 @@ class TestAudit(unittest.TestCase):
         )
         self.assertIsNotNone(issue)
 
+    def test_scope_limit_in_previous_clause_does_not_bypass(self):
+        issue = semantic_boundary_issue(
+            "以Yaskawa控制器为例，所有该型号使用MOVJ；所有机器人都使用MOVJ。",
+            "以Yaskawa控制器为例，应按工艺轨迹、空间和机型手册选择指令。",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_each_scope_clause_can_keep_its_own_limit(self):
+        issue = semantic_boundary_issue(
+            "以A控制器为例，所有该型号使用MOVJ；仅在B控制器中，所有该型号使用MOVL。",
+            "具体机型应查阅机型手册。",
+        )
+        self.assertIsNone(issue)
+
     def test_automatic_mode_does_not_hide_cancelled_validation(self):
         issue = semantic_boundary_issue(
             "快速校对完成后无需验证精度。",
@@ -223,7 +237,7 @@ class TestAudit(unittest.TestCase):
         self.assertIsNone(issue)
 
     def test_risk_synonyms_keep_the_requirement(self):
-        for verb in ("造成", "引发", "带来", "引起"):
+        for verb in ("导致", "触发", "造成", "引发", "带来", "引起"):
             with self.subTest(verb=verb):
                 issue = semantic_boundary_issue(
                     "使用辨识功能后无需核对负载数据。",
@@ -231,19 +245,52 @@ class TestAudit(unittest.TestCase):
                 )
                 self.assertIsNotNone(issue)
 
-    def test_omission_risk_keeps_the_requirement(self):
-        issue = semantic_boundary_issue(
-            "快速校对完成后无需验证精度。",
-            "未验证精度将导致定位误差。",
+    def test_omission_risk_synonyms_keep_the_requirement(self):
+        for verb in ("导致", "触发", "造成", "引发", "带来", "引起"):
+            with self.subTest(verb=verb):
+                issue = semantic_boundary_issue(
+                    "快速校对完成后无需验证精度。",
+                    f"未验证精度将{verb}定位误差。",
+                )
+                self.assertIsNotNone(issue)
+
+    def test_common_omission_phrases_keep_the_requirement(self):
+        evidence_cases = (
+            "若省略验证，会导致定位误差。",
+            "如不确认前提，将引发意外动作。",
+            "跳过核对后造成碰撞检测失效。",
+            "略过核实可能带来错误结果。",
+            "漏掉确认会引起设备停机。",
         )
-        self.assertIsNotNone(issue)
+        for evidence in evidence_cases:
+            with self.subTest(evidence=evidence):
+                issue = semantic_boundary_issue(
+                    "快速校对完成后无需验证精度。", evidence
+                )
+                self.assertIsNotNone(issue)
+
+    def test_risk_requirement_does_not_cross_ascii_punctuation(self):
+        issue = semantic_boundary_issue(
+            "使用辨识功能后无需核对负载数据。",
+            "不正确的负载数据,这里只描述输入；另一项可能导致提示。",
+        )
+        self.assertIsNone(issue)
 
     def test_whitespace_does_not_hide_automatic_completion(self):
+        for spacing in (" ", "\t", "\u00a0", "\u200b", "\u3000"):
+            with self.subTest(spacing=repr(spacing)):
+                issue = semantic_boundary_issue(
+                    f"快速校对完成后会自动{spacing}验证精度。",
+                    "快速校对完成后必须验证精度。",
+                )
+                self.assertIsNotNone(issue)
+
+    def test_evidence_paragraphs_are_not_joined_into_a_requirement(self):
         issue = semantic_boundary_issue(
-            "快速校对完成后会自动　验证精度。",
-            "快速校对完成后必须验证精度。",
+            "快速校对完成后无需验证精度。",
+            "快速校对必须\n\n验证其它设备的运行状态。",
         )
-        self.assertIsNotNone(issue)
+        self.assertIsNone(issue)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 import unittest
 
 import config
+from agents.audit import CONDITION_BOUNDARY_NOTE, SCOPE_BOUNDARY_NOTE
 from core.retrieval import Retriever
 from evalkit.redteam import FIXTURES, TRUE_CLAIMS, run
 
@@ -26,7 +27,10 @@ class TestRedteam(unittest.TestCase):
             row = result["by_category"][category]
             self.assertEqual(row["caught"], row["total"])
             self.assertEqual(row["missed"], [])
-        expected_note = {"H5": "适用范围", "H6": "条件或步骤"}
+        expected_note = {
+            "H5": SCOPE_BOUNDARY_NOTE,
+            "H6": CONDITION_BOUNDARY_NOTE,
+        }
         for detail in result["detail"]:
             category = detail["category"]
             if category not in expected_note:

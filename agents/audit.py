@@ -43,13 +43,23 @@ _REQUIREMENT_CUES = (
     "需要确认", "应当验证", "应当核对", "应当确认", "仍需验证",
     "仍需核对", "仍需确认", "另行验证", "前提满足",
 )
+SCOPE_BOUNDARY_NOTE = "断言把资料限定的适用范围扩大成了无条件通用结论"
+CONDITION_BOUNDARY_NOTE = "取消了资料明确保留的条件或步骤"
+_BOUNDARY_SPACING = re.compile(
+    r"[ \t\f\v\u00a0\u1680\u2000-\u200b\u202f\u205f\u3000]+"
+)
+_EVIDENCE_BREAKS = re.compile(r"[\r\n\u0085\u2028\u2029]+")
+_SCOPE_CLAUSE_BREAKS = re.compile(r"[。！？!?；;]+")
+_RISK_VERBS = r"(?:导致|触发|造成|引发|带来|引起)"
 _RISK_REQUIREMENT = re.compile(
     r"(?:错误|不正确)(?:的)?[^，,。.;；]{0,16}(?:时)?"
-    r"可能(?:导致|触发|造成|引发|带来|引起)"
+    rf"可能{_RISK_VERBS}"
 )
 _OMISSION_RISK = re.compile(
-    r"(?:未|不|没有|省略)[^，,。.;；]{0,16}(?:验证|核对|确认|满足)"
-    r"[^，,。.;；]{0,16}(?:会|将|可能)(?:导致|触发|造成|引发|带来|引起)"
+    r"(?:未|不|没有|省略|跳过|略过|漏掉)"
+    r"[^，,。.;；：:!?！？]{0,16}(?:验证|核对|核实|确认|满足)"
+    r"[^，,。.;；：:!?！？]{0,16}(?:[，,：:])?(?:会|将|可能)?"
+    rf"{_RISK_VERBS}"
 )
 
 _SYSTEM = (
@@ -66,27 +76,39 @@ def semantic_boundary_issue(claim_text: str, evidence_text: str) -> str | None:
     语义蕴含仍交给真模型复核。两类规则都要求证据中存在相反的限制信号，
     避免仅因断言出现“必须”或“自动”等词就误伤。
     """
-    claim_text = re.sub(r"\s+", "", claim_text)
-    evidence_text = re.sub(r"\s+", "", evidence_text)
-
-    expansion_positions = [
-        claim_text.find(cue) for cue in _SCOPE_EXPANSION_CUES
-        if cue in claim_text
-    ]
-    claim_limit_positions = [
-        claim_text.find(cue) for cue in _SCOPE_LIMIT_CUES
-        if cue in claim_text
-    ]
-    expands_scope = bool(expansion_positions)
-    limits_scope = any(cue in evidence_text for cue in _SCOPE_LIMIT_CUES)
-    # 限定词必须出现在每个扩大词之前。把“为例”等字样补在绝对结论后面，
-    # 不能反过来洗掉已经发生的范围扩大。
-    preserves_scope = bool(claim_limit_positions) and all(
-        any(limit_pos < expansion_pos for limit_pos in claim_limit_positions)
-        for expansion_pos in expansion_positions
+    # 断言是不可信输入，所有常见空白（含零宽空格）都不能用来拆开关键词。
+    # 资料可能由标题、正文或多段文本组成；换行先变成硬边界，避免删空白后
+    # 把相邻两段拼成一个并不存在的条件。
+    claim_text = _BOUNDARY_SPACING.sub("", re.sub(r"[\r\n\u0085\u2028\u2029]+", "", claim_text))
+    evidence_text = _BOUNDARY_SPACING.sub(
+        "", _EVIDENCE_BREAKS.sub("。", evidence_text)
     )
+
+    expands_scope = False
+    preserves_scope = True
+    for clause in _SCOPE_CLAUSE_BREAKS.split(claim_text):
+        expansion_positions = [
+            match.start()
+            for cue in _SCOPE_EXPANSION_CUES
+            for match in re.finditer(re.escape(cue), clause)
+        ]
+        if not expansion_positions:
+            continue
+        expands_scope = True
+        limit_positions = [
+            match.start()
+            for cue in _SCOPE_LIMIT_CUES
+            for match in re.finditer(re.escape(cue), clause)
+        ]
+        if any(
+            not any(limit_pos < expansion_pos for limit_pos in limit_positions)
+            for expansion_pos in expansion_positions
+        ):
+            preserves_scope = False
+
+    limits_scope = any(cue in evidence_text for cue in _SCOPE_LIMIT_CUES)
     if expands_scope and limits_scope and not preserves_scope:
-        return "断言把资料限定的适用范围扩大成了无条件通用结论"
+        return SCOPE_BOUNDARY_NOTE
 
     relaxation_cues = _RELAXATION_CUES + _AUTOMATIC_COMPLETION_CUES
     relaxation = next((cue for cue in relaxation_cues if cue in claim_text), None)
@@ -97,7 +119,7 @@ def semantic_boundary_issue(claim_text: str, evidence_text: str) -> str | None:
         or bool(_OMISSION_RISK.search(evidence_text))
     )
     if relaxation and not evidence_relaxes and has_requirement:
-        return f"断言用“{relaxation}”取消了资料明确保留的条件或步骤"
+        return f"断言用“{relaxation}”{CONDITION_BOUNDARY_NOTE}"
     return None
 
 
@@ -121,7 +143,7 @@ class AuditAgent:
                 return (VERDICT_CONTRADICTED,
                         f"断言中的数值 {sorted(extra)} 在所引切片中不存在", ratio)
         boundary_issue = semantic_boundary_issue(
-            claim.text, f"{chunk.title} {chunk.text}"
+            claim.text, f"{chunk.title}。{chunk.text}"
         )
         if boundary_issue:
             return VERDICT_CONTRADICTED, boundary_issue, ratio

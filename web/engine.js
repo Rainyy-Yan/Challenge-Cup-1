@@ -691,22 +691,44 @@ const REQUIREMENT_CUES = [
   "应当验证", "应当核对", "应当确认", "仍需验证", "仍需核对", "仍需确认",
   "另行验证", "前提满足"
 ];
+const BOUNDARY_SPACING_RE = /[ \t\f\v\u00a0\u1680\u2000-\u200b\u202f\u205f\u3000]+/gu;
+const EVIDENCE_BREAKS_RE = /[\r\n\u0085\u2028\u2029]+/gu;
+const SCOPE_CLAUSE_BREAKS_RE = /[。！？!?；;]+/u;
 const RISK_REQUIREMENT_RE = /(?:错误|不正确)(?:的)?[^，,。.;；]{0,16}(?:时)?可能(?:导致|触发|造成|引发|带来|引起)/;
-const OMISSION_RISK_RE = /(?:未|不|没有|省略)[^，,。.;；]{0,16}(?:验证|核对|确认|满足)[^，,。.;；]{0,16}(?:会|将|可能)(?:导致|触发|造成|引发|带来|引起)/;
+const OMISSION_RISK_RE = /(?:未|不|没有|省略|跳过|略过|漏掉)[^，,。.;；：:!?！？]{0,16}(?:验证|核对|核实|确认|满足)[^，,。.;；：:!?！？]{0,16}(?:[，,：:])?(?:会|将|可能)?(?:导致|触发|造成|引发|带来|引起)/;
 
 function semanticBoundaryIssue(claimText, evidenceText) {
-  claimText = String(claimText || "").replace(/\s+/gu, "");
-  evidenceText = String(evidenceText || "").replace(/\s+/gu, "");
+  claimText = String(claimText || "")
+    .replace(EVIDENCE_BREAKS_RE, "").replace(BOUNDARY_SPACING_RE, "");
+  evidenceText = String(evidenceText || "")
+    .replace(EVIDENCE_BREAKS_RE, "。").replace(BOUNDARY_SPACING_RE, "");
 
-  const expansionPositions = SCOPE_EXPANSION_CUES
-    .filter(cue => claimText.includes(cue)).map(cue => claimText.indexOf(cue));
-  const claimLimitPositions = SCOPE_LIMIT_CUES
-    .filter(cue => claimText.includes(cue)).map(cue => claimText.indexOf(cue));
-  const expandsScope = expansionPositions.length > 0;
+  const cuePositions = (text, cues) => {
+    const positions = [];
+    for (const cue of cues) {
+      let from = 0;
+      while (from < text.length) {
+        const position = text.indexOf(cue, from);
+        if (position < 0) break;
+        positions.push(position);
+        from = position + cue.length;
+      }
+    }
+    return positions;
+  };
+  let expandsScope = false;
+  let preservesScope = true;
+  for (const clause of claimText.split(SCOPE_CLAUSE_BREAKS_RE)) {
+    const expansionPositions = cuePositions(clause, SCOPE_EXPANSION_CUES);
+    if (!expansionPositions.length) continue;
+    expandsScope = true;
+    const limitPositions = cuePositions(clause, SCOPE_LIMIT_CUES);
+    if (expansionPositions.some(expansionPos =>
+      !limitPositions.some(limitPos => limitPos < expansionPos))) {
+      preservesScope = false;
+    }
+  }
   const limitsScope = SCOPE_LIMIT_CUES.some(cue => evidenceText.includes(cue));
-  const preservesScope = claimLimitPositions.length > 0 && expansionPositions.every(
-    expansionPos => claimLimitPositions.some(limitPos => limitPos < expansionPos)
-  );
   if (expandsScope && limitsScope && !preservesScope)
     return "断言把资料限定的适用范围扩大成了无条件通用结论";
 
@@ -724,7 +746,7 @@ function auditOne(claim, R) {
   if (!claim.source_id) return {verdict:"unsupported", note:"未给出知识库引用", ratio:0};
   const chunk = R.get(claim.source_id);
   if (!chunk) return {verdict:"unsupported", note:`引用的切片 ${claim.source_id} 不存在`, ratio:0};
-  const full = chunk.title + " " + chunk.text;
+  const full = chunk.title + "。" + chunk.text;
   const ratio = overlapRatio(claim.text, chunk.text);
 
   const cn = numbersIn(claim.text), kn = numbersIn(full);
