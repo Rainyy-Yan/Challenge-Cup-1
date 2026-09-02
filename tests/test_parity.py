@@ -355,12 +355,10 @@ class TestEvidenceParity(unittest.TestCase):
             self.assertEqual(got, want, f"{k}/{n} 判定不一致")
 
     def test_ability_profile_matches(self):
-        from agents.diagnose import DiagnoseAgent
         from core.ability import build
-        from core.llm import MockLLM
-        from orchestrator import load_profile
+        from orchestrator import Orchestrator, load_profile
         for pid in ("P-A", "P-B", "P-C"):
-            diag = DiagnoseAgent(MockLLM()).run(load_profile(pid))
+            diag = Orchestrator().diagnoser.run(load_profile(pid))
             want = build(diag)
             js = run_js(f"""
             const d = SNAP.sessions[{pid!r}].diagnosis;

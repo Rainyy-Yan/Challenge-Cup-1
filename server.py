@@ -25,7 +25,10 @@ from agents.examiner import ExaminerAgent
 from agents.intake import IntakeAgent
 from core.cat import AdaptiveSession
 from core.demo_items import formal_demo_items
-from core.demo_sources import validate_demo_source_manifest
+from core.demo_sources import (
+    publicly_verified_source_ids,
+    validate_demo_source_manifest,
+)
 from core.llm import build_llm
 from core.retrieval import Retriever
 from orchestrator import Orchestrator, load_profile
@@ -122,6 +125,12 @@ def stage_material(filename: object, encoded: object, source_description: object
 
     # ingest 只生成 sourced / quarantined 的暂存切片；quality_gate 不会删除原文。
     result = ingest([stored])
+    if not result["staged"]:
+        reasons = "；".join(reason for _, reason in result["skipped"])
+        detail = f"（{reasons}）" if reasons else ""
+        raise UploadError(
+            f"未提取到可复核内容{detail}；请检查文件格式、内容和解析工具"
+        )
     quality_gate(result["staged"])
     stage_dir = staging_root / upload_id
     write_stage(result, stage_dir)
@@ -165,7 +174,9 @@ def stage_material(filename: object, encoded: object, source_description: object
 def _examiner():
     if not config.EXAMINER_ENABLED:
         return None
-    return ExaminerAgent(build_llm(), Retriever.from_jsonl(config.KB_PATH), _KP_INDEX)
+    return ExaminerAgent(
+        build_llm(), Retriever.from_jsonl(config.KB_PATH, demo_only=True), _KP_INDEX
+    )
 
 
 def list_profiles() -> list[dict]:
@@ -192,11 +203,12 @@ def session_payload(sid: str) -> dict:
     data["path_names"] = [kp_index[k]["name"] for k in session.path]
     # 资源展示必须把来源、核实状态和人工备注一并带到前端。只给 source_id
     # 会让评委看不到“这条断言的依据是否已核实”，也无法核对具体来源。
+    publicly_verified = publicly_verified_source_ids()
     data["kb"] = {
         c.id: {
             "title": c.title,
             "source": c.source,
-            "verified": c.publicly_verified,
+            "verified": c.verified and c.id in publicly_verified,
             "source_note": c.source_note,
         }
         for c in orch.retriever.chunks

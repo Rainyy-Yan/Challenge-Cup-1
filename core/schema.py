@@ -40,22 +40,12 @@ class Chunk:
     source: str
     text: str
     verified: bool = False
-    # 来源失效或适用边界不明的原始切片可保留待复核，但不能进入正式 Demo。
-    demo_eligible: bool = True
     source_note: str = ""
     # 来源：手工录入还是从原始文档摄入。摄入的可回溯到文件与位置。
     origin: str = "manual"
-
-    @property
-    def publicly_verified(self) -> bool:
-        """Return the verification state that is safe to expose in a Demo.
-
-        ``verified`` preserves the historical human-review record on the raw
-        knowledge-base item. A source that has since become unavailable must
-        not be presented as currently verifiable, even if that raw record is
-        still retained for internal review.
-        """
-        return self.verified and self.demo_eligible
+    # 资料失效或尚未完成来源核验时，可保留原始切片供内部复核，
+    # 但不得让它进入在线服务、离线快照或答辩展示。
+    demo_eligible: bool = True
 
 
 @dataclass

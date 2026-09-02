@@ -10,6 +10,7 @@ from core.demo_items import formal_demo_items
 from core.llm import MockLLM
 from core.retrieval import Retriever
 from evalkit.itemreport import build
+from orchestrator import Orchestrator, load_profile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,3 +80,36 @@ class TestFormalDemoItems(unittest.TestCase):
             except ItemRejected as exc:
                 failures.append(f"{item['id']}: {exc}")
         self.assertFalse(failures, "\n".join(failures))
+
+    def test_orchestrator_diagnosis_ignores_excluded_items(self):
+        """正式 Demo 的诊断不能继续吸收已排除题目的作答。"""
+        profile = {
+            "id": "formal-demo-boundary",
+            "background": {},
+            "responses": {"Q-008": 1, "Q-017": 0, "Q-020": 0},
+        }
+
+        diagnosis = Orchestrator().diagnoser.run(profile)
+        mastery = {row.kp: row for row in diagnosis.mastery}
+
+        for kp in ("KP-04", "KP-10", "KP-13"):
+            self.assertEqual(0, mastery[kp].asked, kp)
+            self.assertEqual(0, mastery[kp].correct, kp)
+
+    def test_preset_profiles_keep_their_intended_correct_answers(self):
+        """重写题目或调整选项顺序不能悄悄改变预设学情。"""
+        expected = {
+            "P-A": {"Q-001", "Q-002", "Q-003", "Q-005", "Q-006", "Q-007",
+                    "Q-010", "Q-011", "Q-012", "Q-013"},
+            "P-B": {"Q-002", "Q-003", "Q-004", "Q-013", "Q-014", "Q-015",
+                    "Q-016", "Q-019", "Q-021", "Q-022", "Q-023"},
+            "P-C": {"Q-003", "Q-019", "Q-021"},
+        }
+
+        for profile_id, expected_correct in expected.items():
+            responses = load_profile(profile_id)["responses"]
+            actual_correct = {
+                item["id"] for item in self.formal_items
+                if item["id"] in responses and responses[item["id"]] == item["answer"]
+            }
+            self.assertEqual(expected_correct, actual_correct, profile_id)

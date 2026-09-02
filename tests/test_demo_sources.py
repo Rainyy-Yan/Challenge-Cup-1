@@ -5,10 +5,16 @@
 """
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from core.demo_sources import validate_demo_source_manifest
+from core.demo_sources import (
+    DemoSourceManifestError,
+    manifest_source_ids,
+    publicly_verified_source_ids,
+    validate_demo_source_manifest,
+)
 from core.retrieval import Retriever
 
 
@@ -99,6 +105,66 @@ class TestDemoSourceManifest(unittest.TestCase):
                 self.assertEqual("legacy_verified_record_pending", status, chunk_id)
             else:
                 self.assertEqual("pending_manual_review", status, chunk_id)
+
+    def test_snapshot_only_publishes_completed_human_reviews(self):
+        """快照中的核实状态必须由完整人工复核台账决定。"""
+        review_fields = ("reviewer", "reviewed_on", "conclusion", "authorization")
+        for chunk_id, record in self.records.items():
+            expected = (
+                record["review_status"] == "human_verified"
+                and all(record[field] for field in review_fields)
+                and self.kb[chunk_id]["verified"]
+            )
+            self.assertEqual(expected, self.snapshot["kb"][chunk_id]["verified"], chunk_id)
+
+    def test_public_verification_requires_a_complete_human_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text(json.dumps({"records": [
+                {
+                    "id": "KB-OK",
+                    "review_status": "human_verified",
+                    "reviewer": "reviewer@example.org",
+                    "reviewed_on": "2026-09-02",
+                    "conclusion": "来源与摘录一致",
+                    "authorization": "内部复核记录",
+                },
+                {"id": "KB-PENDING", "review_status": "pending_manual_review"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+
+            self.assertEqual({"KB-OK"}, publicly_verified_source_ids(path))
+
+    def test_incomplete_human_record_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text(json.dumps({"records": [{
+                "id": "KB-BROKEN",
+                "review_status": "human_verified",
+                "reviewer": "",
+                "reviewed_on": "2026-09-02",
+                "conclusion": "来源与摘录一致",
+                "authorization": "内部复核记录",
+            }]}, ensure_ascii=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(DemoSourceManifestError, "KB-BROKEN"):
+                publicly_verified_source_ids(path)
+
+    def test_missing_manifest_uses_the_domain_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.json"
+            with self.assertRaisesRegex(
+                DemoSourceManifestError, "无法读取 Demo 来源台账"
+            ):
+                manifest_source_ids(path)
+
+    def test_malformed_manifest_uses_the_domain_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text("{broken", encoding="utf-8")
+            with self.assertRaisesRegex(
+                DemoSourceManifestError, "无法读取 Demo 来源台账"
+            ):
+                manifest_source_ids(path)
 
     def test_source_unavailable_chunks_are_excluded_from_formal_demo(self):
         """失效的资料可留在原始库复核，但不能随正式 Demo 重新出现。"""

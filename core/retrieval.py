@@ -71,6 +71,13 @@ class Retriever:
                     raise ValueError(
                         f"知识库第 {line_number} 行不是对象，无法读取切片"
                     )
+                chunk_id = rec.get("id", "<missing id>")
+                for field in ("verified", "demo_eligible"):
+                    if field in rec and not isinstance(rec[field], bool):
+                        raise ValueError(
+                            f"知识库切片 {chunk_id!r}（第 {line_number} 行）的 "
+                            f"{field} 必须为布尔值"
+                        )
                 # 先按原始记录过滤，避免已排除的失效来源因缺字段或结构错误
                 # 影响正式 Demo 的加载。
                 if demo_only and not rec.get("demo_eligible", True):
@@ -88,7 +95,6 @@ class Retriever:
                 try:
                     chunk = Chunk(**{k: v for k, v in rec.items() if k in known})
                 except TypeError as exc:
-                    chunk_id = rec.get("id", "<missing id>")
                     raise ValueError(
                         f"知识库切片 {chunk_id!r}（第 {line_number} 行）字段无效"
                     ) from exc
