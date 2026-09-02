@@ -755,7 +755,7 @@ def _is_exact_quoted_placeholder(value: str) -> bool:
 def _is_safe_assignment_reference(expression: ast.expr) -> bool:
     if isinstance(expression, ast.Name):
         return expression.id.casefold() in {"null", "nil", "undefined"} or (
-            _REFERENCE_NAME.fullmatch(expression.id) is not None
+            _REFERENCE_NAME.fullmatch(expression.id.casefold()) is not None
         )
     if isinstance(expression, ast.Attribute):
         return _attribute_path(expression) is not None
