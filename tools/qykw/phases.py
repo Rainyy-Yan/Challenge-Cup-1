@@ -29,6 +29,16 @@ from tools.qykw.triggers import build_run_context, decide_trigger, normalize_eve
 _PROMPT_VERSION = "qykw-v1"
 _MAX_TEXT = 2_000
 _MAX_ITEMS = 20
+_COMMON_ENVIRONMENT = frozenset({
+    "GITHUB_ACTIONS", "GITHUB_API_URL", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH",
+    "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_RUN_ID", "QYKW_CONFIG_PATH",
+})
+_REVIEW_ENVIRONMENT = _COMMON_ENVIRONMENT | {"QYKW_REVIEW_TOKEN"}
+_ANALYZE_ENVIRONMENT = _COMMON_ENVIRONMENT | {
+    "GITHUB_TOKEN", "QYKW_INFERENCE_API_KEY", "QYKW_INFERENCE_BASE_URL", "QYKW_INFERENCE_MODEL",
+    "QYKW_INFERENCE_ALLOWED_HOSTS", "QYKW_INFERENCE_CONTEXT_WINDOW",
+    "QYKW_INFERENCE_MAX_OUTPUT_TOKENS", "QYKW_INFERENCE_TIMEOUT_SECONDS",
+}
 
 
 class ProductionPhaseController:
@@ -36,7 +46,9 @@ class ProductionPhaseController:
 
     def __init__(self, phase: str, environment: Mapping[str, str] | None = None) -> None:
         self.phase = phase
-        self.environment = dict(os.environ if environment is None else environment)
+        source = os.environ if environment is None else environment
+        allowed = _ANALYZE_ENVIRONMENT if phase == "analyze" else _REVIEW_ENVIRONMENT
+        self.environment = {key: value for key, value in source.items() if key in allowed}
 
     def root(self) -> dict[str, object]:
         event, reason = self._event()
@@ -67,12 +79,14 @@ class ProductionPhaseController:
         if not _matches_run(gateway.get_pull_ref(run.pr_number), run):
             return _analysis_artifact(run, {"kind": "none", "status": "stale"})
         snapshot = gateway.get_pull_snapshot(run.pr_number, run=run)
-        if state.is_cancel_requested(run.pr_number, run.run_id) or not _matches_run(gateway.get_pull_ref(run.pr_number), run):
+        if state.is_cancel_requested(run.pr_number, run.run_id):
             return _analysis_artifact(run, {"kind": "none", "status": "canceled"})
+        if not _matches_run(gateway.get_pull_ref(run.pr_number), run):
+            return _analysis_artifact(run, {"kind": "none", "status": "stale"})
         if run.command.name in {CommandName.HELP, CommandName.STATUS, CommandName.SUMMARY}:
             result = _deterministic(run, record)
             return _analysis_artifact(run, {"kind": "advisory", "status": "completed", "advisory": _advisory_payload(result)})
-        provider = ResponsesInferenceProvider.from_env()
+        provider = ResponsesInferenceProvider.from_env(self.environment)
         capabilities = provider.capabilities()
         plan = build_context_plan(snapshot, run_id=run.run_id, repository_id=run.repository_id,
                                   repository_limit=capabilities.context_window,
@@ -245,7 +259,8 @@ class ProductionPhaseController:
             return None, "event_unavailable"
         if not isinstance(raw, dict):
             return None, "invalid_event"
-        normalized = normalize_event(event_name, raw, repository_id=repository_id, repository=repository,
+        normalized_name = "pull_request" if event_name == "pull_request_target" else event_name
+        normalized = normalize_event(normalized_name, raw, repository_id=repository_id, repository=repository,
                                      workflow_run_id=run_id)
         return (normalized, "not_a_pull_request") if normalized is None else (normalized, "")
 

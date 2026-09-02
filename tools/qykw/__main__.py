@@ -134,6 +134,9 @@ def _validate_artifact(payload: object, *, expected_phase: str | None = None) ->
         _validate_skipped_payload(payload["payload"])
         return
     _validate_run(run)
+    if isinstance(payload.get("payload"), dict) and payload["payload"].get("status") == "skipped":
+        _validate_skipped_payload(payload["payload"])
+        return
     _validate_payload(phase, payload.get("payload"))
 
 

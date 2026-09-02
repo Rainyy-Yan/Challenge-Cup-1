@@ -327,6 +327,104 @@ class TestQykwRunner(unittest.TestCase):
         self.assertEqual(len(state.records), 1)
         self.assertEqual(gateway.reaction_calls, [77])
 
+    def test_root_authorize_normalizes_pull_request_target_as_pull_request(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController
+
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(json.dumps({"action": "opened", "number": 53,
+                                              "repository": {"id": 8, "full_name": "owner/repo"},
+                                              "pull_request": {"number": 53, "draft": False, "head": {"sha": HEAD}},
+                                              "sender": {"login": "alice"}}), encoding="utf-8")
+            controller = ProductionPhaseController("authorize", {"GITHUB_EVENT_PATH": str(event_path), "GITHUB_REPOSITORY_ID": "8",
+                                                                    "GITHUB_REPOSITORY": "owner/repo", "GITHUB_EVENT_NAME": "pull_request_target", "GITHUB_RUN_ID": "44"})
+            gateway, state = FakeGateway(), FakeState()
+            controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+            result = controller.root()
+        self.assertEqual(result["payload"], {"authorization": "accepted"})
+        self.assertEqual(result["run"]["event_name"], "pull_request")
+
+    def test_cli_accepts_a_run_bound_explicit_skip_outcome(self) -> None:
+        from tools.qykw.__main__ import main
+
+        class Controller:
+            def authorize(self, artifact: dict[str, object]) -> dict[str, object]:
+                return artifact_for("authorize", artifact["run"], {"status": "skipped", "reason": "duplicate"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "request.json"
+            output = Path(directory) / "output.json"
+            request.write_text(json.dumps(artifact_for("request", complete_run(), {"command": "审查"})), encoding="utf-8")
+            result = main(["--phase", "authorize", "--artifact", str(request), "--output", str(output)], controller=Controller())
+            payload = json.loads(output.read_text(encoding="utf-8")) if output.exists() else None
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["payload"], {"status": "skipped", "reason": "duplicate"})
+
+    def test_analyze_post_snapshot_head_drift_is_stale_not_canceled(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        binding = complete_run()
+        binding["command"] = {"name": "帮助", "argument": "", "mode": "read_only"}
+        artifact = artifact_for("authorize", binding, {"authorization": "accepted"})
+        run = _run_from_artifact(artifact)
+        self.assertIsNotNone(run)
+        gateway, state = FakeGateway(heads=(HEAD, "c" * 40)), FakeState()
+        state.records[run.run_id] = RunRecord(run, RunStage.ACCEPTED, RunStatus.ACTIVE, "qykw-v1", None,
+                                               False, None, (), None, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z")
+        controller = ProductionPhaseController("analyze", {})
+        controller._read_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+        result = controller.analyze(artifact)
+        self.assertEqual(result["payload"], {"kind": "none", "status": "stale"})
+        self.assertEqual(state.canceled, set())
+
+    def test_phase_controllers_filter_environment_to_their_credential_boundary(self) -> None:
+        from tools.qykw.phases import ProductionPhaseController
+
+        environment = {"GITHUB_EVENT_PATH": "event.json", "GITHUB_REPOSITORY": "owner/repo", "GITHUB_TOKEN": "read-token",
+                       "QYKW_REVIEW_TOKEN": "review-token", "QYKW_INFERENCE_API_KEY": "inference-key",
+                       "QYKW_INFERENCE_BASE_URL": "https://provider.test", "UNRELATED_SECRET": "must-not-survive"}
+        analyze = ProductionPhaseController("analyze", environment)
+        publish = ProductionPhaseController("publish", environment)
+        self.assertIn("GITHUB_TOKEN", analyze.environment)
+        self.assertIn("QYKW_INFERENCE_API_KEY", analyze.environment)
+        self.assertNotIn("QYKW_REVIEW_TOKEN", analyze.environment)
+        self.assertNotIn("UNRELATED_SECRET", analyze.environment)
+        self.assertIn("QYKW_REVIEW_TOKEN", publish.environment)
+        self.assertNotIn("GITHUB_TOKEN", publish.environment)
+        self.assertNotIn("QYKW_INFERENCE_API_KEY", publish.environment)
+        self.assertNotIn("UNRELATED_SECRET", publish.environment)
+
+    def test_analyze_provider_receives_only_the_filtered_phase_environment(self) -> None:
+        from tools.qykw.domain import InferenceResponse, InferenceUsage, ProviderCapabilities
+        from tools.qykw.phases import ProductionPhaseController, _run_from_artifact
+
+        class Provider:
+            def capabilities(self) -> ProviderCapabilities:
+                return ProviderCapabilities(20_000, 2_000, True, frozenset({"maximum"}))
+
+            def complete(self, request: object) -> InferenceResponse:
+                del request
+                return InferenceResponse(None, {"advisory": {"title": "safe", "body": "safe", "evidence": [], "limitations": []}}, InferenceUsage(None, None))
+
+        binding = complete_run()
+        binding["command"] = {"name": "分析", "argument": "", "mode": "read_only"}
+        artifact = artifact_for("authorize", binding, {"authorization": "accepted"})
+        run = _run_from_artifact(artifact)
+        self.assertIsNotNone(run)
+        state, gateway = FakeState(), FakeGateway()
+        state.records[run.run_id] = RunRecord(run, RunStage.ACCEPTED, RunStatus.ACTIVE, "qykw-v1", None,
+                                               False, None, (), None, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z")
+        controller = ProductionPhaseController("analyze", {"GITHUB_TOKEN": "read", "QYKW_REVIEW_TOKEN": "review",
+                                                              "QYKW_INFERENCE_API_KEY": "inference", "UNRELATED_SECRET": "hidden"})
+        controller._read_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
+        with patch("tools.qykw.phases.ResponsesInferenceProvider.from_env", return_value=Provider()) as factory:
+            result = controller.analyze(artifact)
+        self.assertEqual(result["payload"]["kind"], "advisory")
+        factory.assert_called_once_with(controller.environment)
+        supplied = factory.call_args.args[0]
+        self.assertNotIn("QYKW_REVIEW_TOKEN", supplied)
+        self.assertNotIn("UNRELATED_SECRET", supplied)
+
     def test_cli_phase_chain_preserves_the_complete_immutable_run_binding(self) -> None:
         from tools.qykw.__main__ import main
 

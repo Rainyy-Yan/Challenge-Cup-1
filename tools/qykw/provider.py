@@ -89,8 +89,9 @@ class ResponsesInferenceProvider:
     def __init__(self, *, api_key: str, base_url: str, model: str, allowed_hosts: Sequence[str], context_window: int, max_output_tokens: int, timeout_seconds: int, transport: InferenceTransport|None=None, dns_resolver: Callable[[str,int,float],Sequence[str]]|None=None, clock: Callable[[],float]=time.monotonic, sleep: Callable[[float],None]=time.sleep, logger: Callable[[Mapping[str,object]],None]|None=None, resolver_slots: threading.BoundedSemaphore|None=None) -> None:
         self._api_key=api_key; self._base_url=base_url; self._model=model; self._allowed_hosts=tuple(_canonical_host(host) for host in allowed_hosts); self._context_window=context_window; self._max_output_tokens=max_output_tokens; self._timeout_seconds=timeout_seconds; self._transport=transport or StdlibHTTPSInferenceTransport(); self._dns_resolver=dns_resolver or _stdlib_dns_resolver; self._clock=clock; self._sleep=sleep; self._logger=logger; self._resolver_slots=resolver_slots or _RESOLVER_SLOTS
     @classmethod
-    def from_env(cls) -> "ResponsesInferenceProvider":
-        values={name:os.environ.get(name) for name in _REQUIRED_ENVIRONMENT}
+    def from_env(cls, environment: Mapping[str, str] | None = None) -> "ResponsesInferenceProvider":
+        source = os.environ if environment is None else environment
+        values={name:source.get(name) for name in _REQUIRED_ENVIRONMENT}
         if any(not value for value in values.values()): raise ProviderError(ProviderErrorCode.INVALID_CONFIG)
         try:
             context=_bounded_int(values["QYKW_INFERENCE_CONTEXT_WINDOW"],1,2_000_000); output=_bounded_int(values["QYKW_INFERENCE_MAX_OUTPUT_TOKENS"],1,context); timeout=_bounded_int(values["QYKW_INFERENCE_TIMEOUT_SECONDS"],1,3600); hosts=tuple(p.strip() for p in values["QYKW_INFERENCE_ALLOWED_HOSTS"].split(","))
