@@ -2,6 +2,10 @@
 
 榜题 XH-202630 的可运行骨架。示范领域是**工业机器人现场操作与调试**。
 
+G0–G4 的现有证据、计划路径和责任状态统一登记在
+[`delivery/evidence/INDEX.md`](delivery/evidence/INDEX.md)，命名与更新规则见同目录
+[`README.md`](delivery/evidence/README.md)。
+
 这不是成品，是一个跑得通的底座加一套约束。往上长的时候，守住下面写的几条
 设计原则，比多加两个 Agent 有用得多。
 
