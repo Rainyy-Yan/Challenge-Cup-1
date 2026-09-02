@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -26,6 +27,64 @@ ADAPTATION_THRESHOLD = TARGET_ADAPT
 COVERAGE_THRESHOLD = TARGET_COVERAGE
 KAPPA_THRESHOLD = FORMAL_KAPPA_MIN
 
+TOP_LEVEL_FIELDS = {
+    "version",
+    "status",
+    "frozen_at",
+    "seed",
+    "blind_to_system_output",
+    "independent_ratings",
+    "dataset",
+    "provenance",
+    "reviewers",
+    "review_protocol",
+    "claims",
+    "adaptations",
+    "coverage_universe",
+    "artifact_manifest",
+}
+ARTIFACT_KINDS = {
+    "profile_snapshot",
+    "case_input",
+    "claim_output",
+    "resource_output",
+    "coverage_evidence",
+}
+
+
+def _unknown_fields(value: dict, allowed: set[str], label: str, errors: list[str]) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        errors.append(f"{label} has unknown fields: {', '.join(unknown)}")
+
+
+def _missing_fields(value: dict, required: set[str], label: str, errors: list[str]) -> None:
+    missing = sorted(required - set(value))
+    if missing:
+        errors.append(f"{label} is missing fields: {', '.join(missing)}")
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _finite_fsum(values: list[float]) -> float | None:
+    try:
+        result = math.fsum(values)
+    except (OverflowError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
 
 def _quality_gates(
     *,
@@ -33,6 +92,10 @@ def _quality_gates(
     profiles: int | None,
     claims_assessable_share: float | None,
     adaptations_assessable_share: float | None,
+    claims_common_pair_cases: int | None,
+    claims_common_pair_share: float | None,
+    adaptations_common_pair_cases: int | None,
+    adaptations_common_pair_share: float | None,
     hallucination_kappa: float | None,
     adaptation_kappa: float | None,
 ) -> dict:
@@ -42,6 +105,10 @@ def _quality_gates(
         "profiles": (profiles, 3),
         "claims_assessable_share": (claims_assessable_share, 0.95),
         "adaptations_assessable_share": (adaptations_assessable_share, 0.95),
+        "claims_common_pair_cases": (claims_common_pair_cases, 50),
+        "claims_common_pair_share": (claims_common_pair_share, 0.95),
+        "adaptations_common_pair_cases": (adaptations_common_pair_cases, 50),
+        "adaptations_common_pair_share": (adaptations_common_pair_share, 0.95),
         "hallucination_kappa": (hallucination_kappa, KAPPA_THRESHOLD),
         "adaptation_kappa": (adaptation_kappa, KAPPA_THRESHOLD),
     }
@@ -150,6 +217,167 @@ def _normalise_identity(identity: object) -> str | None:
     return normalised or None
 
 
+def _validate_artifact_manifest(data: dict, errors: list[str]) -> dict[str, dict]:
+    manifest = data.get("artifact_manifest")
+    if not isinstance(manifest, dict):
+        errors.append("artifact_manifest must be an object")
+        return {}
+    manifest_fields = {"version", "artifacts", "citations"}
+    _unknown_fields(manifest, manifest_fields, "artifact_manifest", errors)
+    _missing_fields(manifest, manifest_fields, "artifact_manifest", errors)
+    if manifest.get("version") != 1:
+        errors.append("artifact_manifest.version must be 1")
+
+    raw_citations = manifest.get("citations")
+    valid_citations: set[str] = set()
+    seen_citations: set[str] = set()
+    if not isinstance(raw_citations, list):
+        errors.append("artifact_manifest.citations must be a list")
+    else:
+        citation_fields = {
+            "id",
+            "source_id",
+            "locator",
+            "excerpt",
+            "sha256",
+            "review_status",
+        }
+        for index, citation in enumerate(raw_citations):
+            label = f"citation {index}"
+            if not isinstance(citation, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            raw_id = citation.get("id")
+            citation_id = _normalise_identity(raw_id)
+            display_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else str(index)
+            label = f"citation {display_id}"
+            before = len(errors)
+            _unknown_fields(citation, citation_fields, label, errors)
+            _missing_fields(citation, citation_fields, label, errors)
+            if citation_id is None or raw_id != raw_id.strip():
+                errors.append(f"citation {index} needs a non-empty trimmed id")
+            elif citation_id in seen_citations:
+                errors.append(f"duplicate citation id: {display_id}")
+            else:
+                seen_citations.add(citation_id)
+            for field in ("source_id", "locator", "excerpt"):
+                value = citation.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"{label} {field} must be a non-empty string")
+            excerpt = citation.get("excerpt")
+            digest = citation.get("sha256")
+            if not isinstance(excerpt, str) or not isinstance(digest, str) or digest != _text_sha256(excerpt):
+                errors.append(f"{label} sha256 does not match excerpt")
+            if citation.get("review_status") != "approved":
+                errors.append(f"{label} review_status must be approved")
+            if citation_id is not None and len(errors) == before:
+                valid_citations.add(citation_id)
+
+    raw_artifacts = manifest.get("artifacts")
+    artifacts: dict[str, dict] = {}
+    seen_artifacts: set[str] = set()
+    if not isinstance(raw_artifacts, list):
+        errors.append("artifact_manifest.artifacts must be a list")
+    else:
+        artifact_fields = {
+            "id",
+            "kind",
+            "content",
+            "sha256",
+            "citation_ids",
+            "review_status",
+        }
+        for index, artifact in enumerate(raw_artifacts):
+            label = f"artifact {index}"
+            if not isinstance(artifact, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            raw_id = artifact.get("id")
+            artifact_id = _normalise_identity(raw_id)
+            display_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else str(index)
+            label = f"artifact {display_id}"
+            before = len(errors)
+            _unknown_fields(artifact, artifact_fields, label, errors)
+            _missing_fields(artifact, artifact_fields, label, errors)
+            if artifact_id is None or raw_id != raw_id.strip():
+                errors.append(f"artifact {index} needs a non-empty trimmed id")
+            elif artifact_id in seen_artifacts:
+                errors.append(f"duplicate artifact id: {display_id}")
+            else:
+                seen_artifacts.add(artifact_id)
+            kind = artifact.get("kind")
+            if kind not in ARTIFACT_KINDS:
+                errors.append(f"{label} has an invalid kind")
+            content = artifact.get("content")
+            digest = artifact.get("sha256")
+            if not isinstance(content, str) or not content.strip():
+                errors.append(f"{label} content must be non-empty")
+            elif not isinstance(digest, str) or digest != _text_sha256(content):
+                errors.append(f"{label} sha256 does not match content")
+            citation_ids = artifact.get("citation_ids")
+            valid_artifact_citations: set[str] = set()
+            if not isinstance(citation_ids, list):
+                errors.append(f"{label} citation_ids must be a list")
+            else:
+                seen_ids: set[str] = set()
+                for raw_citation_id in citation_ids:
+                    citation_id = _normalise_identity(raw_citation_id)
+                    if citation_id is None or raw_citation_id != raw_citation_id.strip():
+                        errors.append(f"{label} has an invalid citation_id")
+                    elif citation_id in seen_ids:
+                        errors.append(f"{label} has a duplicate citation_id")
+                    elif citation_id not in valid_citations:
+                        errors.append(f"{label} references unknown citation_id: {raw_citation_id}")
+                    else:
+                        seen_ids.add(citation_id)
+                        valid_artifact_citations.add(citation_id)
+            expected_status = "approved" if kind == "coverage_evidence" else "frozen"
+            if artifact.get("review_status") != expected_status:
+                errors.append(f"{label} review_status must be {expected_status}")
+            if kind in {"claim_output", "resource_output", "coverage_evidence"} and not valid_artifact_citations:
+                errors.append(f"{label} must cite at least one approved citation")
+            if artifact_id is not None and len(errors) == before:
+                artifacts[artifact_id] = artifact
+
+    provenance = data.get("provenance")
+    supplied_hash = (
+        provenance.get("artifact_manifest_sha256")
+        if isinstance(provenance, dict)
+        else None
+    )
+    try:
+        expected_hash = _text_sha256(_canonical_json(manifest))
+    except (TypeError, ValueError):
+        expected_hash = None
+    if (
+        not isinstance(supplied_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", supplied_hash) is None
+        or supplied_hash != expected_hash
+    ):
+        errors.append(
+            "provenance.artifact_manifest_sha256 must match the canonical artifact_manifest"
+        )
+    return artifacts
+
+
+def _resolve_artifact(
+    artifact_id: object,
+    expected_kind: str,
+    artifacts: dict[str, dict],
+    label: str,
+    errors: list[str],
+) -> None:
+    canonical = _normalise_identity(artifact_id)
+    if canonical is None or not isinstance(artifact_id, str) or artifact_id != artifact_id.strip():
+        errors.append(f"{label} needs a non-empty trimmed artifact_id")
+        return
+    artifact = artifacts.get(canonical)
+    if artifact is None:
+        errors.append(f"{label} references an unknown or invalid artifact_id")
+    elif artifact.get("kind") != expected_kind:
+        errors.append(f"{label} artifact_id must resolve to {expected_kind}")
+
+
 def _human_reviewer_roster(data: dict, errors: list[str]) -> set[str] | None:
     """Validate identity attestations without claiming to prove real-world identity.
 
@@ -172,6 +400,18 @@ def _human_reviewer_roster(data: dict, errors: list[str]) -> set[str] | None:
         if not isinstance(entry, dict):
             errors.append(f"human_reviewer_roster entry {index} must be an object")
             continue
+        _unknown_fields(
+            entry,
+            {"id", "attested_human"},
+            f"human_reviewer_roster entry {index}",
+            errors,
+        )
+        _missing_fields(
+            entry,
+            {"id", "attested_human"},
+            f"human_reviewer_roster entry {index}",
+            errors,
+        )
         raw_identity = entry.get("id")
         identity = _normalise_identity(raw_identity)
         display_id = (
@@ -280,6 +520,26 @@ def _kappa_from_records(records: list[dict], reviewers: list[str], allowed: set[
     return _cohen_kappa(left, right)
 
 
+def _common_pair_stats(
+    records: list[dict], reviewers: list[str], allowed: set[str]
+) -> dict:
+    paired_records = []
+    for record in records:
+        values = _reviewer_values(record.get("labels"), reviewers, allowed)
+        if values is not None and "unassessable" not in values:
+            paired_records.append(record)
+    case_ids = {
+        _canonical_case_id(record.get("case_id"))
+        for record in paired_records
+        if _canonical_case_id(record.get("case_id")) is not None
+    }
+    return {
+        "records": len(paired_records),
+        "cases": len(case_ids),
+        "share": len(paired_records) / len(records) if records else 0.0,
+    }
+
+
 def _valid_timestamp(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
@@ -302,6 +562,7 @@ def _validate_records(
     reviewers: list[str] | None,
     human_roster: set[str] | None,
     case_profiles: dict[str, str],
+    artifacts: dict[str, dict],
     errors: list[str],
 ) -> list[dict]:
     records = data.get(key)
@@ -320,18 +581,35 @@ def _validate_records(
         "model_label",
     }
     singular = key[:-1]
+    expected_artifact_kind = "claim_output" if key == "claims" else "resource_output"
+    allowed_fields = {"id", "case_id", "artifact_id", "labels", "final_label", "adjudicated_by"}
+    required_fields = allowed_fields - {"adjudicated_by"}
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             errors.append(f"{singular} {index} must be an object")
             continue
         display_id = _record_error_prefix(singular, record, index)
+        prohibited_fields = prohibited.intersection(record)
+        if prohibited_fields:
+            errors.append(f"{singular} {display_id} exposes a prohibited system conclusion")
+        other_unknown = set(record) - allowed_fields - prohibited
+        if other_unknown:
+            errors.append(
+                f"{singular} {display_id} has unknown fields: {', '.join(sorted(other_unknown))}"
+            )
+        _missing_fields(record, required_fields, f"{singular} {display_id}", errors)
         record_id = record.get("id")
-        if not isinstance(record_id, str) or not record_id:
-            errors.append(f"{singular} {index} needs a non-empty id")
-        elif record_id in record_ids:
+        canonical_record_id = _normalise_identity(record_id)
+        if (
+            canonical_record_id is None
+            or not isinstance(record_id, str)
+            or record_id != record_id.strip()
+        ):
+            errors.append(f"{singular} {index} needs a non-empty trimmed id")
+        elif canonical_record_id in record_ids:
             errors.append(f"duplicate {singular} id: {record_id}")
         else:
-            record_ids.add(record_id)
+            record_ids.add(canonical_record_id)
 
         case_id = record.get("case_id")
         canonical_case_id = _canonical_case_id(case_id)
@@ -341,8 +619,13 @@ def _validate_records(
             errors.append(f"{singular} {display_id} case_id must equal its stripped form")
         elif canonical_case_id not in case_profiles:
             errors.append(f"{singular} {display_id} references an unknown case_id")
-        if prohibited.intersection(record):
-            errors.append(f"{singular} {display_id} exposes a prohibited system conclusion")
+        _resolve_artifact(
+            record.get("artifact_id"),
+            expected_artifact_kind,
+            artifacts,
+            f"{singular} {display_id}",
+            errors,
+        )
         accepted.append(record)
 
         if reviewers is None:
@@ -388,6 +671,7 @@ def validate_truth(data: dict) -> list[str]:
         return ["truth must be an object"]
 
     errors: list[str] = []
+    _unknown_fields(data, TOP_LEVEL_FIELDS, "truth", errors)
     if data.get("version") != 1:
         errors.append("truth version must be 1")
     if data.get("status") != "frozen":
@@ -403,10 +687,27 @@ def validate_truth(data: dict) -> list[str]:
         errors.append("independent_ratings must be true")
 
     provenance = data.get("provenance")
+    if isinstance(provenance, dict):
+        _unknown_fields(
+            provenance,
+            {"repository_sha", "artifact_manifest_sha256"},
+            "provenance",
+            errors,
+        )
     sha = provenance.get("repository_sha") if isinstance(provenance, dict) else None
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         errors.append("provenance.repository_sha must be a 40-character lowercase hexadecimal SHA")
 
+    artifacts = _validate_artifact_manifest(data, errors)
+
+    review_protocol = data.get("review_protocol")
+    if isinstance(review_protocol, dict):
+        _unknown_fields(
+            review_protocol,
+            {"human_reviewer_roster"},
+            "review_protocol",
+            errors,
+        )
     human_roster = _human_reviewer_roster(data, errors)
     raw_reviewers = data.get("reviewers")
     reviewers = (
@@ -433,6 +734,14 @@ def validate_truth(data: dict) -> list[str]:
                     )
 
     dataset = data.get("dataset")
+    if isinstance(dataset, dict):
+        dataset_fields = {
+            "dataset_id",
+            "profile_ids",
+            "profile_artifact_ids",
+            "cases",
+        }
+        _unknown_fields(dataset, dataset_fields, "dataset", errors)
     dataset_id = dataset.get("dataset_id") if isinstance(dataset, dict) else None
     if (
         not isinstance(dataset_id, str)
@@ -452,11 +761,46 @@ def validate_truth(data: dict) -> list[str]:
         errors.append("dataset.profile_ids must contain at least 3 distinct non-empty values")
     profile_universe_valid = len(valid_profile_ids) >= 3
 
+    profile_artifact_ids = dataset.get("profile_artifact_ids")
+    if not isinstance(profile_artifact_ids, dict):
+        errors.append("dataset.profile_artifact_ids must be an object")
+    else:
+        normalised_mapping: dict[str, object] = {}
+        mapping_valid = True
+        for raw_profile_id, artifact_id in profile_artifact_ids.items():
+            canonical_profile_id = _normalise_identity(raw_profile_id)
+            if (
+                canonical_profile_id is None
+                or not isinstance(raw_profile_id, str)
+                or raw_profile_id != raw_profile_id.strip()
+                or canonical_profile_id in normalised_mapping
+            ):
+                errors.append("dataset.profile_artifact_ids has an invalid or duplicate profile key")
+                mapping_valid = False
+                continue
+            normalised_mapping[canonical_profile_id] = artifact_id
+        if set(normalised_mapping) != valid_profile_ids:
+            errors.append(
+                "dataset.profile_artifact_ids keys must exactly match dataset.profile_ids"
+            )
+            mapping_valid = False
+        if mapping_valid:
+            for profile_id, artifact_id in normalised_mapping.items():
+                _resolve_artifact(
+                    artifact_id,
+                    "profile_snapshot",
+                    artifacts,
+                    f"profile {profile_id}",
+                    errors,
+                )
+
     case_profiles: dict[str, str] = {}
     for index, case in enumerate(cases):
         if not isinstance(case, dict):
             errors.append(f"case {index} must be an object")
             continue
+        _unknown_fields(case, {"id", "profile_id", "artifact_id"}, f"case {index}", errors)
+        _missing_fields(case, {"id", "profile_id", "artifact_id"}, f"case {index}", errors)
         case_id = case.get("id")
         canonical_case_id = _canonical_case_id(case_id)
         display_id = case_id.strip() if canonical_case_id is not None else str(index)
@@ -476,8 +820,16 @@ def validate_truth(data: dict) -> list[str]:
             continue
         if profile_universe_valid and canonical_profile_id not in valid_profile_ids:
             errors.append(f"case {display_id} references an undeclared profile_id")
+        _resolve_artifact(
+            case.get("artifact_id"),
+            "case_input",
+            artifacts,
+            f"case {display_id}",
+            errors,
+        )
         case_profiles[canonical_case_id] = canonical_profile_id
 
+    claims_errors_before = len(errors)
     claims = _validate_records(
         data,
         "claims",
@@ -485,8 +837,11 @@ def validate_truth(data: dict) -> list[str]:
         reviewer_ids,
         human_roster,
         case_profiles,
+        artifacts,
         errors,
     )
+    claims_records_valid = len(errors) == claims_errors_before
+    adaptations_errors_before = len(errors)
     adaptations = _validate_records(
         data,
         "adaptations",
@@ -494,9 +849,14 @@ def validate_truth(data: dict) -> list[str]:
         reviewer_ids,
         human_roster,
         case_profiles,
+        artifacts,
         errors,
     )
-    for key, records in (("claims", claims), ("adaptations", adaptations)):
+    adaptations_records_valid = len(errors) == adaptations_errors_before
+    for key, records, records_valid in (
+        ("claims", claims, claims_records_valid),
+        ("adaptations", adaptations, adaptations_records_valid),
+    ):
         distinct_case_ids = {
             _canonical_case_id(record.get("case_id"))
             for record in records
@@ -519,17 +879,46 @@ def validate_truth(data: dict) -> list[str]:
         )
         if assessable_share < 0.95:
             errors.append(f"{key} assessable share is below 0.95")
+        if (
+            reviewer_ids is not None
+            and records_valid
+            and assessable_share >= 0.95
+            and len(case_profiles) >= 50
+            and len(distinct_case_ids) >= 50
+        ):
+            allowed = HALLUCINATION_LABELS if key == "claims" else ADAPTATION_LABELS
+            common_pair = _common_pair_stats(records, reviewer_ids, allowed)
+            if common_pair["cases"] < 50:
+                errors.append(
+                    f"{key} common reviewer pairs must cover at least 50 distinct case_ids"
+                )
+            if common_pair["share"] < 0.95:
+                errors.append(f"{key} common reviewer pair share is below 0.95")
 
     coverage = data.get("coverage_universe")
     if not isinstance(coverage, list):
         errors.append("coverage_universe must be a list")
     else:
-        valid_weight_total = 0.0
+        valid_weights: list[float] = []
+        covered_weights: list[float] = []
+        all_weights_valid = True
         coverage_ids: set[str] = set()
         for index, point in enumerate(coverage):
             if not isinstance(point, dict):
                 errors.append(f"coverage point {index} must be an object")
                 continue
+            _unknown_fields(
+                point,
+                {"kp_id", "weight", "covered", "evidence_ids"},
+                f"coverage point {index}",
+                errors,
+            )
+            _missing_fields(
+                point,
+                {"kp_id", "weight", "covered", "evidence_ids"},
+                f"coverage point {index}",
+                errors,
+            )
             point_id = point.get("kp_id")
             has_point_id = isinstance(point_id, str) and bool(point_id.strip())
             display_id = point_id if has_point_id else str(index)
@@ -547,24 +936,49 @@ def validate_truth(data: dict) -> list[str]:
                 or weight <= 0
             ):
                 errors.append(f"coverage point {display_id} has an invalid weight")
+                all_weights_valid = False
             else:
-                valid_weight_total += weight
+                valid_weights.append(float(weight))
             covered = point.get("covered")
             if type(covered) is not bool:
                 errors.append(f"coverage point {display_id} covered must be a boolean")
             if covered is True:
+                if isinstance(weight, (int, float)) and not isinstance(weight, bool) and math.isfinite(weight) and weight > 0:
+                    covered_weights.append(float(weight))
                 evidence_ids = point.get("evidence_ids")
                 if not (
                     isinstance(evidence_ids, list)
                     and evidence_ids
                     and all(
-                        isinstance(evidence_id, str) and evidence_id.strip()
+                        isinstance(evidence_id, str)
+                        and bool(evidence_id.strip())
+                        and evidence_id == evidence_id.strip()
                         for evidence_id in evidence_ids
                     )
                 ):
                     errors.append(f"covered coverage point {display_id} needs evidence")
-        if valid_weight_total <= 0:
-            errors.append("coverage universe needs positive total weight")
+                else:
+                    for evidence_id in evidence_ids:
+                        artifact = artifacts.get(evidence_id.strip().casefold())
+                        if artifact is None:
+                            errors.append(
+                                f"covered coverage point {display_id} references unknown evidence_id: {evidence_id}"
+                            )
+                        elif artifact.get("kind") != "coverage_evidence":
+                            errors.append(
+                                f"covered coverage point {display_id} evidence_id must resolve to coverage_evidence"
+                            )
+        if all_weights_valid:
+            total_weight = _finite_fsum(valid_weights)
+            covered_weight = _finite_fsum(covered_weights)
+            if total_weight is None or total_weight <= 0:
+                errors.append("coverage total weight must be positive and finite")
+            elif covered_weight is None:
+                errors.append("coverage covered weight must be finite")
+            else:
+                coverage_ratio = covered_weight / total_weight
+                if not math.isfinite(coverage_ratio):
+                    errors.append("coverage ratio must be finite")
 
     if reviewer_ids is not None:
         for records, allowed, metric in (
@@ -608,13 +1022,19 @@ def _provenance(data: object) -> dict:
     if not isinstance(data, dict):
         return {}
     provenance = data.get("provenance")
-    result = dict(provenance) if isinstance(provenance, dict) else {}
+    result = {}
+    if isinstance(provenance, dict):
+        for key in ("repository_sha", "artifact_manifest_sha256"):
+            if isinstance(provenance.get(key), str):
+                result[key] = provenance[key]
     dataset = data.get("dataset")
-    if isinstance(dataset, dict) and "dataset_id" in dataset:
+    if isinstance(dataset, dict) and isinstance(dataset.get("dataset_id"), str):
         result["dataset_id"] = dataset["dataset_id"]
-    for key in ("frozen_at", "seed"):
-        if key in data:
-            result[key] = data[key]
+    if isinstance(data.get("frozen_at"), str):
+        result["frozen_at"] = data["frozen_at"]
+    seed = data.get("seed")
+    if isinstance(seed, int) and not isinstance(seed, bool):
+        result["seed"] = seed
     return result
 
 
@@ -628,6 +1048,8 @@ def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
                 "minimum_cases": 50,
                 "minimum_profiles": 3,
                 "minimum_assessable_share": 0.95,
+                "minimum_common_pair_cases": 50,
+                "minimum_common_pair_share": 0.95,
                 "minimum_kappa": KAPPA_THRESHOLD,
             },
             "gates": _quality_gates(
@@ -635,6 +1057,10 @@ def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
                 profiles=None,
                 claims_assessable_share=None,
                 adaptations_assessable_share=None,
+                claims_common_pair_cases=None,
+                claims_common_pair_share=None,
+                adaptations_common_pair_cases=None,
+                adaptations_common_pair_share=None,
                 hallucination_kappa=None,
                 adaptation_kappa=None,
             ),
@@ -649,11 +1075,17 @@ def _not_assessable_scorecard(data: object, errors: list[str]) -> dict:
             "numerator": None,
             "denominator": None,
             "point_estimate": None,
+            "wilson_interval": None,
+            "bootstrap_interval": None,
             "interval": None,
             "threshold": COVERAGE_THRESHOLD,
             "conservative_decision": False,
         },
         "assessable_share": {"claims": None, "adaptations": None},
+        "common_pair": {
+            "claims": {"records": None, "cases": None, "share": None},
+            "adaptations": {"records": None, "cases": None, "share": None},
+        },
         "limitations": errors + [
             "Human reviewer roster attestations are declarations; external signatures or records establish their real-world authenticity."
         ],
@@ -694,8 +1126,8 @@ def build_scorecard(data: dict) -> dict:
         if record["final_label"] != "unassessable"
     ]
     coverage = data.get("coverage_universe", [])
-    covered_weight = sum(point["weight"] for point in coverage if point["covered"])
-    total_weight = sum(point["weight"] for point in coverage)
+    covered_weight = math.fsum(point["weight"] for point in coverage if point["covered"])
+    total_weight = math.fsum(point["weight"] for point in coverage)
     hallucination = _with_metric_decision(
         _metric(hallucination_records, {"yes"}, seed=data["seed"]),
         HALLUCINATION_THRESHOLD,
@@ -710,6 +1142,8 @@ def build_scorecard(data: dict) -> dict:
         "numerator": covered_weight,
         "denominator": total_weight,
         "point_estimate": covered_weight / total_weight if total_weight else 0.0,
+        "wilson_interval": None,
+        "bootstrap_interval": None,
         "interval": None,
         "threshold": COVERAGE_THRESHOLD,
     }
@@ -725,6 +1159,13 @@ def build_scorecard(data: dict) -> dict:
         adaptations,
         [_normalise_identity(reviewer) for reviewer in data["reviewers"]],
         ADAPTATION_LABELS,
+    )
+    reviewer_ids = [_normalise_identity(reviewer) for reviewer in data["reviewers"]]
+    claims_common_pair = _common_pair_stats(
+        claims, reviewer_ids, HALLUCINATION_LABELS
+    )
+    adaptations_common_pair = _common_pair_stats(
+        adaptations, reviewer_ids, ADAPTATION_LABELS
     )
     for kappa in (hallucination_kappa, adaptation_kappa):
         kappa["threshold"] = KAPPA_THRESHOLD
@@ -746,6 +1187,8 @@ def build_scorecard(data: dict) -> dict:
                 "minimum_cases": 50,
                 "minimum_profiles": 3,
                 "minimum_assessable_share": 0.95,
+                "minimum_common_pair_cases": 50,
+                "minimum_common_pair_share": 0.95,
                 "minimum_kappa": KAPPA_THRESHOLD,
             },
             "gates": _quality_gates(
@@ -765,6 +1208,10 @@ def build_scorecard(data: dict) -> dict:
                     if adaptations
                     else 0.0
                 ),
+                claims_common_pair_cases=claims_common_pair["cases"],
+                claims_common_pair_share=claims_common_pair["share"],
+                adaptations_common_pair_cases=adaptations_common_pair["cases"],
+                adaptations_common_pair_share=adaptations_common_pair["share"],
                 hallucination_kappa=hallucination_kappa["value"],
                 adaptation_kappa=adaptation_kappa["value"],
             ),
@@ -790,6 +1237,10 @@ def build_scorecard(data: dict) -> dict:
                 if adaptations
                 else 0.0
             ),
+        },
+        "common_pair": {
+            "claims": claims_common_pair,
+            "adaptations": adaptations_common_pair,
         },
         "limitations": [
             "Human reviewer roster attestations are declarations; external signatures or records establish their real-world authenticity."
@@ -824,7 +1275,13 @@ def render_scorecard_markdown(scorecard: dict) -> str:
         "## Provenance",
         "",
         "```json",
-        json.dumps(scorecard["provenance"], ensure_ascii=False, sort_keys=True, indent=2),
+        json.dumps(
+            scorecard["provenance"],
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        ),
         "```",
         "",
         "## Data quality gates",
@@ -857,7 +1314,9 @@ def render_scorecard_markdown(scorecard: dict) -> str:
                 f"- Numerator: {_display(metric['numerator'])}",
                 f"- Denominator: {_display(metric['denominator'])}",
                 f"- Point estimate: {_display(metric['point_estimate'])}",
-                f"- 95% interval: {_interval_display(metric['interval'])}",
+                f"- Wilson 95% interval: {_interval_display(metric['wilson_interval'])}",
+                f"- Cluster bootstrap 95% interval: {_interval_display(metric['bootstrap_interval'])}",
+                f"- Conservative interval: {_interval_display(metric['interval'])}",
                 f"- Threshold: {_display(metric['threshold'])}",
                 f"- Conservative decision: {_display(metric['conservative_decision'])}",
                 "",
@@ -870,12 +1329,25 @@ def render_scorecard_markdown(scorecard: dict) -> str:
             [
                 f"### {title}",
                 "",
+                f"- Paired ratings (n): {_display(kappa['n'])}",
+                f"- Raw agreement: {_display(kappa['agreement'])}",
                 f"- Cohen's Kappa: {_display(kappa['value'])}",
                 f"- Threshold: {_display(kappa['threshold'])}",
                 f"- Decision: {_display(kappa['decision'])}",
                 "",
             ]
         )
+    lines.extend(["## Assessability", ""])
+    for title, key in (("Claims", "claims"), ("Adaptations", "adaptations")):
+        pair = scorecard["common_pair"][key]
+        lines.extend(
+            [
+                f"- {title} assessable share: {_display(scorecard['assessable_share'][key])}",
+                f"- {title} common-pair share: {_display(pair['share'])}",
+                f"- {title} common-pair distinct cases: {_display(pair['cases'])}",
+            ]
+        )
+    lines.append("")
     lines.extend(["## Limitations", ""])
     lines.extend(f"- {limitation}" for limitation in scorecard["limitations"])
     return "\n".join(lines) + "\n"
@@ -884,7 +1356,14 @@ def render_scorecard_markdown(scorecard: dict) -> str:
 def _write_scorecard(output: Path, scorecard: dict) -> None:
     output.mkdir(parents=True, exist_ok=True)
     (output / "scorecard.json").write_text(
-        json.dumps(scorecard, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        json.dumps(
+            scorecard,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (output / "scorecard.md").write_text(render_scorecard_markdown(scorecard), encoding="utf-8")
@@ -898,7 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         data = json.loads(args.truth.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
         scorecard = _not_assessable_scorecard({}, [f"truth file could not be read as JSON: {error}"])
     else:
         scorecard = build_scorecard(data)

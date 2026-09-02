@@ -8,10 +8,12 @@
   "dataset": {
     "dataset_id": "<replace-with-frozen-dataset-id>",
     "profile_ids": [],
+    "profile_artifact_ids": {},
     "cases": []
   },
   "provenance": {
-    "repository_sha": "<40-character-lowercase-git-sha>"
+    "repository_sha": "<40-character-lowercase-git-sha>",
+    "artifact_manifest_sha256": "<64-character-lowercase-sha256>"
   },
   "reviewers": [],
   "review_protocol": {
@@ -19,5 +21,10 @@
   },
   "claims": [],
   "adaptations": [],
-  "coverage_universe": []
+  "coverage_universe": [],
+  "artifact_manifest": {
+    "version": 1,
+    "artifacts": [],
+    "citations": []
+  }
 }
