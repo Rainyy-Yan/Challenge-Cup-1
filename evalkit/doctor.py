@@ -30,6 +30,34 @@ from core.retrieval import Retriever
 OK, BAD, WARN = "通过", "失败", "注意"
 
 
+def format_model_status(status: dict) -> list[str]:
+    """Return a secret-free, operator-readable model-router summary."""
+    lines = ["", f"路由策略 {status['strategy']}"]
+    for model in status["models"]:
+        rate = model["success_rate"]
+        rate_text = "暂无样本" if rate is None else f"{rate:.0%}"
+        lines.append(
+            f"  {model['id']} [{model['role']}] "
+            f"{model['health']}，尝试 {model['attempts']}，"
+            f"成功率 {rate_text}，平均 {model['avg_latency_ms']} ms"
+        )
+    lines.append(
+        f"自动降级 {status['router']['fallbacks']} 次，"
+        f"全部模型失败 {status['router']['all_models_failed']} 次"
+    )
+    return lines
+
+
+def _safe_error_detail(exc: LLMError) -> str:
+    """Describe an error without exposing a provider response body."""
+    text = str(exc)
+    for code, label in ((401, "鉴权失败"), (403, "访问被拒绝"),
+                        (404, "端点或模型不可用"), (429, "触发限流")):
+        if f"HTTP {code}" in text:
+            return f"{label}（{code}）"
+    return "调用失败；请检查本地配置、网络和账户状态"
+
+
 def _line(name: str, status: str, detail: str = "") -> None:
     mark = {"通过": "✓", "失败": "✗", "注意": "!"}[status]
     print(f"  {mark} {name:<16}{status}　{detail}")
@@ -40,58 +68,68 @@ def main() -> None:
     if isinstance(llm, MockLLM):
         print("当前是离线桩（未设置 AGENTEDU_API_KEY）。")
         print("系统可以完整运行，但自述解析、命题、综合诊断都走规则版。")
-        print("要接真模型，先设置：")
-        print("  export AGENTEDU_API_KEY=sk-xxx")
-        print("  export AGENTEDU_BASE_URL=<OpenAI 兼容端点>")
-        print("  export AGENTEDU_MODEL=<模型名>")
+        print("要接真模型，请编辑仓库根目录的 .env：")
+        print("  AGENTEDU_API_KEY=<你的 key>")
+        print("  AGENTEDU_BASE_URL=<OpenAI 兼容端点>")
+        print("  AGENTEDU_MODEL=<模型名>")
+        print("修改后重启 server.py，再运行 python3 -m evalkit.doctor。")
         return
 
-    print(f"端点   {llm.base_url}")
-    print(f"模型   默认 {llm.model}"
-          + (f"　分档 {json.dumps({k: v for k, v in llm.models.items() if v}, ensure_ascii=False)}"
-             if any(llm.models.values()) else "　（未分档，全部任务用同一个）"))
+    model_ids = [llm.model, llm.models["strong"]]
+    print(f"模型   默认 {model_ids[0]}　强模型 {model_ids[1]}")
     print()
 
     # 1 连通与鉴权
     t0 = time.perf_counter()
     try:
-        out = llm.run(task="simplify", system="你是一个测试助手。",
-                      user="回复两个字：正常", json_mode=False)
+        llm.run(task="simplify", system="你是一个测试助手。",
+                user="回复两个字：正常", json_mode=False)
         ms = int((time.perf_counter() - t0) * 1000)
-        _line("连通与鉴权", OK, f"往返 {ms} ms，返回 {out.strip()[:20]!r}")
+        _line("连通与鉴权", OK, f"往返 {ms} ms")
     except LLMError as exc:
-        _line("连通与鉴权", BAD, str(exc)[:160])
+        _line("连通与鉴权", BAD, _safe_error_detail(exc))
         print("\n先解决连通问题：检查 key、端点地址、网络出口和账户余额。")
         return
 
-    # 2 模型名（分档模型逐个探）
-    tiers = {k: v for k, v in llm.models.items() if v}
-    if tiers:
-        for tier, name in tiers.items():
-            probe = RealLLM(llm.base_url, llm.api_key, name,
-                            timeout=llm.timeout, retries=1)
-            try:
-                probe.run(task="simplify", system="测试", user="回复：ok")
-                _line(f"模型 {tier}", OK, name)
-            except LLMError as exc:
-                _line(f"模型 {tier}", BAD, f"{name} 不可用：{str(exc)[:100]}")
-    else:
-        _line("模型分档", WARN, "未配置 STRONG/MID/LIGHT，命题会用默认模型，成本偏高")
+    # 2 模型名：每次探针仍保持双模型注册，避免构造非法单模型客户端。
+    for name in model_ids:
+        other = next(item for item in model_ids if item != name)
+        probe = RealLLM(
+            llm.base_url,
+            llm.api_key,
+            name,
+            timeout=llm.timeout,
+            models={"strong": other},
+            retries=1,
+            cache=False,
+        )
+        try:
+            probe.run(task="simplify", system="测试", user="回复：ok")
+            target = next(
+                item for item in probe.model_status()["models"]
+                if item["id"] == name
+            )
+            if target["successes"] == 1:
+                _line(f"模型 {name}", OK, "可调用")
+            else:
+                _line(f"模型 {name}", BAD, "目标调用失败，结果来自自动降级")
+        except LLMError as exc:
+            _line(f"模型 {name}", BAD, _safe_error_detail(exc))
 
     # 3 JSON 模式
     try:
         raw = llm.run(task="verify", system='只输出 JSON：{"ok":true}',
                       user="确认", json_mode=True)
         data = parse_json(raw)
-        if llm._json_mode_ok:
+        if all(llm._json_mode_ok.values()):
             _line("JSON 模式", OK if data else WARN,
                   "原生支持" if data else "原生支持但返回无法解析")
         else:
             _line("JSON 模式", WARN,
-                  "端点不支持 response_format，已自动降级为提示词约束"
+                  "当前模型按配置使用提示词 JSON 约束"
                   + ("，解析正常" if data else "，且解析失败"))
     except LLMError as exc:
-        _line("JSON 模式", BAD, str(exc)[:120])
+        _line("JSON 模式", BAD, _safe_error_detail(exc))
 
     # 4 中文与约束遵循
     try:
@@ -102,17 +140,17 @@ def main() -> None:
         d = parse_json(raw)
         hit = d.get("education") and isinstance(d.get("hands_on_hours"), (int, float))
         _line("中文与约束", OK if hit else WARN,
-              f"抽取结果 {json.dumps(d, ensure_ascii=False)[:80]}"
-              if d else "未返回可解析结构，命题环节大概率也会不稳")
+              "返回可解析结构" if d
+              else "未返回可解析结构，命题环节大概率也会不稳")
     except LLMError as exc:
-        _line("中文与约束", BAD, str(exc)[:120])
+        _line("中文与约束", BAD, _safe_error_detail(exc))
 
     # 5 命题实测：这项才是真正决定能不能用
     R = Retriever.from_jsonl(config.KB_PATH)
     kps = json.loads(config.KP_PATH.read_text(encoding="utf-8"))["points"]
     kpi = {k["id"]: k for k in kps}
     ex = ExaminerAgent(llm, R, kpi)
-    made, sample = 0, None
+    made = 0
     for kp in list(kpi)[:3]:
         try:
             it = ex.make_item(kp, 3)
@@ -120,25 +158,27 @@ def main() -> None:
             it = None
         if it:
             made += 1
-            sample = sample or it
     status = OK if made >= 2 else (WARN if made == 1 else BAD)
     _line("命题实测", status,
           f"3 次请求产出 {made} 道；审核拒收 {len(ex.rejects)} 次，"
           f"模型无产出 {ex.no_output} 次")
-    if ex.rejects:
-        print(f"      拒收样例：{ex.rejects[0]['why'][:70]}")
-    if sample:
-        print(f"      样题：{sample['stem'][:54]}")
 
     # 6 用量与成本
     st = llm.stats()
     print()
     print(f"本次体检共 {st['calls']} 次调用，失败 {st['failures']} 次，"
           f"输入 {st['tokens_in']} / 输出 {st['tokens_out']} token")
+    if st["by_model"]:
+        model_calls = {name: rec["calls"] for name, rec in st["by_model"].items()}
+        print(f"模型调用 {json.dumps(model_calls, ensure_ascii=False)}，"
+              f"自动降级 {st['fallbacks']} 次")
     if llm.price_in or llm.price_out:
         print(f"折合成本 ¥{st['cost_cny']}")
     else:
         print("未配置单价（AGENTEDU_PRICE_IN / _OUT），无法折算成本")
+
+    for line in format_model_status(llm.model_status()):
+        print(line)
 
     print()
     if made >= 2:
