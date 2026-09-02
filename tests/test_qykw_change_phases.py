@@ -17,6 +17,7 @@ HEAD = "a" * 40
 BASE = "b" * 40
 CONTROLLER_SHA = "c" * 40
 IMAGE_DIGEST = "sha256:" + "d" * 64
+IMAGE_REF = "ghcr.io/owner/qykw-verify@" + IMAGE_DIGEST
 JOB_RESULT_ENVIRONMENT = {
     "QYKW_AUTHORIZE_JOB_RESULT": "success",
     "QYKW_PREPARE_JOB_RESULT": "failure",
@@ -85,7 +86,7 @@ class TestChangePhaseRouting(unittest.TestCase):
             workflow_run_id=44,
             controller_sha=CONTROLLER_SHA,
             verification_profile="backend",
-            image_digest=IMAGE_DIGEST if phase in {"verify-change", "publish-change"} else None,
+            image_ref=IMAGE_REF if phase in {"verify-change", "publish-change"} else None,
             runner_temp=None,
             job_results=(
                 TrustedJobResults("success", "failure", "cancelled", "skipped")
@@ -112,7 +113,7 @@ class TestChangePhaseRouting(unittest.TestCase):
             "QYKW_VERIFICATION_PROFILE": "backend",
         }
         if phase in {"verify-change", "publish-change"}:
-            common["QYKW_VERIFICATION_IMAGE_DIGEST"] = IMAGE_DIGEST
+            common["QYKW_VERIFICATION_IMAGE_REF"] = IMAGE_REF
         credentials = {
             "authorize-change": {"QYKW_REVIEW_TOKEN": "review-token"},
             "prepare-change": {"QYKW_INFERENCE_API_KEY": "inference-key", "GITHUB_TOKEN": "read-token"},
@@ -554,6 +555,7 @@ class TestCredentialAndRuntimeIsolation(TestChangePhaseRouting):
         runtime = services.calls[-1][1]
         self.assertEqual(runtime.workflow_run_id, 44)
         self.assertEqual(runtime.verification_profile, "backend")
+        self.assertEqual(runtime.image_ref, IMAGE_REF)
         self.assertEqual(runtime.image_digest, IMAGE_DIGEST)
 
     def test_publish_runtime_exposes_runner_temp_only_as_a_journal_factory_input(self) -> None:
@@ -576,10 +578,11 @@ class TestCredentialAndRuntimeIsolation(TestChangePhaseRouting):
             ("authorize-change", 0, CONTROLLER_SHA, "backend", None, None),
             ("authorize-change", 44, "bad", "backend", None, None),
             ("authorize-change", 44, CONTROLLER_SHA, "unknown", None, None),
-            ("authorize-change", 44, CONTROLLER_SHA, "backend", IMAGE_DIGEST, None),
+            ("authorize-change", 44, CONTROLLER_SHA, "backend", IMAGE_REF, None),
             ("authorize-change", 44, CONTROLLER_SHA, "backend", None, Path("relative")),
             ("verify-change", 44, CONTROLLER_SHA, "backend", None, None),
             ("verify-change", 44, CONTROLLER_SHA, "backend", "sha256:bad", None),
+            ("verify-change", 44, CONTROLLER_SHA, "backend", "image:latest", None),
         )
         for values in mutations:
             with self.subTest(values=values), self.assertRaises(ValueError):

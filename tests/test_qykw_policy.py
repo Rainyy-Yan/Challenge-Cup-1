@@ -63,7 +63,8 @@ class TestAuthorization(unittest.TestCase):
                     Actor("xyh202131", permission),
                     config,
                 )
-                self.assertEqual(decision.reason, "capability_disabled")
+                self.assertTrue(decision.allowed)
+                self.assertEqual(decision.reason, "allowed")
 
     def test_command_name_not_request_mode_controls_change_policy(self) -> None:
         decision = authorize_command(

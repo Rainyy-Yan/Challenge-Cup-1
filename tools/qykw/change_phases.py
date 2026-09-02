@@ -69,7 +69,9 @@ CHANGE_ARTIFACT_KEYS = frozenset(
 )
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
-_IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_IMAGE_REF = re.compile(
+    r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"
+)
 _JOB_RESULT_VALUES = frozenset({"success", "failure", "cancelled", "skipped"})
 _JOB_RESULT_ENVIRONMENT = (
     "QYKW_AUTHORIZE_JOB_RESULT",
@@ -107,9 +109,9 @@ _ALLOWED_ENVIRONMENT = {
     "authorize-change": _COMMON_ENVIRONMENT | {"QYKW_REVIEW_TOKEN"},
     "prepare-change": _COMMON_ENVIRONMENT | _INFERENCE_ENVIRONMENT,
     "verify-change": _COMMON_ENVIRONMENT
-    | {"GITHUB_TOKEN", "QYKW_VERIFICATION_IMAGE_DIGEST"},
+    | {"GITHUB_TOKEN", "QYKW_VERIFICATION_IMAGE_REF"},
     "publish-change": _COMMON_ENVIRONMENT
-    | {"QYKW_PUBLISH_TOKEN", "QYKW_VERIFICATION_IMAGE_DIGEST", "RUNNER_TEMP"},
+    | {"QYKW_PUBLISH_TOKEN", "QYKW_VERIFICATION_IMAGE_REF", "RUNNER_TEMP"},
     "record-change-result": _COMMON_ENVIRONMENT
     | {"QYKW_REVIEW_TOKEN", *_JOB_RESULT_ENVIRONMENT},
 }
@@ -147,7 +149,7 @@ class TrustedPhaseRuntime:
     workflow_run_id: int
     controller_sha: str
     verification_profile: str
-    image_digest: str | None
+    image_ref: str | None
     runner_temp: Path | None
     job_results: TrustedJobResults | None = None
 
@@ -160,9 +162,9 @@ class TrustedPhaseRuntime:
             raise ValueError("invalid_controller_sha")
         get_verification_profile(self.verification_profile)
         needs_image = self.phase in {"verify-change", "publish-change"}
-        if needs_image != (self.image_digest is not None):
+        if needs_image != (self.image_ref is not None):
             raise ValueError("verification_image_digest_unavailable")
-        if self.image_digest is not None and _IMAGE_DIGEST.fullmatch(self.image_digest) is None:
+        if self.image_ref is not None and _IMAGE_REF.fullmatch(self.image_ref) is None:
             raise ValueError("invalid_verification_image_digest")
         if self.runner_temp is not None and (
             self.phase != "publish-change"
@@ -172,6 +174,10 @@ class TrustedPhaseRuntime:
         needs_job_results = self.phase == "record-change-result"
         if needs_job_results != (type(self.job_results) is TrustedJobResults):
             raise ValueError("invalid_job_results")
+
+    @property
+    def image_digest(self) -> str | None:
+        return None if self.image_ref is None else self.image_ref.rsplit("@", 1)[1]
 
 
 class ChangePhaseServices(Protocol):
@@ -528,8 +534,8 @@ def _runtime_from_environment(
         workflow_run_id = int(environment.get("GITHUB_RUN_ID", ""))
     except ValueError:
         raise ValueError("invalid_workflow_run_id") from None
-    image_digest = (
-        environment.get("QYKW_VERIFICATION_IMAGE_DIGEST")
+    image_ref = (
+        environment.get("QYKW_VERIFICATION_IMAGE_REF")
         if phase in {"verify-change", "publish-change"}
         else None
     )
@@ -549,7 +555,7 @@ def _runtime_from_environment(
         workflow_run_id=workflow_run_id,
         controller_sha=environment.get("GITHUB_SHA", ""),
         verification_profile=environment.get("QYKW_VERIFICATION_PROFILE", ""),
-        image_digest=image_digest,
+        image_ref=image_ref,
         runner_temp=runner_temp,
         job_results=job_results,
     )

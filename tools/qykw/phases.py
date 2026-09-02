@@ -195,7 +195,10 @@ class ProductionPhaseController:
         from tools.qykw.domain import EventContext
         if not isinstance(event, EventContext):
             return _skipped("authorize", "invalid_event")
-        if event.command.name is CommandName.STOP:
+        if event.command.name is CommandName.STOP or event.command.name in {
+            CommandName.FIX,
+            CommandName.IMPLEMENT,
+        }:
             return _skipped("authorize", "review_lane_noop")
         try:
             gateway, state, config = self._review_services()

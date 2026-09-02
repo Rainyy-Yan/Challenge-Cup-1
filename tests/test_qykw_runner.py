@@ -544,8 +544,8 @@ class TestQykwRunner(unittest.TestCase):
         controller._review_services = lambda: (gateway, state, config())  # type: ignore[method-assign]
         allowed = controller._authorize_event(replace(event(CommandName.FIX), actor_login="owner"))
         denied = controller._authorize_event(event(CommandName.IMPLEMENT))
-        self.assertEqual(allowed["payload"], {"status": "skipped", "reason": "capability_disabled"})
-        self.assertEqual(denied["payload"], {"status": "skipped", "reason": "change_actor_not_allowed"})
+        self.assertEqual(allowed["payload"], {"status": "skipped", "reason": "review_lane_noop"})
+        self.assertEqual(denied["payload"], {"status": "skipped", "reason": "review_lane_noop"})
         self.assertEqual(gateway.reaction_calls, [])
         self.assertEqual(state.records, {})
 

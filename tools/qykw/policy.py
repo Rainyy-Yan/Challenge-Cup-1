@@ -888,7 +888,7 @@ def authorize_command(
             return AuthorizationDecision(False, "change_actor_not_allowed")
         if actor.permission not in _WRITE_PERMISSIONS:
             return AuthorizationDecision(False, "change_permission_denied")
-        return AuthorizationDecision(False, "capability_disabled")
+        return AuthorizationDecision(True, "allowed")
 
     if command.name is CommandName.STOP:
         if _same_login(actor.login, run_trigger_actor) or _is_configured_writer(

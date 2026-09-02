@@ -81,6 +81,8 @@ class QykwRunner:
             return self._outcome("", RunStatus.FAILED, RunStage.ACCEPTED, "invalid_event")
         if event.command.name is CommandName.STOP:
             return self._handle_stop(event)
+        if event.command.name in {CommandName.FIX, CommandName.IMPLEMENT}:
+            return self._outcome("", RunStatus.FAILED, RunStage.ACCEPTED, "change_lane_noop")
 
         actor = self._actor(event)
         if actor is None:

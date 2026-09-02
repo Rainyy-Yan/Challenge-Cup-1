@@ -376,7 +376,7 @@ class TestQykwIntegration(unittest.TestCase):
                 self.assertEqual(len(system.provider.requests), provider_calls)
                 self.assertEqual(bool(system.gateway.review_comments), inline)
                 if command in {CommandName.FIX, CommandName.IMPLEMENT}:
-                    self.assertEqual(outcome.error_code, "capability_disabled")
+                    self.assertEqual(outcome.error_code, "change_lane_noop")
                     self.assertEqual(system.gateway.write_order, [])
                 elif command is CommandName.STOP:
                     self.assertIsNone(outcome.error_code)
@@ -1679,7 +1679,7 @@ class TestProductionBranchCoverage(unittest.TestCase):
         duplicate = controller._authorize_event(comment_event(CommandName.REVIEW, comment_id=9_502))
         self.assertEqual(duplicate["payload"]["reason"], "duplicate")  # type: ignore[index]
         denied = controller._authorize_event(comment_event(CommandName.FIX, comment_id=9_503, actor="owner"))
-        self.assertEqual(denied["payload"]["reason"], "capability_disabled")  # type: ignore[index]
+        self.assertEqual(denied["payload"]["reason"], "review_lane_noop")  # type: ignore[index]
 
         stale = ReviewSystem(heads=(MOVED_HEAD,))
         stale.gateway.heads = ()

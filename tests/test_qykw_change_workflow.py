@@ -130,7 +130,7 @@ class TestQykwChangeWorkflow(unittest.TestCase):
             found = set(re.findall(r"QYKW_[A-Z0-9_]+", block))
             found -= {
                 "QYKW_CONFIG_PATH", "QYKW_VERIFICATION_PROFILE",
-                "QYKW_VERIFICATION_IMAGE_DIGEST",
+                "QYKW_VERIFICATION_IMAGE_REF",
                 "QYKW_INFERENCE_BASE_URL", "QYKW_INFERENCE_MODEL",
                 "QYKW_INFERENCE_ALLOWED_HOSTS", "QYKW_INFERENCE_CONTEXT_WINDOW",
                 "QYKW_INFERENCE_MAX_OUTPUT_TOKENS", "QYKW_INFERENCE_TIMEOUT_SECONDS",
@@ -141,6 +141,16 @@ class TestQykwChangeWorkflow(unittest.TestCase):
                 self.assertEqual(found, allowed)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", job_source("prepare"))
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", job_source("verify"))
+        for name, step_name in (
+            ("verify", "Verify in the fixed isolated sandbox"),
+            ("publish", "Publish verified change"),
+        ):
+            environment = named_step(jobs(CHANGE)[name], step_name)["env"]
+            self.assertEqual(
+                environment["QYKW_VERIFICATION_IMAGE_REF"],
+                "${{ vars.QYKW_VERIFICATION_IMAGE_REF }}",
+            )
+            self.assertNotIn("QYKW_VERIFICATION_IMAGE_DIGEST", environment)
 
     def test_controller_and_candidate_checkouts_are_credentialless_and_fixed(self) -> None:
         workflow_jobs = jobs(CHANGE)

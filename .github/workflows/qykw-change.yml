@@ -184,7 +184,7 @@ jobs:
         env:
           TRUSTED_CONTROLLER_SHA: ${{ needs.prepare.outputs.controller_sha }}
           GITHUB_TOKEN: ${{ github.token }}
-          QYKW_VERIFICATION_IMAGE_DIGEST: ${{ vars.QYKW_VERIFICATION_IMAGE_DIGEST }}
+          QYKW_VERIFICATION_IMAGE_REF: ${{ vars.QYKW_VERIFICATION_IMAGE_REF }}
         run: |
           GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase verify-change --artifact "$RUNNER_TEMP/qykw/prepare-change.json" --output "$RUNNER_TEMP/qykw/verify-change.json"
       - name: Upload verification artifact
@@ -226,7 +226,7 @@ jobs:
         env:
           TRUSTED_CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
           QYKW_PUBLISH_TOKEN: ${{ secrets.QYKW_PUBLISH_TOKEN }}
-          QYKW_VERIFICATION_IMAGE_DIGEST: ${{ vars.QYKW_VERIFICATION_IMAGE_DIGEST }}
+          QYKW_VERIFICATION_IMAGE_REF: ${{ vars.QYKW_VERIFICATION_IMAGE_REF }}
         run: >-
           GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase publish-change
           --artifact "$RUNNER_TEMP/qykw/verify-change.json"
