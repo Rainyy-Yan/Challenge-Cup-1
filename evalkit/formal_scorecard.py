@@ -208,7 +208,7 @@ def _valid_dataset_profile_ids(profile_ids: object, errors: list[str]) -> set[st
             or profile_id != profile_id.strip()
         ):
             errors.append(
-                f"dataset.profile_ids[{index}] must be a non-empty untrimmed string"
+                f"dataset.profile_ids[{index}] must be a non-empty trimmed string"
             )
             continue
         canonical_profile_id = profile_id.casefold()

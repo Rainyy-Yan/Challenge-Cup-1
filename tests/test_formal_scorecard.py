@@ -571,7 +571,7 @@ class TestTruthValidation(unittest.TestCase):
                 self.assertEqual(
                     validate_truth(truth),
                     [
-                        "dataset.profile_ids[3] must be a non-empty untrimmed string"
+                        "dataset.profile_ids[3] must be a non-empty trimmed string"
                     ],
                 )
                 scorecard = build_scorecard(truth)
