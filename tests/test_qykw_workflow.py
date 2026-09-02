@@ -264,9 +264,22 @@ class TestQykwWorkflow(unittest.TestCase):
             "QYKW_INFERENCE_MAX_OUTPUT_TOKENS", "QYKW_INFERENCE_TIMEOUT_SECONDS",
         }
         self.assertTrue(required_inference.issubset(set(re.findall(r"QYKW_INFERENCE_[A-Z_]+", review["analyze"]))))
-        self.assertIn("secrets.QYKW_INFERENCE_API_KEY", review["analyze"])
+        self.assertIn("secrets.MINIMAX_API_KEY", review["analyze"])
+        self.assertNotIn("secrets.QYKW_INFERENCE_API_KEY", review["analyze"])
         for name in required_inference - {"QYKW_INFERENCE_API_KEY"}:
             self.assertIn("vars." + name, review["analyze"])
+        expected_secret_sources = {
+            "authorize": {"QYKW_TOKEN"},
+            "analyze": {"MINIMAX_API_KEY"},
+            "publish": {"QYKW_TOKEN"},
+            "record_failure": {"QYKW_TOKEN"},
+        }
+        for name, expected in expected_secret_sources.items():
+            with self.subTest(secret_sources=name):
+                self.assertEqual(
+                    set(re.findall(r"secrets\.([A-Z0-9_]+)", review[name])),
+                    expected,
+                )
         self.assertIn("--phase authorize", review["authorize"])
         self.assertIn("--phase analyze", review["analyze"])
         self.assertIn("--phase publish", review["publish"])
@@ -280,7 +293,12 @@ class TestQykwWorkflow(unittest.TestCase):
         self.assertNotIn("needs.authorize.result == 'failure'", review["record_failure"])
         self.assertNotIn("--phase publish", review["record_failure"])
         self.assertNotIn("QYKW_INFERENCE_", CONTROL.read_text(encoding="utf-8"))
-        self.assertIn("QYKW_REVIEW_TOKEN", CONTROL.read_text(encoding="utf-8"))
+        control = job_blocks(CONTROL.read_text(encoding="utf-8"))["control"]
+        self.assertIn("QYKW_REVIEW_TOKEN", control)
+        self.assertEqual(
+            set(re.findall(r"secrets\.([A-Z0-9_]+)", control)),
+            {"QYKW_TOKEN"},
+        )
 
     def test_job_permissions_are_complete_read_only_and_do_not_gain_unneeded_scopes(self) -> None:
         review = workflow_jobs(REVIEW)

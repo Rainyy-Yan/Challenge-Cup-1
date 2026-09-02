@@ -45,7 +45,7 @@ jobs:
       - name: Run qykw intern controller
         working-directory: controller
         env:
-          QYKW_INTERN_TOKEN: ${{ secrets.QYKW_INTERN_TOKEN }}
+          QYKW_INTERN_TOKEN: ${{ secrets.QYKW_TOKEN }}
         run: python -m tools.qykw.intern_claim --phase issue-command
 
   resolve_pr:
@@ -103,6 +103,6 @@ jobs:
       - name: Run qykw intern controller
         working-directory: controller
         env:
-          QYKW_INTERN_TOKEN: ${{ secrets.QYKW_INTERN_TOKEN }}
+          QYKW_INTERN_TOKEN: ${{ secrets.QYKW_TOKEN }}
           QYKW_RESOLVED_ISSUE_NUMBER: ${{ needs.resolve_pr.outputs.issue_number }}
         run: python -m tools.qykw.intern_claim --phase reconcile-pr

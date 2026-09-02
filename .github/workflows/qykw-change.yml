@@ -58,7 +58,7 @@ jobs:
         working-directory: controller
         env:
           TRUSTED_CONTROLLER_SHA: ${{ steps.freeze_controller.outputs.sha }}
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
         run: |
           mkdir -p "$RUNNER_TEMP/qykw"
           GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase authorize-change --output "$RUNNER_TEMP/qykw/authorize-change.json"
@@ -124,7 +124,7 @@ jobs:
         env:
           TRUSTED_CONTROLLER_SHA: ${{ needs.authorize.outputs.controller_sha }}
           GITHUB_TOKEN: ${{ github.token }}
-          QYKW_INFERENCE_API_KEY: ${{ secrets.QYKW_INFERENCE_API_KEY }}
+          QYKW_INFERENCE_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           QYKW_INFERENCE_BASE_URL: ${{ vars.QYKW_INFERENCE_BASE_URL }}
           QYKW_INFERENCE_MODEL: ${{ vars.QYKW_INFERENCE_MODEL }}
           QYKW_INFERENCE_ALLOWED_HOSTS: ${{ vars.QYKW_INFERENCE_ALLOWED_HOSTS }}
@@ -225,7 +225,7 @@ jobs:
         working-directory: controller
         env:
           TRUSTED_CONTROLLER_SHA: ${{ needs.verify.outputs.controller_sha }}
-          QYKW_PUBLISH_TOKEN: ${{ secrets.QYKW_PUBLISH_TOKEN }}
+          QYKW_PUBLISH_TOKEN: ${{ secrets.QYKW_TOKEN }}
           QYKW_VERIFICATION_IMAGE_REF: ${{ vars.QYKW_VERIFICATION_IMAGE_REF }}
         run: >-
           GITHUB_SHA="$TRUSTED_CONTROLLER_SHA" python -m tools.qykw --phase publish-change
@@ -300,7 +300,7 @@ jobs:
         working-directory: controller
         env:
           TRUSTED_CONTROLLER_SHA: ${{ needs.authorize.outputs.controller_sha }}
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
           QYKW_AUTHORIZE_JOB_RESULT: ${{ needs.authorize.result }}
           QYKW_PREPARE_JOB_RESULT: ${{ needs.prepare.result }}
           QYKW_VERIFY_JOB_RESULT: ${{ needs.verify.result }}

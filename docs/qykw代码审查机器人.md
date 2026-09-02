@@ -49,15 +49,15 @@ qykw 是启元开物独立工程机器人。默认审查通道只提供分析、
 
 授权变更链路拆分为 `authorize-change`、`prepare-change`、`verify-change`、`publish-change` 和 `record-change-result`。它只接受 PR 评论中的 `修复` 或 `实现`，并同时校验配置 writer 与仓库写权限。验证固定 Head、运行 `full` 配置，并使用唯一的 digest-pinned `QYKW_VERIFICATION_IMAGE_REF`；发布阶段最多创建专用分支和 Draft PR，最终审查与合并始终由 `xyh202131` 完成。
 
-- `authorize`、`publish`、`record_failure` 和 `control` 只持有仓库限定的 `QYKW_REVIEW_TOKEN`。
+- `authorize`、`publish`、`record_failure` 和 `control` 只把仓库 Secret `QYKW_TOKEN` 映射为运行时 `QYKW_REVIEW_TOKEN`。
 - `analyze` 只持有只读仓库令牌与 `QYKW_INFERENCE_*` 配置。
 - 审查通道的两类凭据不会进入同一个 job。
-- 变更阶段分别持有审查令牌、推理密钥或发布令牌，三类凭据不会共存。
+- 变更阶段的 GitHub 写入令牌与推理密钥不会进入同一个 job；审查和发布的运行时变量均来自同一仓库限定 `QYKW_TOKEN`，隔离的是暴露面而非底层 GitHub 权限。
 - 阶段产物只保留 1 天，不能提升权限，也不包含完整评论、原始推理响应或 Secrets。
 
 仓库所有者需要配置：
 
-- Secret：`QYKW_REVIEW_TOKEN`、`QYKW_INFERENCE_API_KEY`；启用授权变更时还需要仓库限定的 `QYKW_PUBLISH_TOKEN`。
+- Secret：仓库限定的 `QYKW_TOKEN` 与 `MINIMAX_API_KEY`。工作流仅在对应 job 中把它们映射为阶段所需的 `QYKW_REVIEW_TOKEN`、`QYKW_PUBLISH_TOKEN` 或 `QYKW_INFERENCE_API_KEY`；`verify` 不注入任何 Secret。
 - Variables：必填的 `QYKW_INFERENCE_MODEL`，以及 `QYKW_INFERENCE_BASE_URL`、`QYKW_INFERENCE_ALLOWED_HOSTS`、`QYKW_INFERENCE_CONTEXT_WINDOW`、`QYKW_INFERENCE_MAX_OUTPUT_TOKENS`、`QYKW_INFERENCE_TIMEOUT_SECONDS`；启用授权变更时还需配置 `QYKW_VERIFICATION_IMAGE_REF`。
 
 这些值不得写入源码、配置文件、Issue、PR、Actions 产物或日志。`.github/qykw.toml` 只保存非敏感策略，并且只从默认分支读取。

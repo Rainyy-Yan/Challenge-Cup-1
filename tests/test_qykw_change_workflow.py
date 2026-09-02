@@ -131,6 +131,7 @@ class TestQykwChangeWorkflow(unittest.TestCase):
             found -= {
                 "QYKW_CONFIG_PATH", "QYKW_VERIFICATION_PROFILE",
                 "QYKW_VERIFICATION_IMAGE_REF",
+                "QYKW_TOKEN",
                 "QYKW_INFERENCE_BASE_URL", "QYKW_INFERENCE_MODEL",
                 "QYKW_INFERENCE_ALLOWED_HOSTS", "QYKW_INFERENCE_CONTEXT_WINDOW",
                 "QYKW_INFERENCE_MAX_OUTPUT_TOKENS", "QYKW_INFERENCE_TIMEOUT_SECONDS",
@@ -139,6 +140,19 @@ class TestQykwChangeWorkflow(unittest.TestCase):
             }
             with self.subTest(job=name):
                 self.assertEqual(found, allowed)
+        expected_secret_sources = {
+            "authorize": {"QYKW_TOKEN"},
+            "prepare": {"MINIMAX_API_KEY"},
+            "verify": set(),
+            "publish": {"QYKW_TOKEN"},
+            "record_result": {"QYKW_TOKEN"},
+        }
+        for name, expected_sources in expected_secret_sources.items():
+            with self.subTest(secret_sources=name):
+                self.assertEqual(
+                    set(re.findall(r"secrets\.([A-Z0-9_]+)", job_source(name))),
+                    expected_sources,
+                )
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", job_source("prepare"))
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", job_source("verify"))
         for name, step_name in (

@@ -31,12 +31,12 @@ qykw 只使用以下四个固定标签，不会创建、重命名或覆盖标签
 - 没有 Assignee；
 - 没有 qykw 已冻结的活动 PR 绑定。
 
-### 配置 `QYKW_INTERN_TOKEN`
+### 配置 `QYKW_TOKEN`
 
 在仓库 Settings → Secrets and variables → Actions 中创建 Repository secret：
 
 ```text
-QYKW_INTERN_TOKEN
+QYKW_TOKEN
 ```
 
 Secret 必须是仓库限定、可撤销的 token，并满足以下条件：
@@ -47,9 +47,11 @@ Secret 必须是仓库限定、可撤销的 token，并满足以下条件：
   Issue/PR 会话评论，以及关闭 Issue；
 - 不把 token 写入源码、配置文件、Issue、PR、Actions 产物或日志。
 
-工作流的 `permissions` 只限制 GitHub 自动生成的 `GITHUB_TOKEN`，不会缩小
-`QYKW_INTERN_TOKEN` 自身的权限。因此还必须在 token 发行侧将它限制到本仓库和
-上述最小操作。若 token 不是 `qykw` 身份，控制器以 `bot_identity_mismatch` 停止，
+工作流只在领取和联动 job 内把 `secrets.QYKW_TOKEN` 映射为运行时
+`QYKW_INTERN_TOKEN`。`permissions` 只限制 GitHub 自动生成的 `GITHUB_TOKEN`，不会缩小
+`QYKW_TOKEN` 自身的权限。因此还必须在 token 发行侧将它限制到本仓库。由于审查、领取和发布
+阶段复用该 Secret，其权限是这些 GitHub 写入阶段所需权限的并集；job 隔离只减少暴露面。
+若 token 不是 `qykw` 身份，控制器以 `bot_identity_mismatch` 停止，
 不会继续修改 Issue。
 
 还应确认仓库允许 `qykw` 给目标贡献者分配 Issue。若组织或仓库的 Assignee
@@ -62,9 +64,9 @@ Secret 必须是仓库限定、可撤销的 token，并满足以下条件：
 
 | job | 事件与职责 | `contents` | `issues` | `pull-requests` | 运行时凭据 |
 | --- | --- | ---: | ---: | ---: | --- |
-| `issue_command` | 普通 Issue 的新评论命令 | `read` | `write` | 未授予 | `QYKW_INTERN_TOKEN` |
+| `issue_command` | 普通 Issue 的新评论命令 | `read` | `write` | 未授予 | `QYKW_INTERN_TOKEN`（来自 `QYKW_TOKEN`） |
 | `resolve_pr` | 只读解析 PR 已冻结 marker 或规范 `Closes #N` | `read` | `read` | `read` | 仅 `GITHUB_TOKEN` |
-| `reconcile_pr` | 同步 Issue–PR 生命周期 | `read` | `write` | `read` | `QYKW_INTERN_TOKEN` |
+| `reconcile_pr` | 同步 Issue–PR 生命周期 | `read` | `write` | `read` | `QYKW_INTERN_TOKEN`（来自 `QYKW_TOKEN`） |
 
 工作流不需要 `contents: write`、`actions: write` 或管理权限。所有 checkout 都只
 检出事件仓库的默认分支，设置 `persist-credentials: false`，不会检出或执行贡献者
@@ -277,7 +279,7 @@ Remove-Item -LiteralPath qykw-coverage.json
 
 - [ ] 在目标仓库确认四个精确标签均已创建，测试 Issue 初始状态只有
   `intern:claimable` 且无 Assignee。
-- [ ] 确认 `QYKW_INTERN_TOKEN` 只授权目标仓库、`GET /user` 返回 `qykw`，并验证
+- [ ] 确认 `QYKW_TOKEN` 只授权目标仓库、`GET /user` 返回 `qykw`，并验证
   Secret、日志和 Actions 产物均不泄露 token。
 - [ ] 确认工作流已从默认分支运行，checkout 的 ref 是默认分支，且没有执行 PR Head。
 - [ ] 在普通 Issue 验证三条精确命令、后续说明文本、😄 Reaction 和只读状态查询。

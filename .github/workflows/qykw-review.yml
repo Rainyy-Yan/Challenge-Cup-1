@@ -55,7 +55,7 @@ jobs:
       - name: Authorize trusted request
         working-directory: controller
         env:
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
         run: |
           mkdir -p "$RUNNER_TEMP/qykw"
           python -m tools.qykw --phase authorize --output "$RUNNER_TEMP/qykw/authorize.json"
@@ -96,7 +96,7 @@ jobs:
         working-directory: controller
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          QYKW_INFERENCE_API_KEY: ${{ secrets.QYKW_INFERENCE_API_KEY }}
+          QYKW_INFERENCE_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           QYKW_INFERENCE_BASE_URL: ${{ vars.QYKW_INFERENCE_BASE_URL }}
           QYKW_INFERENCE_MODEL: ${{ vars.QYKW_INFERENCE_MODEL }}
           QYKW_INFERENCE_ALLOWED_HOSTS: ${{ vars.QYKW_INFERENCE_ALLOWED_HOSTS }}
@@ -152,7 +152,7 @@ jobs:
       - name: Publish current result
         working-directory: controller
         env:
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
           QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/analyze.json
           QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/publish.json
         run: python -m tools.qykw --phase publish --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT"
@@ -197,7 +197,7 @@ jobs:
         if: ${{ needs.analyze.result == 'failure' }}
         working-directory: controller
         env:
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
           QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/authorize.json
           QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/failure.json
         run: python -m tools.qykw --phase record-failure --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT" --error-code analyze_failed
@@ -205,7 +205,7 @@ jobs:
         if: ${{ needs.publish.result == 'failure' }}
         working-directory: controller
         env:
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
           QYKW_INPUT_ARTIFACT: ${{ runner.temp }}/qykw/analyze.json
           QYKW_OUTPUT_ARTIFACT: ${{ runner.temp }}/qykw/failure.json
         run: python -m tools.qykw --phase record-failure --artifact "$QYKW_INPUT_ARTIFACT" --output "$QYKW_OUTPUT_ARTIFACT" --error-code publish_failed

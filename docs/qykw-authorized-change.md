@@ -19,9 +19,15 @@ write、maintain 或 admin 权限。`停止` 追加独立取消标记，不删�
 4. `publish-change`：重新验证请求、补丁和证明后，以 qykw 身份创建内容对象、专用分支和 Draft PR。不会更新已有引用，也不会合并、批准或删除。
 5. `record-change-result`：根据可信 job 结果记录 completed、partial、failed 或 canceled，并公开不含敏感数据的状态。
 
-审查与变更工作流共享同一 PR 串行队列，避免评论、状态和发布相互越过。各阶段使用独立凭据：
-审查令牌、推理密钥和发布令牌不会共存；checkout 均设置 `persist-credentials: false`；阶段制品只保留
+审查与变更工作流共享同一 PR 串行队列，避免评论、状态和发布相互越过。各 job 独立注入所需环境变量，
+GitHub 写入令牌与推理密钥不会共存；checkout 均设置 `persist-credentials: false`；阶段制品只保留
 1 天，不能作为权限或运行时事实的信任根。
+
+仓库只需配置 `QYKW_TOKEN` 与 `MINIMAX_API_KEY`。工作流按 job 分别映射为运行时
+`QYKW_REVIEW_TOKEN`、`QYKW_PUBLISH_TOKEN` 或 `QYKW_INFERENCE_API_KEY`；`verify-change`
+只使用内置只读 `GITHUB_TOKEN` 和非敏感镜像变量，不接收上述两个 Secret。审查与发布复用同一个
+`QYKW_TOKEN`，因此这里隔离的是 job 暴露面，而不是底层 GitHub 权限；该 token 必须持有所有 qykw
+写入阶段所需权限的并集，并继续限制在本仓库。
 
 ## 人工门禁与故障边界
 

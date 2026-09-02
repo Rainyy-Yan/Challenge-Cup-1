@@ -39,7 +39,7 @@ jobs:
       - name: Process 停止 command
         working-directory: controller
         env:
-          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_REVIEW_TOKEN }}
+          QYKW_REVIEW_TOKEN: ${{ secrets.QYKW_TOKEN }}
         run: |
           mkdir -p "$RUNNER_TEMP/qykw"
           python -m tools.qykw --phase control --output "$RUNNER_TEMP/qykw/control-result.json"

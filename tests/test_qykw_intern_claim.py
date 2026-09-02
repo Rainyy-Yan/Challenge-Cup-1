@@ -2435,12 +2435,12 @@ class TestInternWorkflow(unittest.TestCase):
                 self.assertEqual(step["run"], f"python -m tools.qykw.intern_claim --phase {phase}")
         self.assertEqual(
             self.named_step(jobs["issue_command"], "Run qykw intern controller")["env"],
-            {"QYKW_INTERN_TOKEN": "${{ secrets.QYKW_INTERN_TOKEN }}"},
+            {"QYKW_INTERN_TOKEN": "${{ secrets.QYKW_TOKEN }}"},
         )
         self.assertEqual(
             self.named_step(jobs["reconcile_pr"], "Run qykw intern controller")["env"],
             {
-                "QYKW_INTERN_TOKEN": "${{ secrets.QYKW_INTERN_TOKEN }}",
+                "QYKW_INTERN_TOKEN": "${{ secrets.QYKW_TOKEN }}",
                 "QYKW_RESOLVED_ISSUE_NUMBER": "${{ needs.resolve_pr.outputs.issue_number }}",
             },
         )
