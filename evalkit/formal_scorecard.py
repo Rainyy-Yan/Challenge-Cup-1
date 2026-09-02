@@ -11,7 +11,19 @@ from statistics import NormalDist
 
 HALLUCINATION_LABELS = {"yes", "no", "unassessable"}
 ADAPTATION_LABELS = {"correct", "incorrect", "unassessable"}
-MACHINE_OWNED_IDENTITIES = {"ai", "auto", "bot", "codex", "llm", "machine", "model", "system"}
+MACHINE_OWNED_IDENTITIES = {
+    "agent",
+    "ai",
+    "auto",
+    "bot",
+    "chatgpt",
+    "codex",
+    "gpt",
+    "llm",
+    "machine",
+    "model",
+    "system",
+}
 
 
 def wilson_interval(
@@ -130,9 +142,9 @@ def _reviewer_values(
     if set(normalised_labels) != set(reviewer_ids):
         return None
     values = tuple(normalised_labels[reviewer] for reviewer in reviewer_ids)
-    if not all(value in allowed for value in values):
+    if not all(isinstance(value, str) and value in allowed for value in values):
         return None
-    return values  # type: ignore[return-value]
+    return (values[0], values[1])
 
 
 def _cohen_kappa(left: list[str], right: list[str]) -> dict:
@@ -227,21 +239,22 @@ def _validate_records(
             errors.append(f"{singular} {display_id} references an unknown case_id")
         if prohibited.intersection(record):
             errors.append(f"{singular} {display_id} exposes a prohibited system conclusion")
+        accepted.append(record)
 
         if reviewers is None:
-            accepted.append(record)
             continue
         values = _reviewer_values(record.get("labels"), reviewers, allowed)
         if values is None:
             errors.append(f"{singular} {display_id} has incomplete reviewer labels")
 
         final_label = record.get("final_label")
-        if final_label not in allowed:
+        final_label_valid = isinstance(final_label, str) and final_label in allowed
+        if not final_label_valid:
             errors.append(f"{singular} {display_id} has an invalid final_label")
-        if values is None or final_label not in allowed:
+        if values is None or not final_label_valid:
             continue
-        adjudicator_present = "adjudicator_id" in record
-        adjudicator = _normalise_identity(record.get("adjudicator_id"))
+        adjudicator_present = "adjudicated_by" in record
+        adjudicator = _normalise_identity(record.get("adjudicated_by"))
         if adjudicator_present and adjudicator is None:
             errors.append(f"{singular} {display_id} adjudicator must be a non-empty identity")
         if values[0] == values[1]:
@@ -253,9 +266,8 @@ def _validate_records(
                     errors.append(f"{singular} {display_id} has unresolved reviewer disagreement")
             elif adjudicator in reviewers:
                 errors.append(f"{singular} {display_id} adjudicator must be distinct from both reviewers")
-            elif _is_machine_owned(record.get("adjudicator_id")):
+            elif _is_machine_owned(record.get("adjudicated_by")):
                 errors.append(f"{singular} {display_id} adjudicator must not be machine-owned")
-        accepted.append(record)
     return accepted
 
 
@@ -310,13 +322,15 @@ def validate_truth(data: dict) -> list[str]:
     if len(cases) < 50:
         errors.append("at least 50 cases are required")
 
-    profiles = {
-        case.get("profile_id")
-        for case in cases
-        if isinstance(case, dict) and isinstance(case.get("profile_id"), str) and case["profile_id"]
-    }
-    if len(profiles) < 3:
-        errors.append("at least 3 profiles are required")
+    dataset = data.get("dataset")
+    profile_ids = dataset.get("profile_ids") if isinstance(dataset, dict) else None
+    valid_profile_ids = {
+        profile_id.strip()
+        for profile_id in profile_ids
+        if isinstance(profile_id, str) and profile_id.strip()
+    } if isinstance(profile_ids, list) else set()
+    if len(valid_profile_ids) < 3:
+        errors.append("dataset.profile_ids must contain at least 3 distinct non-empty values")
 
     case_ids: set[str] = set()
     for index, case in enumerate(cases):
@@ -338,10 +352,21 @@ def validate_truth(data: dict) -> list[str]:
     adaptations = _validate_records(
         data, "adaptations", ADAPTATION_LABELS, reviewer_ids, case_ids, errors
     )
-    all_records = claims + adaptations
-    assessable_records = sum(record.get("final_label") != "unassessable" for record in all_records)
-    if all_records and assessable_records / len(all_records) < 0.90:
-        errors.append("assessable share is below 0.90")
+    for key, records in (("claims", claims), ("adaptations", adaptations)):
+        distinct_case_ids = {
+            record.get("case_id")
+            for record in records
+            if isinstance(record.get("case_id"), str) and record["case_id"] in case_ids
+        }
+        if len(case_ids) >= 50 and len(distinct_case_ids) < 50:
+            errors.append(f"{key} must cover at least 50 distinct case_ids")
+        assessable_share = (
+            sum(record.get("final_label") != "unassessable" for record in records) / len(records)
+            if records
+            else 0.0
+        )
+        if assessable_share < 0.95:
+            errors.append(f"{key} assessable share is below 0.95")
 
     coverage = data.get("coverage_universe")
     if not isinstance(coverage, list):
@@ -358,10 +383,10 @@ def validate_truth(data: dict) -> list[str]:
             display_id = point_id if has_point_id else str(index)
             if not has_point_id:
                 errors.append(f"coverage point {index} needs a non-empty kp_id")
-            elif point_id in coverage_ids:
+            elif point_id.strip().casefold() in coverage_ids:
                 errors.append(f"duplicate coverage kp_id: {point_id}")
             else:
-                coverage_ids.add(point_id)
+                coverage_ids.add(point_id.strip().casefold())
             weight = point.get("weight")
             if (
                 isinstance(weight, bool)
@@ -380,7 +405,10 @@ def validate_truth(data: dict) -> list[str]:
                 if not (
                     isinstance(evidence_ids, list)
                     and evidence_ids
-                    and all(isinstance(evidence_id, str) and evidence_id for evidence_id in evidence_ids)
+                    and all(
+                        isinstance(evidence_id, str) and evidence_id.strip()
+                        for evidence_id in evidence_ids
+                    )
                 ):
                     errors.append(f"covered coverage point {display_id} needs evidence")
         if valid_weight_total <= 0:
@@ -438,13 +466,17 @@ def build_scorecard(data: dict) -> dict:
                 ADAPTATION_LABELS,
             ),
         },
-        "assessable_share": (
-            sum(
-                record["final_label"] != "unassessable"
-                for record in claims + adaptations
-            )
-            / len(claims + adaptations)
-            if claims or adaptations
-            else 0.0
-        ),
+        "assessable_share": {
+            "claims": (
+                sum(record["final_label"] != "unassessable" for record in claims) / len(claims)
+                if claims
+                else 0.0
+            ),
+            "adaptations": (
+                sum(record["final_label"] != "unassessable" for record in adaptations)
+                / len(adaptations)
+                if adaptations
+                else 0.0
+            ),
+        },
     }

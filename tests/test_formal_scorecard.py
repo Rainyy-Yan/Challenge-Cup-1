@@ -54,6 +54,7 @@ def valid_truth() -> dict:
         "seed": 731,
         "blind_to_system_output": True,
         "independent_ratings": True,
+        "dataset": {"profile_ids": ["profile-1", "profile-2", "profile-3"]},
         "provenance": {"repository_sha": "a" * 40},
         "reviewers": ["reviewer-one", "reviewer-two"],
         "cases": cases,
@@ -120,9 +121,11 @@ class TestTruthValidation(unittest.TestCase):
 
     def test_rejects_fewer_than_three_profiles(self):
         truth = valid_truth()
-        for case in truth["cases"]:
-            case["profile_id"] = "only-profile"
-        self.assertEqual(validate_truth(truth), ["at least 3 profiles are required"])
+        truth["dataset"]["profile_ids"] = ["profile-1", "profile-2"]
+        self.assertEqual(
+            validate_truth(truth),
+            ["dataset.profile_ids must contain at least 3 distinct non-empty values"],
+        )
 
     def test_rejects_malformed_repository_sha(self):
         truth = valid_truth()
@@ -154,6 +157,16 @@ class TestTruthValidation(unittest.TestCase):
             validate_truth(truth),
             ["reviewer identities must not be machine-owned"],
         )
+
+    def test_rejects_structured_machine_reviewer_tokens(self):
+        for identity in ("agent-1", "GPT_Reviewer"):
+            with self.subTest(identity=identity):
+                truth = valid_truth()
+                truth["reviewers"] = [identity, "reviewer-two"]
+                self.assertEqual(
+                    validate_truth(truth),
+                    ["reviewer identities must not be machine-owned"],
+                )
 
     def test_rejects_exposed_system_conclusion(self):
         truth = valid_truth()
@@ -190,7 +203,7 @@ class TestTruthValidation(unittest.TestCase):
     def test_rejects_adjudicator_who_is_a_reviewer(self):
         truth = valid_truth()
         truth["claims"][0]["labels"]["reviewer-two"] = "no"
-        truth["claims"][0]["adjudicator_id"] = " Reviewer-One "
+        truth["claims"][0]["adjudicated_by"] = " Reviewer-One "
         self.assertEqual(
             validate_truth(truth),
             ["claim claim-000 adjudicator must be distinct from both reviewers"],
@@ -198,7 +211,7 @@ class TestTruthValidation(unittest.TestCase):
 
     def test_rejects_explicit_empty_adjudicator_identity(self):
         truth = valid_truth()
-        truth["claims"][0]["adjudicator_id"] = "   "
+        truth["claims"][0]["adjudicated_by"] = "   "
         self.assertEqual(
             validate_truth(truth),
             ["claim claim-000 adjudicator must be a non-empty identity"],
@@ -220,6 +233,23 @@ class TestTruthValidation(unittest.TestCase):
             ["covered coverage point kp-002 needs evidence"],
         )
 
+    def test_rejects_whitespace_only_coverage_evidence(self):
+        truth = valid_truth()
+        truth["coverage_universe"][1]["evidence_ids"] = ["   "]
+        self.assertEqual(
+            validate_truth(truth),
+            ["covered coverage point kp-002 needs evidence"],
+        )
+
+    def test_rejects_normalized_duplicate_coverage_ids(self):
+        truth = valid_truth()
+        truth["coverage_universe"][0]["kp_id"] = " KP-001 "
+        truth["coverage_universe"][1]["kp_id"] = "kp-001"
+        self.assertEqual(
+            validate_truth(truth),
+            ["duplicate coverage kp_id: kp-001"],
+        )
+
     def test_rejects_low_assessable_share(self):
         truth = valid_truth()
         for record in truth["claims"][:12]:
@@ -228,7 +258,7 @@ class TestTruthValidation(unittest.TestCase):
                 "reviewer-one": "unassessable",
                 "reviewer-two": "unassessable",
             }
-        self.assertIn("assessable share is below 0.90", validate_truth(truth))
+        self.assertIn("claims assessable share is below 0.95", validate_truth(truth))
 
     def test_rejects_low_or_undefined_kappa(self):
         truth = valid_truth()
@@ -238,7 +268,7 @@ class TestTruthValidation(unittest.TestCase):
         ):
             for record in records:
                 record["labels"]["reviewer-two"] = inverse[record["labels"]["reviewer-one"]]
-                record["adjudicator_id"] = "adjudicator"
+                record["adjudicated_by"] = "adjudicator"
         errors = validate_truth(truth)
         self.assertIn("hallucination kappa is below 0.60 or undefined", errors)
         self.assertIn("adaptation kappa is below 0.60 or undefined", errors)
@@ -247,7 +277,7 @@ class TestTruthValidation(unittest.TestCase):
         truth = valid_truth()
         claim = truth["claims"][0]
         claim["labels"]["reviewer-two"] = "no"
-        claim["adjudicator_id"] = "adjudicator"
+        claim["adjudicated_by"] = "adjudicator"
         first_scorecard = build_scorecard(truth)
         claim["final_label"] = "no"
         second_scorecard = build_scorecard(truth)
@@ -265,7 +295,8 @@ class TestTruthValidation(unittest.TestCase):
         }
         scorecard = build_scorecard(truth)
         self.assertEqual(scorecard["hallucination_rate"]["denominator"], 49)
-        self.assertEqual(scorecard["assessable_share"], 0.99)
+        self.assertEqual(scorecard["assessable_share"]["claims"], 0.98)
+        self.assertEqual(scorecard["assessable_share"]["adaptations"], 1.0)
 
     def test_multiple_claims_for_one_case_are_kept_as_one_bootstrap_cluster(self):
         truth = valid_truth()
@@ -320,3 +351,57 @@ class TestTruthValidation(unittest.TestCase):
         self.assertIn("coverage point 0 covered must be a boolean", errors)
         self.assertIn("duplicate coverage kp_id: kp-002", errors)
         self.assertIn("coverage point kp-002 has an invalid weight", errors)
+
+    def test_rejects_claims_that_do_not_cover_fifty_distinct_cases(self):
+        for key in ("claims", "adaptations"):
+            with self.subTest(key=key):
+                truth = valid_truth()
+                for record in truth[key]:
+                    record["case_id"] = "case-000"
+                self.assertEqual(
+                    validate_truth(truth),
+                    [f"{key} must cover at least 50 distinct case_ids"],
+                )
+
+    def test_rejects_unassessable_claim_rate_without_dilution_by_adaptations(self):
+        truth = valid_truth()
+        for record in truth["claims"][:10]:
+            record["final_label"] = "unassessable"
+            record["labels"] = {
+                "reviewer-one": "unassessable",
+                "reviewer-two": "unassessable",
+            }
+        self.assertEqual(
+            validate_truth(truth),
+            ["claims assessable share is below 0.95"],
+        )
+
+    def test_malformed_reviewer_final_and_adjudicator_values_return_errors(self):
+        cases = (
+            ("labels", ["not-a-label"], "claim claim-000 has incomplete reviewer labels"),
+            ("final_label", {}, "claim claim-000 has an invalid final_label"),
+            ("adjudicated_by", [], "claim claim-000 adjudicator must be a non-empty identity"),
+            ("adjudicated_by", None, "claim claim-000 adjudicator must be a non-empty identity"),
+        )
+        for field, value, expected in cases:
+            with self.subTest(field=field):
+                truth = valid_truth()
+                record = truth["claims"][0]
+                if field == "labels":
+                    record["labels"]["reviewer-one"] = value
+                elif field == "adjudicated_by":
+                    record["labels"]["reviewer-two"] = "no"
+                    record[field] = value
+                else:
+                    record[field] = value
+                self.assertEqual(validate_truth(truth), [expected])
+
+    def test_non_string_reviewer_identity_returns_a_stable_error(self):
+        for identity in (["reviewer-one"], {}, None):
+            with self.subTest(identity=identity):
+                truth = valid_truth()
+                truth["reviewers"] = [identity, "reviewer-two"]
+                self.assertEqual(
+                    validate_truth(truth),
+                    ["reviewers must contain exactly two distinct non-empty identities"],
+                )
