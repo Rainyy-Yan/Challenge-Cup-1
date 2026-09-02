@@ -140,6 +140,7 @@ class InternGateway(Protocol):
     def list_issue_comments(self, issue_number: int) -> tuple[IssueComment, ...]: ...
     def list_pull_comments(self, pull_number: int) -> tuple[IssueComment, ...]: ...
     def get_pull(self, pull_number: int) -> PullSnapshot: ...
+    def has_reaction(self, comment_id: int, actor: str = "qykw", content: str = "laugh") -> bool: ...
     def add_reaction(self, comment_id: int) -> None: ...
     def add_assignee(self, issue_number: int, login: str) -> None: ...
     def remove_assignee(self, issue_number: int, login: str) -> None: ...
@@ -216,6 +217,24 @@ class HttpInternGateway:
         return PullSnapshot(number, _intern_string(payload.get("state"), "invalid_pull"), merged,
                             _intern_login(_intern_mapping(payload.get("user"), "invalid_pull").get("login")),
                             _intern_string(body, "invalid_pull"))
+
+    def has_reaction(self, comment_id: int, actor: str = "qykw", content: str = "laugh") -> bool:
+        comment_id = _intern_positive(comment_id, "invalid_comment_id")
+        if _intern_login(actor) != "qykw":
+            raise InternError("invalid_reaction_actor")
+        if content != "laugh":
+            raise InternError("invalid_reaction_content")
+        payloads = self._paginate(
+            self._repo_path(f"issues/comments/{comment_id}/reactions?per_page=100")
+        )
+        found = False
+        for value in payloads:
+            _intern_positive(value.get("id"), "invalid_reaction")
+            login = _intern_login(_intern_mapping(value.get("user"), "invalid_reaction").get("login"))
+            reaction_content = _intern_string(value.get("content"), "invalid_reaction")
+            if login == actor and reaction_content == content:
+                found = True
+        return found
 
     def add_reaction(self, comment_id: int) -> None:
         comment_id = _intern_positive(comment_id, "invalid_comment_id")
@@ -671,9 +690,26 @@ class InternClaimService:
 
         if existing is None:
             try:
-                self.gateway.add_reaction(comment.comment_id)
+                has_reaction = self.gateway.has_reaction(comment.comment_id)
             except InternError:
                 return "failed"
+            if not has_reaction:
+                try:
+                    self.gateway.add_reaction(comment.comment_id)
+                except InternError:
+                    return "failed"
+            if command is InternCommand.UNASSIGN:
+                try:
+                    issue_before_marker = self.gateway.get_issue(event.issue_number)
+                except InternError:
+                    return "failed"
+                frozen_claimant = (issue_before_marker.assignees[0]
+                                   if len(issue_before_marker.assignees) == 1 else comment.author_login)
+                record = InternRecord(
+                    record.repository_id, record.repository, record.issue_number,
+                    record.trigger_comment_id, record.actor_login, record.operation,
+                    frozen_claimant, record.pull_number, record.stage,
+                )
             try:
                 marker_comment_id = self.gateway.create_comment(
                     event.issue_number, self._body("正在处理该命令。", record)
@@ -716,6 +752,9 @@ class InternClaimService:
                 return self._finish(marker_comment_id, record, "Issue 已关闭，无法领取。", "reconciled")
             if "status:blocked" in labels:
                 return self._finish(marker_comment_id, record, "Issue 已阻塞，暂不可领取。", "reconciled")
+            progress_labels = labels & {"status:in-progress", "status:in-review"}
+            if ("intern:claimable" in labels and progress_labels) or len(progress_labels) > 1:
+                return self._finish(marker_comment_id, record, "Issue 的可领取与进度标签冲突，已停止写入。", "conflict")
             if len(assignees) == 1 and assignees[0].casefold() != record.actor_login.casefold():
                 if "intern:claimable" not in labels and len(labels & {"status:in-progress", "status:in-review"}) == 1:
                     return self._finish(
@@ -763,6 +802,12 @@ class InternClaimService:
             return self._finish(marker_comment_id, record, "Issue 已关闭，无法释放。", "reconciled")
         if "status:blocked" in labels:
             return self._finish(marker_comment_id, record, "Issue 已阻塞，已停止释放。", "reconciled")
+        active_pull = any(item.operation == "pull" and item.pull_number is not None for item in records)
+        if "status:in-review" in labels or active_pull:
+            return self._finish(
+                marker_comment_id, record,
+                "Issue 存在活动 PR 或正在审查，不允许释放。", "reconciled",
+            )
         if len(issue.assignees) > 1:
             return self._finish(marker_comment_id, record, "Issue 存在多个 Assignee 冲突，已停止写入。", "conflict")
         if not issue.assignees:
@@ -773,26 +818,16 @@ class InternClaimService:
             return self._finish(marker_comment_id, record, "Issue 的释放状态冲突，已停止写入。", "conflict")
 
         claimant = issue.assignees[0]
+        if record.claimant_login.casefold() != claimant.casefold():
+            return self._finish(
+                marker_comment_id, record,
+                "Issue 的实时 Assignee 与已固定领取人冲突，已停止写入。", "conflict",
+            )
         authorized = (record.actor_login.casefold() == claimant.casefold() or record.actor_login == "xyh202131")
         if not authorized:
             return self._finish(marker_comment_id, record, f"@{record.actor_login} 无权释放 @{claimant} 领取的 Issue。", "reconciled")
-        active_pull = any(item.operation == "pull" and item.pull_number is not None for item in records)
-        if "status:in-review" in labels or active_pull:
-            return self._finish(marker_comment_id, record, "Issue 存在活动 PR 或正在审查，不允许释放。", "reconciled")
         if "intern:claimable" in labels or "status:in-progress" not in labels:
             return self._finish(marker_comment_id, record, "Issue 的 Assignee 与进度标签冲突，已停止写入。", "conflict")
-        if record.claimant_login != claimant:
-            record = InternRecord(
-                record.repository_id, record.repository, record.issue_number,
-                record.trigger_comment_id, record.actor_login, record.operation,
-                claimant, record.pull_number, "pending",
-            )
-            try:
-                self.gateway.update_comment(marker_comment_id, self._body("正在处理释放命令。", record))
-                issue, _ = self._read_state(event)
-            except InternError:
-                self._mark_failed(marker_comment_id, record)
-                return "failed"
         failed, issue = self._mutate_and_read(
             event, marker_comment_id, record,
             lambda: self.gateway.remove_assignee(event.issue_number, claimant),
@@ -804,11 +839,20 @@ class InternClaimService:
     def _continue_partial_release(self, event: IssueCommentEvent, issue: IssueSnapshot,
                                   record: InternRecord, marker_comment_id: int) -> str:
         for _ in range(3):
+            try:
+                issue, records = self._read_state(event)
+            except InternError:
+                self._mark_failed(marker_comment_id, record)
+                return "failed"
             labels = set(issue.labels)
             if issue.assignees:
                 return self._finish(marker_comment_id, record, "Issue 的 Assignee 在释放时发生冲突。", "conflict")
-            if "status:in-review" in labels:
-                return self._finish(marker_comment_id, record, "Issue 正在审查，不允许释放。", "reconciled")
+            active_pull = any(item.operation == "pull" and item.pull_number is not None for item in records)
+            if "status:in-review" in labels or active_pull:
+                return self._finish(
+                    marker_comment_id, record,
+                    "Issue 存在活动 PR 或正在审查，不允许释放。", "reconciled",
+                )
             if "status:in-progress" in labels:
                 mutation = lambda: self.gateway.remove_label(event.issue_number, "status:in-progress")
             elif "intern:claimable" not in labels:
@@ -1039,6 +1083,9 @@ def _intern_allowed_route(method: str, url: str, body: bytes | None, api_url: st
             if not parsed.query:
                 return
         if re.fullmatch(rf"issues/{number}/comments", path):
+            _intern_collection_page(url)
+            return
+        if re.fullmatch(rf"issues/comments/{number}/reactions", path):
             _intern_collection_page(url)
             return
         raise InternError("invalid_request")
