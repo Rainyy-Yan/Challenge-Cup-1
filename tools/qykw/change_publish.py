@@ -86,6 +86,7 @@ class PublishedPullSnapshot:
     state: str
     draft: bool
     author_login: str
+    head_repository: str
     head_ref: str
     head_sha: str | None
     base_ref: str
@@ -881,8 +882,8 @@ def _recover_existing(
     same_operation = tuple(
         record for record in records if record.operation_id == last_operation
     )
-    if len(same_operation) == 1:
-        unknown = same_operation[0]
+    if records[-1].state is WriteState.UNKNOWN and len(same_operation) <= 2:
+        unknown = records[-1]
         state = WriteState.UNKNOWN
         object_id: str | None = None
         if unknown.kind is WriteKind.REF:
@@ -914,28 +915,31 @@ def _recover_existing(
                     object_id = str(prepared.existing_pull.number)
                 except _Failure:
                     pass
-        terminal = _new_journal_entry(
-            prepared,
-            operation_id=unknown.operation_id,
-            stage=unknown.stage,
-            kind=unknown.kind,
-            target=unknown.target,
-            object_id=object_id,
-            state=state,
-        )
-        try:
-            journal.append_synced(terminal)
-        except Exception:
-            return _result(
+        if len(same_operation) == 1 or state is not WriteState.UNKNOWN:
+            terminal = _new_journal_entry(
+                prepared,
+                operation_id=unknown.operation_id,
                 stage=unknown.stage,
-                branch_name=prepared.branch_name,
-                receipts=_receipts_from_journal(records),
-                error_code="journal_write_unknown",
+                kind=unknown.kind,
+                target=unknown.target,
+                object_id=object_id,
+                state=state,
             )
-        records = _validate_journal_for_prepared(records + (terminal,), prepared)
+            try:
+                journal.append_synced(terminal)
+            except Exception:
+                return _result(
+                    stage=unknown.stage,
+                    branch_name=prepared.branch_name,
+                    receipts=_receipts_from_journal(records),
+                    error_code="journal_write_unknown",
+                )
+            records = _validate_journal_for_prepared(records + (terminal,), prepared)
     receipts = _receipts_from_journal(records)
     commit_sha = _latest_object(receipts, WriteKind.COMMIT)
     branch_target = prepared.existing_branch_target
+    branch_state = _latest_state(receipts, WriteKind.REF)
+    pull_state = _latest_state(receipts, WriteKind.PULL)
     expected_count = len(prepared.published_files) + 4
     if (
         len(receipts) != expected_count
@@ -945,6 +949,9 @@ def _recover_existing(
         return _result(
             stage=PublicationStage.PREFLIGHT,
             branch_name=prepared.branch_name,
+            branch_state=branch_state,
+            pull_state=pull_state,
+            commit_sha=commit_sha,
             receipts=receipts,
             error_code="publication_recovery_required",
         )
@@ -1134,7 +1141,114 @@ def _load_complete_tree(
         digests.append(
             FileDigest(blob.path, blob.mode, hashlib.sha256(blob.content).hexdigest())
         )
+    if _rebuild_root_tree_oid(index.entries, tuple(blobs), len(root_tree_sha)) != root_tree_sha:
+        raise _Failure("parent_tree_incomplete")
     return _CompleteTree(root_tree_sha, index.entries, tuple(blobs), tuple(digests))
+
+
+def _rebuild_root_tree_oid(
+    entries: tuple[SourceTreeEntry, ...],
+    blobs: tuple[SourceBlob, ...],
+    oid_length: int,
+) -> str:
+    """Rebuild every Git tree object bottom-up from independently checked blobs."""
+
+    if oid_length not in {40, 64}:
+        raise _Failure("parent_tree_incomplete")
+    blob_by_path: dict[str, SourceBlob] = {}
+    for blob in blobs:
+        if type(blob) is not SourceBlob:
+            raise _Failure("parent_tree_incomplete")
+        path = _normalize_tree_path(blob.path)
+        if (
+            path != blob.path
+            or path in blob_by_path
+            or blob.mode not in _SUPPORTED_BLOB_MODES
+            or not _is_oid(blob.git_sha)
+            or len(blob.git_sha) != oid_length
+        ):
+            raise _Failure("parent_tree_incomplete")
+        blob_by_path[path] = blob
+
+    tree_entries: dict[str, SourceTreeEntry] = {}
+    children: dict[str, list[SourceTreeEntry]] = {"": []}
+    for entry in entries:
+        if type(entry) is not SourceTreeEntry:
+            raise _Failure("parent_tree_incomplete")
+        path = _normalize_tree_path(entry.path)
+        if (
+            path != entry.path
+            or not _is_oid(entry.git_sha)
+            or len(entry.git_sha) != oid_length
+            or (
+                entry.kind == "tree"
+                and entry.mode != _TREE_MODE
+            )
+            or (
+                entry.kind == "blob"
+                and entry.mode not in _SUPPORTED_BLOB_MODES
+            )
+            or entry.kind not in {"blob", "tree"}
+        ):
+            raise _Failure("parent_tree_incomplete")
+        if entry.kind == "tree":
+            if path in tree_entries:
+                raise _Failure("parent_tree_incomplete")
+            tree_entries[path] = entry
+            children[path] = []
+    for entry in entries:
+        parent = entry.path.rpartition("/")[0]
+        if parent not in children:
+            raise _Failure("parent_tree_incomplete")
+        children[parent].append(entry)
+    rebuilt: dict[str, str] = {}
+    directories = sorted(
+        tree_entries,
+        key=lambda path: (path.count("/"), path.encode("utf-8")),
+        reverse=True,
+    )
+    for directory in directories + [""]:
+        direct = children[directory]
+        if directory and not direct:
+            raise _Failure("parent_tree_incomplete")
+        items: list[tuple[bytes, bool, str, str]] = []
+        for entry in direct:
+            name = entry.path.rsplit("/", 1)[-1].encode("utf-8")
+            if not name or b"\0" in name or b"/" in name:
+                raise _Failure("parent_tree_incomplete")
+            if entry.kind == "blob":
+                blob = blob_by_path.get(entry.path)
+                if (
+                    blob is None
+                    or blob.mode != entry.mode
+                    or blob.git_sha != entry.git_sha
+                ):
+                    raise _Failure("parent_tree_incomplete")
+                oid = _git_blob_oid(blob.content, oid_length)
+                if oid != entry.git_sha:
+                    raise _Failure("parent_tree_incomplete")
+                items.append((name, False, entry.mode, oid))
+            else:
+                oid = rebuilt.get(entry.path)
+                if oid is None or oid != entry.git_sha:
+                    raise _Failure("parent_tree_incomplete")
+                items.append((name, True, "40000", oid))
+        rebuilt[directory] = _git_tree_oid(items, oid_length)
+    return rebuilt[""]
+
+
+def _git_tree_oid(
+    entries: list[tuple[bytes, bool, str, str]], oid_length: int
+) -> str:
+    ordered = sorted(entries, key=lambda item: item[0] + (b"/" if item[1] else b""))
+    payload = b"".join(
+        mode.encode("ascii") + b" " + name + b"\0" + bytes.fromhex(oid)
+        for name, _is_tree, mode, oid in ordered
+    )
+    encoded = b"tree " + str(len(payload)).encode("ascii") + b"\0" + payload
+    if oid_length == 40:
+        return hashlib.sha1(encoded).hexdigest()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_source_tree(root: Path, blobs: tuple[SourceBlob, ...]) -> None:
@@ -1475,21 +1589,30 @@ def _validate_journal_for_prepared(
             first_indexes.append(index)
             if record.state is not WriteState.UNKNOWN or record.object_id is not None:
                 raise _Failure("journal_read_failed")
-        elif len(transitions) != 1 or any(
-            getattr(record, field) != getattr(transitions[0], field)
-            for field in (
-                "operation_id",
-                "stage",
-                "kind",
-                "target",
-                "repository",
-                "source_head_sha",
-                "target_base_sha",
-                "manifest_digest",
-                "workflow_run_id",
-            )
-        ):
-            raise _Failure("journal_read_failed")
+        else:
+            if any(
+                getattr(record, field) != getattr(transitions[0], field)
+                for field in (
+                    "operation_id",
+                    "stage",
+                    "kind",
+                    "target",
+                    "repository",
+                    "source_head_sha",
+                    "target_base_sha",
+                    "manifest_digest",
+                    "workflow_run_id",
+                )
+            ):
+                raise _Failure("journal_read_failed")
+            if len(transitions) == 2:
+                if (
+                    transitions[-1].state is not WriteState.UNKNOWN
+                    or record.state not in {WriteState.CREATED, WriteState.NOT_CREATED}
+                ):
+                    raise _Failure("journal_read_failed")
+            elif len(transitions) != 1:
+                raise _Failure("journal_read_failed")
         transitions.append(record)
     if first_indexes != list(range(len(first_indexes))):
         raise _Failure("journal_read_failed")
@@ -1557,7 +1680,11 @@ def _normalize_tree_path(value: object) -> str:
         raise _Failure("parent_tree_incomplete")
     if any(part.casefold() == ".git" for part in path.parts):
         raise _Failure("parent_tree_incomplete")
-    if len(value.encode("utf-8")) > 1_024:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError:
+        raise _Failure("parent_tree_incomplete") from None
+    if len(encoded) > 1_024:
         raise _Failure("parent_tree_incomplete")
     return value
 
@@ -1620,6 +1747,7 @@ def _validate_created_pull(
         or snapshot.state.casefold() != "open"
         or snapshot.draft is not True
         or snapshot.author_login != _BOT_LOGIN
+        or snapshot.head_repository != prepared.repository
         or snapshot.head_ref != prepared.branch_name
         or snapshot.head_sha != commit_sha
         or snapshot.base_ref != prepared.change.target_base_ref
@@ -1671,7 +1799,9 @@ def _blob_matches_oid(content: bytes, oid: str) -> bool:
     return _git_blob_oid(content, len(oid)) == oid
 
 
-def _latest_state(receipts: list[WriteReceipt], kind: WriteKind) -> WriteState:
+def _latest_state(
+    receipts: tuple[WriteReceipt, ...] | list[WriteReceipt], kind: WriteKind
+) -> WriteState:
     for receipt in reversed(receipts):
         if receipt.kind is kind:
             return receipt.state

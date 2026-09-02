@@ -55,7 +55,7 @@ from tools.qykw.change_publish import (
 REPOSITORY = "owner/repo"
 SOURCE_HEAD = "a" * 40
 BASE_SHA = "b" * 40
-ROOT_TREE = "c" * 40
+ROOT_TREE = ""
 RUN_ID = "QY-PR7-A1B2"
 BRANCH = "qykw/qy-pr7-a1b2-fix"
 IMAGE_DIGEST = "sha256:" + "d" * 64
@@ -175,6 +175,60 @@ BASE_FILES = {
     "sentinel.bin": ("100644", b"\x00untouched-sentinel"),
     "nested/tool.sh": ("100755", b"#!/bin/sh\necho safe\n"),
 }
+
+
+def git_tree_oid(items: tuple[tuple[str, str, str, str], ...]) -> str:
+    ordered = sorted(
+        items,
+        key=lambda item: item[0].encode("utf-8") + (b"/" if item[1] == "tree" else b""),
+    )
+    payload = b"".join(
+        ("40000" if kind == "tree" else mode).encode("ascii")
+        + b" "
+        + name.encode("utf-8")
+        + b"\0"
+        + bytes.fromhex(oid)
+        for name, kind, mode, oid in ordered
+    )
+    header = b"tree " + str(len(payload)).encode("ascii") + b"\0"
+    return hashlib.sha1(header + payload).hexdigest()
+
+
+def source_tree_entries(
+    files: dict[str, tuple[str, bytes]],
+) -> tuple[str, tuple[SourceTreeEntry, ...]]:
+    directories = {
+        "/".join(path.split("/")[:index])
+        for path in files
+        for index in range(1, len(path.split("/")))
+    }
+    tree_oids: dict[str, str] = {}
+    for directory in sorted(
+        directories | {""},
+        key=lambda item: (item.count("/") + (1 if item else 0), item),
+        reverse=True,
+    ):
+        prefix = f"{directory}/" if directory else ""
+        items: list[tuple[str, str, str, str]] = []
+        for path, (mode, content) in files.items():
+            if path.startswith(prefix) and "/" not in path[len(prefix):]:
+                items.append((path[len(prefix):], "blob", mode, git_oid(content)))
+        for child, oid in tree_oids.items():
+            if child.startswith(prefix) and "/" not in child[len(prefix):]:
+                items.append((child[len(prefix):], "tree", "040000", oid))
+        tree_oids[directory] = git_tree_oid(tuple(items))
+    entries = [
+        SourceTreeEntry(path, "040000", "tree", tree_oids[path])
+        for path in sorted(directories)
+    ]
+    entries.extend(
+        SourceTreeEntry(path, mode, "blob", git_oid(content))
+        for path, (mode, content) in sorted(files.items())
+    )
+    return tree_oids[""], tuple(entries)
+
+
+ROOT_TREE, _BASE_TREE_ENTRIES = source_tree_entries(BASE_FILES)
 OUTPUT_FILES = {
     **BASE_FILES,
     "src/app.py": ("100644", b"after\n"),
@@ -338,6 +392,7 @@ class FakeGateway:
         self.find_inconclusive = False
         self.published_draft = True
         self.published_author = "qykw"
+        self.published_head_repository = REPOSITORY
         self.published_head: str | None = None
         self.published_base = "main"
         self.published_unavailable = False
@@ -395,19 +450,7 @@ class FakeGateway:
     ) -> tuple[SourceTreeEntry, ...]:
         self._read("tree", (repository, commit_sha))
         files = self._trees[commit_sha]
-        directories = sorted(
-            {
-                "/".join(path.split("/")[:index])
-                for path in files
-                for index in range(1, len(path.split("/")))
-            }
-        )
-        entries = [SourceTreeEntry(path, "040000", "tree", "e" * 40) for path in directories]
-        entries.extend(
-            SourceTreeEntry(path, mode, "blob", git_oid(content))
-            for path, (mode, content) in sorted(files.items())
-        )
-        return tuple(entries)
+        return source_tree_entries(files)[1]
 
     def get_source_tree_index(self, repository: str, commit_sha: str):
         entries = self.list_tree_entries(repository, commit_sha)
@@ -430,16 +473,18 @@ class FakeGateway:
         self._read("published_pull", (repository, pr_number))
         if self.published_unavailable:
             raise RuntimeError("snapshot unavailable")
-        return subject.PublishedPullSnapshot(
+        snapshot = subject.PublishedPullSnapshot(
             pr_number,
             "open",
             self.published_draft,
             self.published_author,
+            self.published_head_repository,
             BRANCH,
             self.published_head or self.branch_target,
             self.published_base,
             self.base_target,
         )
+        return snapshot
 
     def get_changed_paths(
         self, repository: str, base_sha: str, head_sha: str
@@ -508,9 +553,7 @@ class FakeGateway:
         files = dict(self._trees[SOURCE_HEAD])
         for entry in entries:
             files[entry.path] = (entry.mode, self._blobs[entry.blob_sha])
-        oid = hashlib.sha1(
-            json.dumps([(path, mode, git_oid(data)) for path, (mode, data) in sorted(files.items())]).encode()
-        ).hexdigest()
+        oid = source_tree_entries(files)[0]
         self._tree_objects[oid] = files
         self._after_write("tree")
         if self.failures.get("tree") == "invalid":
@@ -1078,7 +1121,7 @@ class TestPublicationWrites(unittest.TestCase):
         fixture = PublicationFixture()
         fixture.gateway.after_commit = lambda: tamper_tree(fixture)
         result = fixture.publish()
-        self.assertEqual(result.error_code, "workspace_digest_mismatch")
+        self.assertEqual(result.error_code, "published_tree_incomplete")
         self.assertFalse(any(name == "ref" for name, _ in fixture.gateway.write_calls))
 
         fixture = PublicationFixture()
@@ -1234,7 +1277,7 @@ class TestPublicationWrites(unittest.TestCase):
         fixture.gateway.write_calls.clear()
         fixture.gateway._trees[first.commit_sha]["sentinel.bin"] = ("100644", b"tampered")
         result = fixture.publish()
-        self.assertEqual(result.error_code, "workspace_digest_mismatch")
+        self.assertEqual(result.error_code, "published_tree_incomplete")
         self.assertEqual(fixture.gateway.write_calls, [])
 
     def test_race_gate_read_exception_fails_closed_after_commit(self) -> None:
@@ -1265,6 +1308,105 @@ class TestPublicationWrites(unittest.TestCase):
         self.assertEqual(len(subject._git_blob_oid(b"content", 64)), 64)
         self.assertEqual(subject._positive_int("7"), 7)
         self.assertIsNone(subject._positive_int("0"))
+
+    def test_git_tree_rebuild_rejects_invalid_object_evidence(self) -> None:
+        blob = SourceBlob("file", "100644", b"x", git_oid(b"x"))
+        invalid_graphs = (
+            ((), (), 39),
+            ((), (object(),), 40),
+            ((), (blob, replace(blob, content=b"y", git_sha=git_oid(b"y"))), 40),
+            ((object(),), (), 40),
+            ((SourceTreeEntry("file", "100644", "blob", "e" * 39),), (blob,), 40),
+            ((SourceTreeEntry("file", "100644", "blob", "g" * 40),), (blob,), 40),
+            ((SourceTreeEntry("empty", "040000", "tree", "e" * 40),), (), 40),
+            (
+                (
+                    SourceTreeEntry("dir", "040000", "tree", "e" * 40),
+                    SourceTreeEntry("dir", "040000", "tree", "e" * 40),
+                ),
+                (),
+                40,
+            ),
+            ((SourceTreeEntry("missing/file", "100644", "blob", blob.git_sha),), (replace(blob, path="missing/file"),), 40),
+            ((SourceTreeEntry("file", "100755", "blob", blob.git_sha),), (blob,), 40),
+            ((SourceTreeEntry("file", "120000", "blob", blob.git_sha),), (blob,), 40),
+            ((SourceTreeEntry("file", "100644", "commit", blob.git_sha),), (blob,), 40),
+            ((SourceTreeEntry("file", "100644", "blob", blob.git_sha),), (replace(blob, mode="100755"),), 40),
+            ((SourceTreeEntry("file", "100644", "blob", blob.git_sha),), (replace(blob, content=b"y"),), 40),
+            ((SourceTreeEntry("\ud800", "100644", "blob", blob.git_sha),), (replace(blob, path="\ud800"),), 40),
+            ((SourceTreeEntry("bad\0name", "100644", "blob", blob.git_sha),), (replace(blob, path="bad\0name"),), 40),
+        )
+        for entries, blobs, length in invalid_graphs:
+            with self.subTest(entries=entries, length=length):
+                with self.assertRaises(subject._Failure) as error:
+                    subject._rebuild_root_tree_oid(entries, blobs, length)
+                self.assertEqual(error.exception.code, "parent_tree_incomplete")
+        self.assertEqual(len(subject._git_tree_oid([], 64)), 64)
+
+    def test_git_tree_rebuild_rejects_missing_blob_and_child_tree_evidence(self) -> None:
+        blob = SourceBlob("dir/file", "100644", b"x", git_oid(b"x"))
+        invalid_graphs = (
+            ((SourceTreeEntry("file", "100644", "blob", git_oid(b"x")),), (), 40),
+            ((SourceTreeEntry("file", "100644", "blob", "e" * 40),), (replace(blob, path="file"),), 40),
+            (
+                (
+                    SourceTreeEntry("dir", "040000", "tree", "e" * 40),
+                    SourceTreeEntry("dir/file", "100644", "blob", blob.git_sha),
+                ),
+                (blob,),
+                40,
+            ),
+        )
+        for entries, blobs, length in invalid_graphs:
+            with self.subTest(entries=entries, length=length):
+                with self.assertRaises(subject._Failure) as error:
+                    subject._rebuild_root_tree_oid(entries, blobs, length)
+                self.assertEqual(error.exception.code, "parent_tree_incomplete")
+
+    def test_complete_tree_index_rejects_untrusted_tree_evidence(self) -> None:
+        fixture = PublicationFixture()
+        entries = fixture.gateway.list_tree_entries(REPOSITORY, SOURCE_HEAD)
+        blobs = tuple(
+            fixture.gateway.get_blob_at_commit(REPOSITORY, SOURCE_HEAD, entry.path)
+            for entry in entries
+            if entry.kind == "blob"
+        )
+
+        def load(
+            candidate_entries: tuple[SourceTreeEntry, ...],
+            candidate_blobs: tuple[SourceBlob, ...],
+            root_tree: str = ROOT_TREE,
+            digest: str | None = None,
+        ) -> str:
+            fixture.gateway.get_source_tree_index = lambda *args: subject.SourceTreeIndex(
+                root_tree,
+                True,
+                candidate_entries,
+                candidate_blobs,
+                digest
+                or source_index_digest(root_tree, candidate_entries, candidate_blobs),
+            )
+            with self.assertRaises(subject._Failure) as error:
+                subject._load_complete_tree(fixture.gateway, REPOSITORY, SOURCE_HEAD)
+            return error.exception.code
+
+        tree = next(entry for entry in entries if entry.kind == "tree")
+        blob = next(item for item in blobs if item.path == "src/app.py")
+        self.assertEqual(load(entries, blobs, "e" * 40), "parent_tree_incomplete")
+        self.assertEqual(
+            load((replace(tree, mode="40000"),) + tuple(entry for entry in entries if entry != tree), blobs),
+            "parent_tree_incomplete",
+        )
+        self.assertEqual(
+            load((replace(blob, path="src/missing.py"),) + tuple(item for item in blobs if item != blob), blobs),
+            "parent_tree_incomplete",
+        )
+        self.assertEqual(
+            load(entries, tuple(item for item in blobs if item != blob)), "source_blob_mismatch"
+        )
+        self.assertEqual(
+            load(entries, blobs, digest="e" * 64), "parent_tree_incomplete"
+        )
 
     def test_existing_orphan_branch_is_not_adopted_or_modified(self) -> None:
         fixture = PublicationFixture()
@@ -1319,7 +1461,7 @@ class TestPublicationWrites(unittest.TestCase):
             True,
             filtered_entries,
             filtered_blobs,
-            source_index_digest(ROOT_TREE, full_entries, full_blobs),
+            source_index_digest(ROOT_TREE, filtered_entries, filtered_blobs),
         )
         forged_complete = tuple(
             file_digest(path, mode, content)
@@ -1408,6 +1550,41 @@ class TestPublicationWrites(unittest.TestCase):
         self.assertEqual(second.error_code, "journal_write_unknown")
         self.assertEqual(fixture.gateway.write_calls, [])
 
+    def test_recovery_reconciles_terminal_unknown_ref_when_it_becomes_visible(self) -> None:
+        fixture = PublicationFixture()
+        original_get_ref = fixture.gateway.get_ref_target
+        fail_reconciliation_once = False
+
+        def get_ref(repository: str, branch_name: str) -> str | None:
+            nonlocal fail_reconciliation_once
+            if branch_name == BRANCH and fail_reconciliation_once:
+                fail_reconciliation_once = False
+                raise RuntimeError("first reconciliation unavailable")
+            return original_get_ref(repository, branch_name)
+
+        def uncertain_ref(**kwargs: object) -> None:
+            nonlocal fail_reconciliation_once
+            fixture.gateway._before_write("ref", tuple(kwargs.values()))
+            fixture.gateway.branch_target = str(kwargs["commit_sha"])
+            fail_reconciliation_once = True
+            raise PublicationWriteError(
+                "ref_transport", PublicationWriteDisposition.MAY_HAVE_BEEN_ACCEPTED
+            )
+
+        fixture.gateway.get_ref_target = get_ref
+        fixture.gateway.create_ref = uncertain_ref
+        first = fixture.publish()
+        self.assertEqual(first.branch_state, WriteState.UNKNOWN)
+        self.assertEqual(fixture.journal.records[-1].state, WriteState.UNKNOWN)
+        before = len(fixture.journal.records)
+        fixture.gateway.write_calls.clear()
+        second = fixture.publish()
+        self.assertEqual(second.error_code, "publication_recovery_required")
+        self.assertEqual(second.branch_state, WriteState.CREATED)
+        self.assertEqual(fixture.gateway.write_calls, [])
+        self.assertEqual(len(fixture.journal.records), before + 1)
+        self.assertEqual(fixture.journal.records[-1].state, WriteState.CREATED)
+
     def test_recovery_reconciles_lone_unknown_pull_without_rewriting(self) -> None:
         fixture = PublicationFixture()
         fixture.journal.fail_at = 11
@@ -1444,6 +1621,9 @@ class TestPublicationWrites(unittest.TestCase):
             ),
             "not_draft": lambda fixture: setattr(fixture.gateway, "published_draft", False),
             "wrong_author": lambda fixture: setattr(fixture.gateway, "published_author", "attacker"),
+            "fork_head_repo": lambda fixture: setattr(
+                fixture.gateway, "published_head_repository", "fork/repo"
+            ),
             "wrong_head": lambda fixture: setattr(fixture.gateway, "published_head", "f" * 40),
             "wrong_base": lambda fixture: setattr(fixture.gateway, "published_base", "release"),
             "unavailable": lambda fixture: setattr(fixture.gateway, "published_unavailable", True),
