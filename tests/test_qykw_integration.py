@@ -692,6 +692,20 @@ class TestPhaseArtifactIntegration(unittest.TestCase):
                     entry._safe_code(ProviderError(code)),
                     f"inference_{code.value}",
                 )
+        from tools.qykw.config import ConfigError
+        from tools.qykw.context import ContextError
+        from tools.qykw.domain import InferenceError, InferenceErrorCode, InferenceFailure
+        from tools.qykw.github import GitHubError
+        from tools.qykw.prompts import PromptError
+        for error, code in (
+            (InferenceError(InferenceFailure(InferenceErrorCode.CAPABILITY_UNSUPPORTED, False, False)), "inference_capability_unsupported"),
+            (ConfigError("sensitive config detail"), "analysis_config_failed"),
+            (ContextError("sensitive context detail"), "analysis_context_failed"),
+            (GitHubError("sensitive github detail"), "analysis_github_failed"),
+            (PromptError("sensitive prompt detail"), "analysis_prompt_failed"),
+        ):
+            with self.subTest(phase_error=type(error).__name__):
+                self.assertEqual(entry._safe_code(error), code)
 
     def test_provider_capability_failure_records_a_failed_terminal_run(self) -> None:
         system = ReviewSystem(fail_capabilities=True)
