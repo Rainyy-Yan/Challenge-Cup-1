@@ -649,6 +649,84 @@ class TestPatchGeneration(unittest.TestCase):
         )
         self.assertEqual(provider.calls, 1)
 
+    def test_placeholder_secret_assignments_remain_available_as_source_context(self) -> None:
+        placeholders = (
+            'token = "placeholder_token_value"\n',
+            'api_key = "your_api_key_here"\n',
+            'password = "change-me-before-use"\n',
+            'auth_token = "example-token-for-tests"\n',
+            'secret = "dummy-secret-value"\n',
+            'token = "fake-token-value"\n',
+            'api_key = "sample-api-key-value"\n',
+            'password = "changeme-before-use"\n',
+            'auth_token = "redacted-token-value"\n',
+            'secret = "xxx-token-placeholder"\n',
+        )
+        for index, content in enumerate(placeholders):
+            path = f"example-{index}.py"
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(content=content):
+                self.generate(
+                    snapshot_value=snapshot(source),
+                    subject=policy(
+                        source_tree=tree_index(
+                            SourceTreeEntry(
+                                path,
+                                "100644",
+                                "blob",
+                                git_blob_sha(content.encode()),
+                            )
+                        )
+                    ),
+                    provider=provider,
+                )
+                self.assertEqual(provider.calls, 1)
+                self.assertEqual(
+                    provider.request.payload["untrusted"]["source_files"][0][
+                        "content"
+                    ],
+                    content,
+                )
+
+    def test_high_entropy_generic_secret_assignments_still_fail_closed(self) -> None:
+        secrets = (
+            'token = "mR9!wQ2#zT7$pL4@xV8&"\n',
+            'api_key = "Y7k2N9v4Q8m3Z6p1R5t0"\n',
+            'password = "correct-horse-9-Battery!"\n',
+            'auth_token = "dG9rZW4uYWJjMTIzIT8rLQ=="\n',
+            'token = "ghp_abcdefghijklmnopqrstuvwxyz123456"\n',
+            'token = "npm_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"\n',
+            'api_key = "AKIAABCDEFGHIJKLMNOP"\n',
+            'api_key = "sk-test-but-known-prefix-1234567890"\n',
+            'secret = "-----BEGIN PRIVATE KEY-----"\n',
+        )
+        for index, content in enumerate(secrets):
+            path = f"settings-{index}.py"
+            source = changed_file(path, content=content)
+            provider = FakeInferenceProvider(
+                patch_value(path="generated.py", before="", after="x\n", create=True)
+            )
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValueError, "no_safe_source_context"):
+                    self.generate(
+                        snapshot_value=snapshot(source),
+                        subject=policy(
+                            source_tree=tree_index(
+                                SourceTreeEntry(
+                                    path,
+                                    "100644",
+                                    "blob",
+                                    git_blob_sha(content.encode()),
+                                )
+                            )
+                        ),
+                        provider=provider,
+                    )
+                self.assertEqual(provider.calls, 0)
+
     def test_source_selection_truncates_stably_with_path_only_omissions(self) -> None:
         files = tuple(
             changed_file(f"file-{index:03}.py", content=f"value={index}\n")

@@ -102,20 +102,50 @@ _MAX_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024
 _MAX_TRUSTED_SOURCE_FILES = 100
 _MAX_TRUSTED_SOURCE_CONTEXT_BYTES = 650_000
 _MAX_SOURCE_OMISSION_DETAILS = 100
-_HIGH_CONFIDENCE_SECRET = re.compile(
+_KNOWN_SECRET = re.compile(
     r"(?:"
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
     r"\bgh[pousr]_[A-Za-z0-9]{20,}\b|"
     r"\bnpm_[A-Za-z0-9]{20,}\b|"
     r"\bAKIA[A-Z0-9]{16}\b|"
+    r"\bsk-[A-Za-z0-9_-]{16,}\b"
+    r")",
+    re.IGNORECASE,
+)
+_SECRET_ASSIGNMENT = re.compile(
     r"(?:^|[^A-Za-z0-9_])_?(?:api[_-]?key|auth[_-]?token|password|secret|token)"
-    r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=~-]{16,}['\"]?|"
-    r"\bauthorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9._~+/=-]{16,}|"
-    r"^[ \t]*machine[ \t]+\S+[ \t]+login[ \t]+\S+[ \t]+password[ \t]+"
-    r"[^\s#]{8,}[ \t]*(?:#.*)?$|"
-    r"^[ \t]*password[ \t]+[^\s#]{16,}[ \t]*(?:#.*)?$"
+    r"\s*[:=]\s*(?:"
+    r"(?P<quote>['\"])(?P<quoted>[^'\"\r\n]+)(?P=quote)|"
+    r"(?P<unquoted>[^\s#;,]+)"
     r")",
     re.IGNORECASE | re.MULTILINE,
+)
+_BEARER_VALUE = re.compile(
+    r"\bauthorization\s*[:=]\s*['\"]?bearer\s+(?P<value>[^\s'\"]+)",
+    re.IGNORECASE,
+)
+_NETRC_PASSWORD = re.compile(
+    r"(?:"
+    r"^[ \t]*machine[ \t]+\S+[ \t]+login[ \t]+\S+[ \t]+password[ \t]+"
+    r"(?P<machine_value>[^\s#]{8,})[ \t]*(?:#.*)?$|"
+    r"^[ \t]*password[ \t]+(?P<line_value>[^\s#]{16,})[ \t]*(?:#.*)?$"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PLACEHOLDER_WORDS = frozenset(
+    {
+        "placeholder",
+        "example",
+        "test",
+        "tests",
+        "dummy",
+        "fake",
+        "sample",
+        "changeme",
+        "your",
+        "redacted",
+        "xxx",
+    }
 )
 _WINDOWS_RESERVED = frozenset(
     {"con", "prn", "aux", "nul", "clock$", "conin$", "conout$"}
@@ -449,7 +479,7 @@ class DeterministicChangePolicy:
             ):
                 omit(path, "invalid_source_content")
                 continue
-            if _HIGH_CONFIDENCE_SECRET.search(content):
+            if _contains_high_confidence_secret(content):
                 omit(path, "secret_content")
                 continue
             source_view = TrustedSourceFile(
@@ -661,6 +691,42 @@ def _is_credential_filename(candidate: str, credential_name: str) -> bool:
         candidate == credential_name + suffix
         for suffix in _CREDENTIAL_BACKUP_SUFFIXES
     )
+
+
+def _contains_high_confidence_secret(content: str) -> bool:
+    if _KNOWN_SECRET.search(content):
+        return True
+    for match in _SECRET_ASSIGNMENT.finditer(content):
+        value = match.group("quoted") or match.group("unquoted")
+        if _looks_like_secret_value(value):
+            return True
+    for match in _BEARER_VALUE.finditer(content):
+        if _looks_like_secret_value(match.group("value")):
+            return True
+    for match in _NETRC_PASSWORD.finditer(content):
+        value = match.group("machine_value") or match.group("line_value")
+        if _looks_like_secret_value(value, minimum_length=8):
+            return True
+    return False
+
+
+def _looks_like_secret_value(value: str, *, minimum_length: int = 16) -> bool:
+    if _KNOWN_SECRET.search(value):
+        return True
+    normalized = value.casefold()
+    words = frozenset(re.findall(r"[a-z0-9]+", normalized))
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    if words & _PLACEHOLDER_WORDS or "changeme" in compact:
+        return False
+    if len(value) < minimum_length or len(set(normalized)) < 8:
+        return False
+    character_classes = (
+        any(character.islower() for character in value),
+        any(character.isupper() for character in value),
+        any(character.isdigit() for character in value),
+        any(not character.isalnum() for character in value),
+    )
+    return sum(character_classes) >= 2
 
 
 def _validate_text(value: str, *, allow_empty: bool) -> int:
