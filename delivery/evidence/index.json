@@ -164,12 +164,12 @@
       "title": "最终 Demo 知识来源人工核对表",
       "path": "docs/demo_source_review_checklist.md",
       "status": "working",
-      "owner": "unassigned",
+      "owner": "xyh202131",
       "related_issues": [22, 23, 24],
-      "source": "data/demo_source_manifest.json",
+      "source": "data/demo_source_manifest.json and data/sources/index.json",
       "repo_commit": null,
       "visibility": "public",
-      "limitations": "当前是待填写模板；不能替代具名、具日期的人工签字记录。"
+      "limitations": "xyh202131 已于 2026-09-03 复核 20 条正式来源；仓库仅保留项目实际引用的短摘、忠实转述、定位和哈希，不重新分发完整第三方手册。"
     },
     {
       "id": "EV-G3-TECH-PDF-001",

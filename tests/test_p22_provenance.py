@@ -53,12 +53,20 @@ class TestProvenancePayload(unittest.TestCase):
 
         self.assertNotIn(excluded.id, payload["kb"])
 
-    def test_pending_legacy_verification_is_not_published(self) -> None:
-        """旧 verified 标记没有完整人工复核记录时不得对外宣称已核实。"""
+    def test_completed_human_verification_is_published(self) -> None:
+        """完整人工记录及仓库原文片段齐备后才对外发布核实状态。"""
         payload = server.session_payload(self.session_id)
+        manifest = json.loads(
+            (config.DATA / "demo_source_manifest.json").read_text(encoding="utf-8")
+        )
+        verified_ids = {
+            record["id"] for record in manifest["records"]
+            if record["review_status"] == "human_verified"
+        }
 
-        self.assertFalse(payload["kb"]["KB-004"]["verified"])
-        self.assertFalse(payload["kb"]["KB-017"]["verified"])
+        self.assertEqual(verified_ids, set(payload["kb"]))
+        self.assertTrue(all(payload["kb"][source_id]["verified"]
+                            for source_id in verified_ids))
 
 
 if __name__ == "__main__":
