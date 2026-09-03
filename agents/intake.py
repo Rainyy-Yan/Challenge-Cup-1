@@ -121,7 +121,7 @@ def rule_extract(text: str) -> dict:
 
     # 上限保护：自述里说"干了二十年"折算出三万多小时，对先验没有额外意义，
     # 反而会把先验顶到上界。截断在一个饱和值上。
-    capped = min(hours, 2000)
+    capped = min(float(hours), 2000.0)
     out["hands_on_hours"] = int(capped) if capped.is_integer() else capped
 
     m = re.search(r"(?:想|希望|打算|目标是|准备)([^。；\n]{2,40})", t)
