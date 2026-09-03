@@ -1,13 +1,14 @@
-# 领域知识个性化生成与多智能体协同决策系统（骨架版）
+# 领域知识个性化生成与多智能体协同决策系统（可运行研究原型）
 
-榜题 XH-202630 的可运行骨架。示范领域是**工业机器人现场操作与调试**。
+榜题 XH-202630 的可运行研究原型。示范领域是**工业机器人现场操作与调试**。
 
 G0–G4 的现有证据、计划路径和责任状态统一登记在
 [`delivery/evidence/INDEX.md`](delivery/evidence/INDEX.md)，命名与更新规则见同目录
 [`README.md`](delivery/evidence/README.md)。
 
-这不是成品，是一个跑得通的底座加一套约束。往上长的时候，守住下面写的几条
-设计原则，比多加两个 Agent 有用得多。
+当前原型可运行，但尚不是已完成的赛事提交：正式独立人工真值、经签字批准的
+scorecard、PPT、视频、盖章报名表和外部提交回执仍未形成。不要把规则评测、空模板
+或工作稿写成官方指标已达标。
 
 ---
 
@@ -15,47 +16,113 @@ G0–G4 的现有证据、计划路径和责任状态统一登记在
 
 不需要装任何第三方包，不需要联网，不需要 API key。
 
-```bash
-cd agentedu
+在仓库根目录按所用系统完整运行其中一块；最后一条会启动服务并持续占用当前终端。
 
+**Windows PowerShell**
+
+```powershell
+# 1. 跑一遍完整闭环，看调度时间线
+py -3 -X utf8 cli.py P-A
+py -3 -X utf8 cli.py P-C          # 换个基础更弱的学习者，路径会完全不同
+
+# 2. 跑单元测试
+py -3 -X utf8 -m unittest discover -s tests -v
+
+# 3. 跑 50 组批量评测，出三项指标
+py -3 -X utf8 -m evalkit.run_eval --n 50
+
+# 4. 红队测试：按幻觉类型分别看检出率，暴露短板
+py -3 -X utf8 -m evalkit.redteam
+
+# 5. 消融对照：分别关掉审核和辩论，看各自贡献
+$env:AGENTEDU_INJECT = '0.3'
+py -3 -X utf8 -m evalkit.run_eval --n 50 --no-audit
+py -3 -X utf8 -m evalkit.run_eval --n 50 --no-debate
+Remove-Item Env:AGENTEDU_INJECT -ErrorAction SilentlyContinue
+
+# 6. 启动唯一的在线演示入口；浏览器打开 http://127.0.0.1:8000
+py -3 -X utf8 server.py
+```
+
+**Linux/macOS POSIX shell**
+
+```bash
 # 1. 跑一遍完整闭环，看调度时间线
 python3 cli.py P-A
 python3 cli.py P-C          # 换个基础更弱的学习者，路径会完全不同
 
 # 2. 跑单元测试
-python3 -m unittest discover -s tests -v
+python3 -X utf8 -m unittest discover -s tests -v
 
 # 3. 跑 50 组批量评测，出三项指标
-python3 -m evalkit.run_eval --n 50
+python3 -X utf8 -m evalkit.run_eval --n 50
 
 # 4. 红队测试：按幻觉类型分别看检出率，暴露短板
-python3 -m evalkit.redteam
+python3 -X utf8 -m evalkit.redteam
 
 # 5. 消融对照：分别关掉审核和辩论，看各自贡献
-AGENTEDU_INJECT=0.3 python3 -m evalkit.run_eval --n 50 --no-audit
-AGENTEDU_INJECT=0.3 python3 -m evalkit.run_eval --n 50 --no-debate
+AGENTEDU_INJECT=0.3 python3 -X utf8 -m evalkit.run_eval --n 50 --no-audit
+AGENTEDU_INJECT=0.3 python3 -X utf8 -m evalkit.run_eval --n 50 --no-debate
 
-# 6. 启动唯一的在线演示入口
-python3 server.py
-# 浏览器打开 http://127.0.0.1:8000
+# 6. 启动唯一的在线演示入口；浏览器打开 http://127.0.0.1:8000
+python3 -X utf8 server.py
 ```
 
-> **第一件事请先验第 6 步。** 前后端逻辑写完了，但骨架交付时演示服务没能在
-> 沙箱里实测跑通，这是整个项目里唯一没跑过的部分。起不来先看端口占用和
-> 防火墙，代码本身只用了 `http.server`。
+> **第一件事请先验第 6 步。** 如启动失败，先检查端口占用、防火墙和本机 Python；
+> 服务只使用 `http.server`。运行记录是 G1 证据，代码存在本身不等于演示验收完成。
+
+### 正式指标评分（独立人工真值）
+
+`evalkit.run_eval` 的规则评测用于内部回归；它不能证明专业正确性或真实适配效果。
+正式 G2 指标只接受冻结的独立人工真值，并由离线评分器复算。完整的冻结、version-1
+artifact manifest/hash、双人盲评、共同有效 pair、仲裁和证据登记操作见
+[正式指标操作指南](data/evaluation/README.md)：
+
+**Windows PowerShell**
+
+```powershell
+# 空模板是刻意不完整的错误路径：预期退出码 2，仍写出 JSON/Markdown。
+$scorecardOut = Join-Path ([System.IO.Path]::GetTempPath()) ('agentedu-scorecard-' + [guid]::NewGuid())
+py -3 -X utf8 -m evalkit.formal_scorecard --truth data/evaluation/formal_truth.template.json --out $scorecardOut
+if ($LASTEXITCODE -ne 2) { throw "empty formal-truth template must be not_assessable" }
+if (-not (Test-Path (Join-Path $scorecardOut 'scorecard.json')) -or -not (Test-Path (Join-Path $scorecardOut 'scorecard.md'))) { throw "scorecard reports were not written" }
+
+# 仅在完成两名独立盲评和第三人仲裁后，使用同一命令把模板路径和临时目录替换为实际冻结真值文件与保存目录。
+```
+
+**Linux/macOS POSIX shell**
+
+```bash
+# 空模板是刻意不完整的错误路径：预期退出码 2，仍写出 JSON/Markdown。
+scorecard_out="$(mktemp -d)"
+python3 -X utf8 -m evalkit.formal_scorecard --truth data/evaluation/formal_truth.template.json --out "$scorecard_out"
+test "$?" -eq 2 && test -f "$scorecard_out/scorecard.json" && test -f "$scorecard_out/scorecard.md"
+
+# 仅在完成两名独立盲评和第三人仲裁后，使用同一命令把模板路径和临时目录替换为实际冻结真值文件与保存目录。
+```
+
+评分器对可评估的 `pass` 或 `fail` 返回退出码 0，对无效或不完整的
+`not_assessable` 返回退出码 2。其公式、保守置信区间、输入门禁与信任边界见
+[官方指标数学口径与验收](docs/官方指标数学口径与验收.md)；冻结、盲评、仲裁和
+证据登记说明见[正式指标操作指南](data/evaluation/README.md)。空模板、
+规划文件和未签字的材料均不能证明官方三项指标达标。
 
 ### 接真模型
 
-```bash
-# Windows PowerShell
+**Windows PowerShell**
+
+```powershell
 Copy-Item .env.example .env
+# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key。
+py -3 -X utf8 -m evalkit.doctor  # 先体检，六项检查，不通过别跑全流程
+```
 
-# macOS / Linux
+**Linux/macOS POSIX shell**
+
+```bash
 cp .env.example .env
-
-# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key
-
-python3 -m evalkit.doctor        # 先体检，六项检查，不通过别跑全流程
+# 然后在本机编辑 .env，分别填写 MiniMax 与 DeepSeek 的 API Key。
+python3 -X utf8 -m evalkit.doctor  # 先体检，六项检查，不通过别跑全流程
 ```
 
 程序启动时会自动读取仓库根目录 `.env`；已经存在的系统环境变量优先于 `.env`。
@@ -245,7 +312,7 @@ BKT 用 `p_S`（失误率）和 `p_G`（蒙对率）显式建模这两件事，�
 **知识库本身如果是错的，审核闸只会把错误认证为正确**。
 "幻觉率 0%"的真实含义是"生成内容与知识库一致"，**不是"内容正确"**。
 
-骨架版交付时 26 条切片里有 21 条出处是编造的占位文本，
+早期演示基线中，26 条切片里有 21 条出处是编造的占位文本，
 形如"《工业机器人操作与运维》第 4 章"，看上去毫无破绽 ——
 这比明显胡编更危险，因为它会让人误以为内容有据可查。
 
@@ -328,9 +395,8 @@ BKT 用 `p_S`（失误率）和 `p_G`（蒙对率）显式建模这两件事，�
 所以它必然接近 100%。它证明的是"实现与规则相符"，证明不了"规则本身合理"。
 
 因此在所有对外材料里，这一项一律写作 **「适配规则一致性」**，不写"适配准确率"。
-答辩时如果说成"我们的适配准确率达到 100%"，评委追问一句"你拿什么当真值"
-就会塌。`run_eval` 在这一项跑到 100% 时会主动打印这段警告，就是防止有人顺手
-把它抄进 PPT。
+因此不得将规则评测的 100% 表述为“适配准确率”。评委会追问独立真值；
+`run_eval` 在这一项跑到 100% 时会主动打印警告，防止它被误抄进 PPT。
 
 > 自动化指标验证实现与预登记规则的一致性；适配效果由人工评分支撑，两件事分开写。
 
@@ -467,7 +533,7 @@ python3 -m evalkit.factcheck_run               # 对外核实，出复核队列
 这与 `verified`（人工确认无误）是两回事 —— 出处真实只说明这句话确实印在
 那本书上，不说明那本书是对的。
 
-**但 sourced 本身已是巨大进步**：骨架版那 21 条"《工业机器人操作与运维》
+**但 sourced 本身已是巨大进步**：早期演示基线中的 21 条“《工业机器人操作与运维》
 第 3 章"是查无此书，而 sourced 的切片可以当场翻给评委看。
 `tools.ingest` 永远不写 `verified=true`，有测试盯着。
 
@@ -482,9 +548,9 @@ python3 -m evalkit.factcheck_run               # 对外核实，出复核队列
 结果注入的错误数据把已核实的 KB-004、KB-017 一起带下水 ——
 错误数据把正确数据挤出知识库，这是最糟糕的一种失败。
 
-## 五点七、从骨架版到完整版：内容采集工具
+## 五点七、从早期演示基线到可交付版本：内容采集工具
 
-骨架版和完整版之间差的是**内容**，不是代码 —— 26 条切片要扩到 300 条以上，
+早期演示基线与可交付版本之间差的是**内容**，不是代码 —— 26 条切片要扩到 300 条以上，
 47 道题要扩到 90 道以上，还要补人工标注。这些只能由懂领域、
 手上有真实资料的人来做。
 
@@ -512,7 +578,7 @@ python3 -m tools.kb_import data/incoming/*.md --apply  # 校验通过后入库
 一个像真的假出处会让所有人误以为内容有据可查，比明显编造更危险。
 
 写这个工具时发现一个真问题：规范初稿写"切片 150 到 300 字"，
-而**骨架版 26 条切片全部落在 71 到 104 字，没有一条符合我们自己写的规范**。
+而**早期演示基线的 26 条切片全部落在 71 到 104 字，没有一条符合我们自己写的规范**。
 改了阈值而不是改切片 —— 一个工业事实用中文讲清楚通常就是八九十字，
 硬凑到 150 字只能靠注水，而注水的句子会拉低证据覆盖率，
 反过来伤害幻觉检测。现在有测试盯着"阈值必须容得下现有语料"。
