@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,10 +12,17 @@ import config
 
 MANIFEST_PATH = config.DATA / "demo_source_manifest.json"
 HUMAN_REVIEW_FIELDS = ("reviewer", "reviewed_on", "conclusion", "authorization")
+SOURCE_SLICE_FIELDS = ("source_slice", "source_slice_sha256")
 
 
 class DemoSourceManifestError(ValueError):
     """The published Demo source set and its review manifest disagree."""
+
+
+def _source_slice_digest(content: bytes) -> str:
+    """Hash text content canonically so Git line-ending conversion is harmless."""
+    normalized = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def manifest_records(path: Path = MANIFEST_PATH) -> list[dict]:
@@ -61,6 +69,38 @@ def publicly_verified_source_ids(path: Path = MANIFEST_PATH) -> set[str]:
             raise DemoSourceManifestError(
                 f"{record['id']} 声称 human_verified 但缺少人工复核字段："
                 f"{', '.join(missing)}"
+            )
+        missing_slice = [
+            field for field in SOURCE_SLICE_FIELDS
+            if not isinstance(record.get(field), str) or not record[field].strip()
+        ]
+        if missing_slice:
+            raise DemoSourceManifestError(
+                f"{record['id']} 声称 human_verified 但缺少原文片段字段："
+                f"{', '.join(missing_slice)}"
+            )
+        relative_slice = Path(record["source_slice"])
+        if relative_slice.is_absolute():
+            raise DemoSourceManifestError(
+                f"{record['id']} 的原文片段路径必须位于仓库内"
+            )
+        source_slice = (config.ROOT / relative_slice).resolve()
+        try:
+            source_slice.relative_to(config.ROOT.resolve())
+        except ValueError as exc:
+            raise DemoSourceManifestError(
+                f"{record['id']} 的原文片段路径越出仓库"
+            ) from exc
+        try:
+            content = source_slice.read_bytes()
+        except OSError as exc:
+            raise DemoSourceManifestError(
+                f"{record['id']} 的原文片段无法读取：{relative_slice.as_posix()}"
+            ) from exc
+        actual_hash = _source_slice_digest(content)
+        if actual_hash != record["source_slice_sha256"]:
+            raise DemoSourceManifestError(
+                f"{record['id']} 的原文片段哈希不匹配"
             )
         verified.add(record["id"])
     return verified

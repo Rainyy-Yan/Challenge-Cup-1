@@ -37,3 +37,4 @@ temp/
 # 原始上传资料与受控暂存结果只在本机保留，未经人工复核不得随代码提交。
 data/incoming/
 data/staged/
+.firecrawl/

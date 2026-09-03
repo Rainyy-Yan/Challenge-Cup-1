@@ -69,16 +69,17 @@ class TestChunkProvenance(unittest.TestCase):
         for cid in ("KB-015", "KB-016", "KB-017", "KB-018", "KB-004"):
             self.assertTrue(self.R.is_verified(cid), f"{cid} 应标记为已核实")
 
-    def test_misattributed_chunk_is_flagged(self):
-        """出处错配的切片必须留下说明，而不是悄悄改掉。
+    def test_corrected_misattribution_keeps_audit_note(self):
+        """出处错配修正并人工复核后仍必须留下审计说明。
 
         KB-022 原稿把围栏高度与安全距离挂在一条未经核实的国标条款名下。
         内容也许合理，但把数字挂到具体标准上属于出处错配 ——
         这种错误比编造更隐蔽，因为它有一个真实存在的标准号做掩护。
         """
         c = next(x for x in self.raw if x["id"] == "KB-022")
-        self.assertFalse(c["verified"])
+        self.assertTrue(c["verified"])
         self.assertIn("出处错配", c.get("source_note", ""))
+        self.assertIn("仓库原文片段", c.get("source_note", ""))
 
     def test_every_online_demo_source_is_locatable(self):
         """在线 Demo 可暴露的知识切片不能继续指向教材占位出处。"""

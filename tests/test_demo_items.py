@@ -16,6 +16,7 @@ from orchestrator import Orchestrator, load_profile
 ROOT = Path(__file__).resolve().parents[1]
 PRETEST_PATH = ROOT / "data" / "pretest.json"
 ITEM_MANIFEST_PATH = ROOT / "data" / "demo_item_source_manifest.json"
+DEMO_MANIFEST_PATH = ROOT / "data" / "demo_source_manifest.json"
 EXCLUDED_IDS = {"Q-008", "Q-017", "Q-020", "Q-038", "Q-039", "Q-041", "Q-044"}
 
 
@@ -52,6 +53,7 @@ class TestFormalDemoItems(unittest.TestCase):
         required = {
             "id", "source_title", "version", "locator", "url", "review_status",
             "reviewer", "reviewed_on", "conclusion", "authorization",
+            "source_slice", "source_slice_sha256",
         }
         expected = {item.get("source_id") for item in self.formal_items}
         self.assertNotIn(None, expected)
@@ -69,6 +71,35 @@ class TestFormalDemoItems(unittest.TestCase):
             self.assertNotIn("占位出处", chunk.source, source_id)
             self.assertTrue(chunk.demo_eligible, source_id)
             self.assertIn(record["url"], chunk.source, source_id)
+
+    def test_formal_item_sources_use_completed_human_review_records(self):
+        records = {record["id"]: record for record in self.item_manifest["records"]}
+        for source_id in self.item_sources:
+            record = records[source_id]
+            self.assertEqual("human_verified", record["review_status"], source_id)
+            self.assertEqual("xyh202131", record["reviewer"], source_id)
+            self.assertEqual("2026-09-03", record["reviewed_on"], source_id)
+
+    def test_item_source_records_match_the_demo_source_manifest(self):
+        """两份台账共享来源时，溯源与人工复核字段不得漂移。"""
+        authoritative = {
+            record["id"]: record for record in json.loads(
+                DEMO_MANIFEST_PATH.read_text(encoding="utf-8")
+            )["records"]
+        }
+        shared_fields = {
+            "source_title", "version", "locator", "url", "review_status",
+            "reviewer", "reviewed_on", "conclusion", "authorization",
+            "source_slice", "source_slice_sha256",
+        }
+        for record in self.item_manifest["records"]:
+            source_id = record["id"]
+            self.assertIn(source_id, authoritative)
+            self.assertEqual(
+                {field: authoritative[source_id][field] for field in shared_fields},
+                {field: record[field] for field in shared_fields},
+                source_id,
+            )
 
     def test_every_formal_item_passes_the_evidence_gate(self):
         """带上 source_id 还不够；答案和选项仍必须逐题通过命题审核。"""
