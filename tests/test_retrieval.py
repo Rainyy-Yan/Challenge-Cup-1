@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from core.retrieval import Retriever
+from core.schema import Chunk
 
 
 class TestDemoOnlyLoading(unittest.TestCase):
@@ -59,6 +60,44 @@ class TestDemoOnlyLoading(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "KB-TEST.*demo_eligible.*布尔"):
                 Retriever.from_jsonl(path, demo_only=True)
+
+
+class TestDistinctiveTerms(unittest.TestCase):
+
+    @staticmethod
+    def _chunk(number: int, text: str) -> Chunk:
+        return Chunk(
+            id=f"KB-{number:03d}",
+            kp="KP-01",
+            title="测试资料",
+            source="测试来源",
+            text=text,
+        )
+
+    def test_generic_cross_word_bigram_does_not_become_distinctive_at_scale(self):
+        chunks = [
+            self._chunk(
+                1,
+                "带联锁的安全门打开时应停止机器人，并禁止自动运行。",
+            ),
+            self._chunk(2, "设备停止自动复位前必须检查现场。"),
+        ]
+        chunks.extend(
+            self._chunk(number, "停止流程与自动任务必须分别确认。")
+            for number in range(3, 12)
+        )
+        chunks.extend(
+            self._chunk(number, "机器人系统资料用于课程复习。")
+            for number in range(12, 41)
+        )
+        retriever = Retriever(chunks)
+
+        terms = retriever.distinctive_in(
+            "带联锁的安全门打开时应停止自动运行。"
+        )
+
+        self.assertIn("联锁", terms)
+        self.assertNotIn("止自", terms)
 
 
 if __name__ == "__main__":

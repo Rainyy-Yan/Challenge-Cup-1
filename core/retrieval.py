@@ -149,7 +149,10 @@ class Retriever:
         这类到处都是的字自然被排除，不用手写停用词表。
         """
         if not hasattr(self, "_distinct"):
-            cap = max(1, int(self._n * char_ratio))
+            # 语料扩大时，比例阈值不能无限放宽。否则只在一条资料里偶然
+            # 相邻的普通汉字，也会因为单字频率低于总体比例而变成“术语”。
+            # 单字上限与二元组最大文档频次联动，维持张冠李戴检查的高精度。
+            cap = min(max(1, int(self._n * char_ratio)), max_df * 3)
             self._distinct = {
                 t for t, df in self._df.items()
                 if df <= max_df and len(t) == 2

@@ -155,6 +155,28 @@ class TestCrossValidation(unittest.TestCase):
     def test_subject_extraction(self):
         self.assertIn("SRVO-005", subjects_of("报警SRVO-005含义为机器人超程"))
 
+    def test_subject_extraction_keeps_lowercase_model_suffix(self):
+        subjects = subjects_of("UR10e 最大负载")
+        self.assertIn("UR10E", subjects)
+        self.assertNotIn("UR10", subjects)
+
+    def test_subject_extraction_accepts_compact_and_spaced_models(self):
+        self.assertIn("IRC5", subjects_of("IRC5 最大电流"))
+        self.assertIn("IRB4600", subjects_of("IRB 4600 最大负载"))
+        self.assertIn("R-30IB", subjects_of("R-30iB Plus 控制器"))
+        self.assertIn("T1", subjects_of("T1 模式"))
+
+    def test_software_version_is_not_treated_as_a_hardware_subject(self):
+        self.assertEqual(set(), subjects_of("PolyScope SW5.20 软件版本"))
+
+    def test_spaced_model_numeric_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-06", "IRB 4600 最大负载为 20 千克。"),
+            self._chunk("KB-2", "KP-06", "IRB4600 最大负载为 30 千克。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
     def test_definition_conflict_is_caught_despite_low_similarity(self):
         """同一对象被赋予不同含义 —— 越严重的矛盾两条切片越不像。
 
@@ -173,12 +195,219 @@ class TestCrossValidation(unittest.TestCase):
         kinds = {f.kind for f in audit(cs, self.kps).findings}
         self.assertIn("NUMCONFLICT", kinds)
 
+    def test_paraphrased_same_metric_numeric_conflict_is_caught(self):
+        cs = [
+            self._chunk(
+                "KB-1", "KP-02",
+                "T1模式下末端法兰中心的移动速度被限制在250毫米每秒以内。"),
+            self._chunk(
+                "KB-2", "KP-02",
+                "T1模式下，末端法兰中心移动速度最高为500毫米每秒。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_numeric_range_bounds_can_coexist(self):
+        cs = [
+            self._chunk("KB-1", "KP-02", "UR30 的最大工作温度为 50 摄氏度。"),
+            self._chunk("KB-2", "KP-02", "UR30 的最小工作温度为 5 摄氏度。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertNotIn("NUMCONFLICT", kinds)
+
+    def test_equivalent_decimal_values_are_not_a_conflict(self):
+        cs = [
+            self._chunk("KB-1", "KP-09", "UR30 工具输出额定电流为 2 安培。"),
+            self._chunk("KB-2", "KP-09", "UR30 工具输出额定电流为 2.0 安培。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertNotIn("NUMCONFLICT", kinds)
+
+    def test_chinese_numeral_numeric_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-02", "T1 模式移动速度最高为二百五十毫米每秒。"),
+            self._chunk("KB-2", "KP-02", "T1 模式移动速度最高为五百毫米每秒。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_equivalent_unit_aliases_are_compared(self):
+        cs = [
+            self._chunk("KB-1", "KP-06", "UR30 最大负载为 30 千克。"),
+            self._chunk("KB-2", "KP-06", "UR30 最大负载为 35 公斤。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_length_unit_aliases_are_compared(self):
+        cs = [
+            self._chunk("KB-1", "KP-06", "UR30 最大工作范围为 100 毫米。"),
+            self._chunk("KB-2", "KP-06", "UR30 最大工作范围为 120 mm。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_negative_numeric_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-02", "UR30 最低工作温度为 -10 摄氏度。"),
+            self._chunk("KB-2", "KP-02", "UR30 最低工作温度为 -20 摄氏度。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_source_attribution_prefix_does_not_change_metric_key(self):
+        cs = [
+            self._chunk("KB-1", "KP-06", "根据 UR30 用户手册，最大负载为 30 千克。"),
+            self._chunk("KB-2", "KP-06", "UR30 用户手册规定，最大负载为 35 千克。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_numeric_range_endpoint_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-02", "UR30 工作温度范围为 -10 至 50 摄氏度。"),
+            self._chunk("KB-2", "KP-02", "UR30 工作温度范围为 -20 至 50 摄氏度。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_count_numeric_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-10", "SRVO-005 报警后重试 3 次。"),
+            self._chunk("KB-2", "KP-10", "SRVO-005 报警后重试 5 次。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_same_product_model_can_have_independent_facts(self):
+        """机型和版本是适用范围，不等于每句话都在重新定义它们。"""
+        cs = [
+            self._chunk(
+                "KB-1",
+                "KP-06",
+                "UR30 用户手册（SW5.20）表示，MoveJ 在关节空间计算运动，"
+                "各关节会同时完成各自位移。",
+            ),
+            self._chunk(
+                "KB-2",
+                "KP-09",
+                "UR30 用户手册（SW5.20）表示，通用数字输出可配置为"
+                "程序停止时自动禁用。",
+            ),
+        ]
+
+        conflicts = [
+            finding for finding in audit(cs, self.kps).findings
+            if finding.kind in ("DEFCONFLICT", "NUMCONFLICT")
+        ]
+
+        self.assertEqual([], conflicts)
+
+    def test_same_product_model_different_metrics_are_not_numeric_conflict(self):
+        cs = [
+            self._chunk(
+                "KB-1",
+                "KP-09",
+                "UR30 用户手册说明，工具数字输出的最大电流为 2 安培。",
+            ),
+            self._chunk(
+                "KB-2",
+                "KP-09",
+                "UR30 用户手册说明，控制箱数字输出的最大电流为 8 安培。",
+            ),
+        ]
+
+        conflicts = [
+            finding for finding in audit(cs, self.kps).findings
+            if finding.kind == "NUMCONFLICT"
+        ]
+
+        self.assertEqual([], conflicts)
+
+    def test_same_product_metric_numeric_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-06", "UR30 的最大负载为 30 千克。"),
+            self._chunk("KB-2", "KP-06", "UR30 的最大负载为 35 千克。"),
+        ]
+
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_multiple_quantities_do_not_pollute_later_metric_key(self):
+        cs = [
+            self._chunk(
+                "KB-1", "KP-09",
+                "UR30 额定电压为 24 伏，最大电流为 2 安培。",
+            ),
+            self._chunk("KB-2", "KP-09", "UR30 最大电流为 3 安培。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("NUMCONFLICT", kinds)
+
+    def test_distinct_model_suffixes_are_not_merged_for_numeric_conflicts(self):
+        first = self._chunk("KB-1", "KP-06", "本机型最大负载为 10 千克。", verified=True)
+        first.title = "UR10 最大负载"
+        second = self._chunk("KB-2", "KP-06", "本机型最大负载为 12.5 千克。")
+        second.title = "UR10e 最大负载"
+
+        conflicts = [
+            finding for finding in audit([first, second], self.kps).findings
+            if finding.kind == "NUMCONFLICT"
+        ]
+
+        self.assertEqual([], conflicts)
+
     def test_consistent_chunks_produce_no_conflict(self):
         cs = [self._chunk("KB-1", "KP-10", "报警SRVO-005含义为机器人超程，需按住解除按钮处理。"),
               self._chunk("KB-2", "KP-10", "报警SRVO-005含义为机器人超程，处理时应反向移出限位范围。")]
         kinds = {f.kind for f in audit(cs, self.kps).findings}
         self.assertNotIn("DEFCONFLICT", kinds)
         self.assertNotIn("NUMCONFLICT", kinds)
+
+    def test_table_alarm_definition_conflict_is_caught(self):
+        cs = [
+            self._chunk(
+                "KB-1", "KP-10",
+                "报警代码为 SRVO-005；含义为机器人超程；处理方法为反向移出限位。"),
+            self._chunk(
+                "KB-2", "KP-10",
+                "报警代码为 SRVO-005；含义为伺服放大器过载；处理方法为检查散热。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("DEFCONFLICT", kinds)
+
+    def test_possessive_definition_conflict_is_caught(self):
+        cs = [
+            self._chunk("KB-1", "KP-10", "SRVO-005 的含义为机器人超程。"),
+            self._chunk("KB-2", "KP-10", "SRVO-005 的含义为伺服放大器过载。"),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertIn("DEFCONFLICT", kinds)
+
+    def test_same_english_definition_with_different_remedies_is_not_a_conflict(self):
+        cs = [
+            self._chunk(
+                "KB-1", "KP-10",
+                "SRVO-005 means robot overtravel. Reset by moving the affected axis."),
+            self._chunk(
+                "KB-2", "KP-10",
+                "SRVO-005 means robot overtravel. Inspect the controller and restart power."),
+        ]
+        kinds = {f.kind for f in audit(cs, self.kps).findings}
+        self.assertNotIn("DEFCONFLICT", kinds)
+
+    def test_paraphrased_definition_is_never_an_auto_quarantine_error(self):
+        cs = [
+            self._chunk("KB-1", "KP-10", "SRVO-005 含义为机器人超程报警。", verified=True),
+            self._chunk("KB-2", "KP-10", "SRVO-005 含义为机器人运动超出允许范围。"),
+        ]
+        conflicts = [
+            finding for finding in audit(cs, self.kps).findings
+            if finding.kind == "DEFCONFLICT"
+        ]
+        self.assertTrue(conflicts)
+        self.assertTrue(all(finding.severity == "warn" for finding in conflicts))
 
     def test_orphan_kp_is_error(self):
         cs = [self._chunk("KB-1", "KP-999", "挂在不存在的知识点上的内容，检索永远召回不到。")]
@@ -189,6 +418,51 @@ class TestCrossValidation(unittest.TestCase):
         cs = [self._chunk("KB-1", "KP-04", "按照上述步骤完成示教之后控制器会自动解算偏移量，数值见如下表所示界面。")]
         kinds = {f.kind for f in audit(cs, self.kps).findings}
         self.assertIn("DANGLING", kinds)
+
+    def test_explicit_manual_review_marker_is_not_fake_source(self):
+        """明确标为待人工核实的来源不能被当成伪装的已核实来源。"""
+        chunk = Chunk(
+            id="KB-1",
+            kp="KP-04",
+            title="TCP 定义",
+            source="【待人工核实】厂商手册｜第 1 页",
+            text="工具中心点用于描述工具相对法兰的位姿关系。",
+            verified=False,
+        )
+
+        kinds = {f.kind for f in audit([chunk], self.kps).findings}
+
+        self.assertNotIn("FAKESOURCE", kinds)
+
+    def test_pending_words_inside_prose_are_not_a_source_status(self):
+        chunk = Chunk(
+            id="KB-1",
+            kp="KP-04",
+            title="TCP 定义",
+            source="ABB 手册（未标待核实状态）",
+            text="工具中心点用于描述工具相对法兰的位姿关系。",
+            verified=False,
+        )
+
+        kinds = {f.kind for f in audit([chunk], self.kps).findings}
+
+        self.assertIn("FAKESOURCE", kinds)
+
+    def test_malformed_hash_is_not_a_traceable_source(self):
+        chunk = Chunk(
+            id="KB-1",
+            kp="KP-04",
+            title="TCP 定义",
+            source="ABB 手册｜sha:abc",
+            text="工具中心点用于描述工具相对法兰的位姿关系。",
+            verified=False,
+        )
+
+        report = audit([chunk], self.kps)
+        kinds = {finding.kind for finding in report.findings}
+
+        self.assertIn("FAKESOURCE", kinds)
+        self.assertEqual(0, report.stats["sourced"])
 
     def test_real_kb_has_no_internal_conflict(self):
         """现有知识库不得存在库内矛盾。这条防止冲突数据被悄悄引入。"""
